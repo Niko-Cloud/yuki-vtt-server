@@ -10,10 +10,12 @@ pub mod maps;
 pub mod pictures;
 pub mod play;
 pub mod seats;
+pub mod secrets;
 pub mod snapshot;
 pub mod state;
 pub mod tables;
 pub mod tunnel;
+pub mod website;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;

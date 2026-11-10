@@ -32,8 +32,16 @@ Needs Rust 1.85 or newer.
 
 ```sh
 cargo test
-cargo run -p yuki-vtt-server -- --data ./data --origin https://your-website.example
+# Once: connect the host to your Yuki Char Maker account. It shows a code to type in the
+# website's Settings > My hosts.
+cargo run -p yuki-vtt-server -- pair --website https://your-website.example
+# Then, each game night:
+cargo run --release -p yuki-vtt-server -- --tunnel
 ```
+
+Pairing keeps the website's address, the host's key and the shared secret in the data
+folder. From then on the host trusts only that website's pages, and tells the website its
+tunnel address every minute, so the DM's invite links keep working.
 
 Add `--tunnel` to open a Cloudflare quick tunnel (it needs the
 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)

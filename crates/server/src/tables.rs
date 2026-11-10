@@ -34,6 +34,8 @@ pub fn name(text: &str, what: &str) -> Result<String> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTable {
+    /// The website's own id for the party, so the map room uses the same paths here.
+    id: Option<String>,
     name: String,
     #[serde(default = "edition")]
     edition: String,
@@ -68,7 +70,30 @@ pub async fn create(
             "This host has {MOST_TABLES} tables already: delete one first"
         )));
     }
-    let (id, invite, now) = (ids::id(), ids::secret(), ids::now());
+    let id = match body.id {
+        Some(id)
+            if !id.is_empty()
+                && id.len() <= 40
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') =>
+        {
+            id
+        }
+        Some(_) => {
+            return Err(AppError::bad(
+                "A table's id is up to 40 letters, digits and dashes",
+            ));
+        }
+        None => ids::id(),
+    };
+    let taken: i64 = db.query_row("SELECT COUNT(*) FROM tables WHERE id = ?1", [&id], |row| {
+        row.get(0)
+    })?;
+    if taken > 0 {
+        return Err(AppError::conflict(
+            "This host has a table with that id already",
+        ));
+    }
+    let (invite, now) = (ids::secret(), ids::now());
     db.execute(
         "INSERT INTO tables (id, name, edition, dm_name, invite_token, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         params![id, table_name, body.edition, dm_name, invite, now],

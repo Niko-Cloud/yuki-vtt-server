@@ -21,6 +21,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
