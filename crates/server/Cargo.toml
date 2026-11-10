@@ -1,0 +1,29 @@
+[package]
+name = "yuki-vtt-server"
+description = "Hosts a Yuki Char Maker game table on the DM's own computer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yuki-vtt-rules = { path = "../rules" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "limit"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+rand = "0.9"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.27"
+tempfile = "3"

@@ -24,6 +24,7 @@ It never receives passwords, website cookies or anything from the player's accou
 | Path | What it is |
 |---|---|
 | `crates/rules` | The table rules: dice, initiative, hit points, the map grid |
+| `crates/server` | The host itself, also the `yuki-vtt-server` program for running without a window |
 
 ## Building
 
@@ -31,7 +32,21 @@ Needs Rust 1.85 or newer.
 
 ```sh
 cargo test
+cargo run -p yuki-vtt-server -- --data ./data --origin https://your-website.example
 ```
+
+On its first start it makes the DM's key and keeps it in `data/owner-key`. It listens on
+this computer only (port 4610); players reach it through the tunnel, not the port.
+
+## How it keeps a table safe
+
+- Only pages from the paired website may call it from a browser, and the live channel
+  checks the page's origin too.
+- The DM holds the host's key. Players hold a seat token from joining; the host keeps only
+  hashes of both, so a copied database lets no one in.
+- The website signs every character it hands over, so a player can't change their sheet
+  on the way to the table.
+- Hidden tokens and hidden rolls never leave the host for players who may not see them.
 
 ## License
 
