@@ -15,7 +15,8 @@ async fn serve() -> String {
         owner_key_hash: ids::hash(KEY),
         website_secret: None,
         allowed_origins: vec![SITE.into()],
-        data_dir: std::env::temp_dir(),
+        // Its own folder, kept until the test run ends.
+        data_dir: tempfile::tempdir().unwrap().keep(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

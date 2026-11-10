@@ -4,6 +4,8 @@
 use crate::access::{self, Access, Credentials};
 use crate::error::{AppError, Result};
 use crate::ids;
+use crate::maps;
+use crate::pictures;
 use crate::snapshot::Snapshot;
 use crate::state::AppState;
 use axum::Json;
@@ -62,7 +64,6 @@ fn seats(db: &Connection, table_id: &str) -> Result<Vec<Seat>> {
 #[derive(Deserialize)]
 pub struct ViewQuery {
     // The map the DM is looking at; players always see the one the DM shows.
-    #[allow(dead_code)]
     scene: Option<String>,
 }
 
@@ -71,7 +72,7 @@ pub async fn view(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Query(_query): Query<ViewQuery>,
+    Query(query): Query<ViewQuery>,
 ) -> Result<Json<Value>> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     let db = state.db();
@@ -95,6 +96,23 @@ pub async fn view(
         },
     )?;
     let seated = seats(&db, &id)?;
+    let looking = if access.runs() {
+        query.scene.or(active_scene.clone())
+    } else {
+        active_scene.clone()
+    };
+    let mut shown = match &looking {
+        Some(scene) => maps::scene(&db, &id, scene)?,
+        None => None,
+    };
+    // Hidden tokens never leave the host for players.
+    if let Some(tokens) = shown
+        .as_mut()
+        .and_then(|scene| scene["tokens"].as_array_mut())
+        && !access.runs()
+    {
+        tokens.retain(|t| t["hidden"] != json!(true));
+    }
     let characters: Vec<Value> = seated
         .iter()
         .filter(|seat| access.seat_ids.contains(&seat.id))
@@ -106,10 +124,10 @@ pub async fn view(
         // Player characters' health is everyone's to see, as at a real table.
         "members": seated.iter().map(|seat| seat.snapshot.member(&seat.id, &seat.permissions)).collect::<Vec<_>>(),
         "encounter": encounter.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
-        "scene": Value::Null,
-        "scenes": [],
+        "scene": shown,
+        "scenes": if access.runs() { maps::list(&db, &id)? } else { vec![] },
         "activeSceneId": active_scene,
-        "assets": [],
+        "assets": pictures::list(&db, &id, access.runs())?,
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         "log": log_for(&db, &id, &access)?,
     })))

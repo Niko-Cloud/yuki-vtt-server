@@ -6,6 +6,8 @@ pub mod db;
 pub mod error;
 pub mod events;
 pub mod ids;
+pub mod maps;
+pub mod pictures;
 pub mod play;
 pub mod seats;
 pub mod snapshot;
@@ -67,6 +69,24 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/encounter/combatants/{combatant}", patch(play::set_initiative).delete(play::remove))
         .route("/tables/{id}/encounter/next", post(play::next))
         .route("/tables/{id}/encounter/previous", post(play::previous))
+        .route("/tables/{id}/scenes", post(maps::create))
+        .route("/tables/{id}/scenes/{scene}", patch(maps::update).delete(maps::remove))
+        .route("/tables/{id}/scenes/{scene}/show", post(maps::show))
+        .route(
+            "/tables/{id}/scenes/{scene}/image",
+            get(pictures::map).put(pictures::set_map).layer(DefaultBodyLimit::max(pictures::MAP_LIMIT + 1024)),
+        )
+        .route("/tables/{id}/scenes/{scene}/tokens", post(maps::add_token))
+        .route("/tables/{id}/scenes/{scene}/tokens/party", post(maps::place_party))
+        .route("/tables/{id}/scenes/{scene}/tokens/{token}", patch(maps::change_token).delete(maps::remove_token))
+        .route("/tables/{id}/scenes/{scene}/props", post(maps::add_prop))
+        .route("/tables/{id}/scenes/{scene}/props/{prop}", patch(maps::change_prop).delete(maps::remove_prop))
+        .route("/tables/{id}/scenes/{scene}/drawings", post(maps::add_drawing).delete(maps::clear_drawings))
+        .route("/tables/{id}/scenes/{scene}/drawings/{drawing}", axum::routing::delete(maps::remove_drawing))
+        .route("/tables/{id}/ping", post(maps::ping))
+        .route("/tables/{id}/assets", post(pictures::add).layer(DefaultBodyLimit::max(pictures::LIBRARY_LIMIT + 1024)))
+        .route("/tables/{id}/assets/{asset}", get(pictures::picture).delete(pictures::remove))
+        .route("/tables/{id}/handout", axum::routing::put(pictures::show).delete(pictures::hide))
         .route("/join/{invite}", get(seats::invite).post(seats::join))
         .route("/seats/{token}", get(seats::pull).put(seats::push).delete(seats::leave));
 

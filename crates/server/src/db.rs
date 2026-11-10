@@ -5,7 +5,8 @@ use rusqlite::Connection;
 use std::path::Path;
 
 // Each step brings an older file up to date; `user_version` says how far a file has come.
-const STEPS: &[&str] = &[r#"
+const STEPS: &[&str] = &[
+    r#"
     CREATE TABLE tables (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -43,7 +44,30 @@ const STEPS: &[&str] = &[r#"
         created_at INTEGER NOT NULL
     );
     CREATE INDEX log_by_table ON log(table_id, seq);
-"#];
+"#,
+    r#"
+    CREATE TABLE scenes (
+        id TEXT PRIMARY KEY,
+        table_id TEXT NOT NULL REFERENCES tables(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX scenes_by_table ON scenes(table_id, position);
+    CREATE TABLE assets (
+        id TEXT PRIMARY KEY,
+        table_id TEXT NOT NULL REFERENCES tables(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        width INTEGER NOT NULL,
+        height INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX assets_by_table ON assets(table_id, created_at);
+"#,
+];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;

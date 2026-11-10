@@ -136,6 +136,7 @@ pub async fn delete(
             .db()
             .execute("DELETE FROM tables WHERE id = ?1", [&id])?,
     )?;
+    crate::pictures::forget_table(&state, &id);
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }
