@@ -35,6 +35,11 @@ cargo test
 cargo run -p yuki-vtt-server -- --data ./data --origin https://your-website.example
 ```
 
+Add `--tunnel` to open a Cloudflare quick tunnel (it needs the
+[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+program): the host prints the public `https://....trycloudflare.com` address players reach it
+on. The address is new each time it starts.
+
 On its first start it makes the DM's key and keeps it in `data/owner-key`. It listens on
 this computer only (port 4610); players reach it through the tunnel, not the port.
 

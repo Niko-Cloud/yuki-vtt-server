@@ -13,6 +13,7 @@ pub mod seats;
 pub mod snapshot;
 pub mod state;
 pub mod tables;
+pub mod tunnel;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;

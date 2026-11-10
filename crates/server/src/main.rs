@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use yuki_vtt_server::state::{AppState, Config};
-use yuki_vtt_server::{app, db, ids};
+use yuki_vtt_server::{app, db, ids, tunnel};
 
 const HELP: &str = "yuki-vtt-server: hosts Yuki Char Maker tables on this computer
 
@@ -13,12 +13,15 @@ Options:
   --port <number>     the port on this computer (default: 4610)
   --origin <url>      a website allowed to use this host, like https://yuki.example
                       (can be given more than once; also YUKI_VTT_ORIGINS, comma separated)
+  --tunnel            open a Cloudflare quick tunnel so players anywhere can reach
+                      this host (needs the cloudflared program)
   --help              this text";
 
 struct Options {
     data: PathBuf,
     port: u16,
     origins: Vec<String>,
+    tunnel: bool,
 }
 
 fn options() -> Result<Options, String> {
@@ -26,6 +29,7 @@ fn options() -> Result<Options, String> {
         data: PathBuf::from("data"),
         port: 4610,
         origins: Vec::new(),
+        tunnel: false,
     };
     if let Ok(list) = std::env::var("YUKI_VTT_ORIGINS") {
         options.origins.extend(
@@ -46,6 +50,7 @@ fn options() -> Result<Options, String> {
                     .map_err(|_| "--port takes a number".to_string())?
             }
             "--origin" => options.origins.push(value()?),
+            "--tunnel" => options.tunnel = true,
             "--help" | "-h" => return Err(HELP.to_string()),
             other => return Err(format!("Unknown option {other}\n\n{HELP}")),
         }
@@ -126,10 +131,34 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let address = SocketAddr::from(([127, 0, 0, 1], options.port));
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!("hosting on http://{address}");
+    // Kept alive for as long as the host runs; the tunnel stops with it.
+    let _tunnel = if options.tunnel {
+        let program = tunnel::find(&options.data)
+            .ok_or("--tunnel needs cloudflared: install it, or put it in the data folder's bin")?;
+        Some(tunnel::open(program, options.port))
+    } else {
+        None
+    };
     axum::serve(listener, app(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(stopped())
         .await?;
+    tracing::info!("stopped");
     Ok(())
+}
+
+// Ctrl+C, or the system asking it to stop (a plain `kill`, a service manager, logging out).
+// Either way the host stops cleanly and takes the tunnel with it.
+async fn stopped() {
+    let interrupt = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate()).expect("a stop signal handler");
+        tokio::select! {
+            _ = interrupt => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = interrupt.await;
 }
