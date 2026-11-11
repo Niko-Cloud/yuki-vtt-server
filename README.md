@@ -52,6 +52,15 @@ on. The address is new each time it starts.
 On its first start it makes the DM's key and keeps it in `data/owner-key`. It listens on
 this computer only (port 4610); players reach it through the tunnel, not the port.
 
+## Privacy
+
+The table's data stays on the DM's computer; the website keeps only the party's name and
+invite. Players reach the host through a Cloudflare quick tunnel. The connection is
+encrypted (https), but a quick tunnel ends at Cloudflare: Cloudflare's servers decrypt the
+traffic and pass it on, so Cloudflare can see what goes through it (the map, rolls, chat,
+pictures, characters). The host sees each visitor's IP address (from Cloudflare's
+`cf-connecting-ip`) only to limit how many requests one visitor makes, and keeps no log of it.
+
 ## The window app
 
 `apps/desktop` is the same host with a small window and a tray icon, for DMs who would
