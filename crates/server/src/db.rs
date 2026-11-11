@@ -100,8 +100,8 @@ pub fn in_memory() -> rusqlite::Result<Connection> {
 fn prepare(mut connection: Connection) -> rusqlite::Result<Connection> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
-    let at: usize = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    for (i, step) in STEPS.iter().enumerate().skip(at) {
+    let at: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    for (i, step) in (0i64..).zip(STEPS).skip(at.max(0) as usize) {
         let tx = connection.transaction()?;
         tx.execute_batch(step)?;
         tx.pragma_update(None, "user_version", i + 1)?;
