@@ -67,7 +67,7 @@ impl Events {
 
 #[derive(Deserialize)]
 pub struct EventsQuery {
-    key: Option<String>,
+    pass: Option<String>,
     seat: Option<String>,
 }
 
@@ -80,7 +80,7 @@ pub async fn open(
     upgrade: WebSocketUpgrade,
 ) -> Result<Response> {
     // WebSockets skip the browser's cross-site check, so the host makes its own: only the
-    // paired website's pages may open one. (A program that sends no Origin still needs a key.)
+    // paired website's pages may open one. (A program that sends no Origin still needs a pass or a seat.)
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
     if origin.is_some_and(|origin| {
         !state
@@ -91,7 +91,7 @@ pub async fn open(
     }) {
         return Err(AppError::forbidden("This website may not use this host"));
     }
-    let credentials = Credentials::from(&headers, query.key, query.seat);
+    let credentials = Credentials::from(&headers, query.pass, query.seat);
     access::at_table(&state, &table_id, &credentials)?;
     let events = state.events.listen(&table_id);
     Ok(upgrade.on_upgrade(move |socket| stream(socket, events)))

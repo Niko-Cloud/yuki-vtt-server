@@ -147,7 +147,7 @@ pub async fn set_map(
 
 #[derive(Deserialize)]
 pub struct Seen {
-    key: Option<String>,
+    pass: Option<String>,
     seat: Option<String>,
 }
 
@@ -161,7 +161,7 @@ pub async fn map(
     access::at_table(
         &state,
         &id,
-        &Credentials::from(&headers, seen.key, seen.seat),
+        &Credentials::from(&headers, seen.pass, seen.seat),
     )?;
     let picture = maps::load(&state.db(), &id, &scene)?
         .image
@@ -270,7 +270,7 @@ pub async fn picture(
     access::at_table(
         &state,
         &id,
-        &Credentials::from(&headers, seen.key, seen.seat),
+        &Credentials::from(&headers, seen.pass, seen.seat),
     )?;
     let mime: String = state
         .db()

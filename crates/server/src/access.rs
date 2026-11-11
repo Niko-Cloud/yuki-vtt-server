@@ -5,10 +5,15 @@ use crate::error::{AppError, Result};
 use crate::ids;
 use crate::state::AppState;
 use axum::http::HeaderMap;
+use hmac::{Hmac, Mac};
 use rusqlite::OptionalExtension;
 use serde::Serialize;
+use sha2::Sha256;
 
 pub const PERMISSIONS: [&str; 4] = ["move-own", "move-any", "tokens", "draw"];
+
+/// How long a media pass lets the DM's pages load pictures and the live channel.
+pub const MEDIA_PASS_SECONDS: i64 = 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -40,15 +45,18 @@ impl Access {
 }
 
 /// The credentials a request brought. Pictures and the live channel can't send headers, so
-/// they may come in the query as `?key=` or `?seat=`.
+/// they may come in the query: a player's `?seat=`, or the DM's `?pass=`, a media pass that
+/// runs out, since addresses end up in logs and the browser's history and the DM's key must
+/// not.
 #[derive(Debug, Default, Clone)]
 pub struct Credentials {
     pub key: Option<String>,
     pub seat: Option<String>,
+    pub pass: Option<String>,
 }
 
 impl Credentials {
-    pub fn from(headers: &HeaderMap, key: Option<String>, seat: Option<String>) -> Self {
+    pub fn from(headers: &HeaderMap, pass: Option<String>, seat: Option<String>) -> Self {
         let header = |name: &str| {
             headers
                 .get(name)
@@ -58,8 +66,9 @@ impl Credentials {
         let bearer =
             header("authorization").and_then(|v| v.strip_prefix("Bearer ").map(str::to_string));
         Self {
-            key: bearer.or(key),
+            key: bearer,
             seat: header("x-seat-token").or(seat),
+            pass,
         }
     }
 
@@ -68,6 +77,35 @@ impl Credentials {
             .as_deref()
             .is_some_and(|key| ids::hash(key) == state.config.owner_key_hash)
     }
+}
+
+// Signed with the DM key's hash, so a pass is good for one table on this host only, and
+// changing the key ends every pass.
+fn media_mac(state: &AppState, table_id: &str, expires: i64) -> Hmac<Sha256> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(state.config.owner_key_hash.as_bytes())
+        .expect("any key length works");
+    mac.update(format!("media:{table_id}:{expires}").as_bytes());
+    mac
+}
+
+/// A media pass for one table: "<expires>.<signature>", and when it runs out (milliseconds).
+pub fn media_pass(state: &AppState, table_id: &str) -> (String, i64) {
+    let expires = ids::now() + MEDIA_PASS_SECONDS * 1000;
+    let signature = media_mac(state, table_id, expires).finalize().into_bytes();
+    (format!("{expires}.{}", hex::encode(signature)), expires)
+}
+
+fn is_media_pass(state: &AppState, table_id: &str, pass: &str) -> bool {
+    let Some((expires, signature)) = pass.split_once('.') else {
+        return false;
+    };
+    let (Ok(expires), Ok(signature)) = (expires.parse::<i64>(), hex::decode(signature)) else {
+        return false;
+    };
+    expires > ids::now()
+        && media_mac(state, table_id, expires)
+            .verify_slice(&signature)
+            .is_ok()
 }
 
 /// Only the DM: making, renaming and deleting tables, roles, bans, the invite.
@@ -94,7 +132,9 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
         )
         .optional()?
         .ok_or_else(missing)?;
-    if credentials.is_owner(state) {
+    let pass = credentials.pass.as_deref();
+    if credentials.is_owner(state) || pass.is_some_and(|pass| is_media_pass(state, table_id, pass))
+    {
         return Ok(Access {
             role: Role::Dm,
             name: dm_name,

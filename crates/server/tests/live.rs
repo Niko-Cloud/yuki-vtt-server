@@ -43,13 +43,27 @@ async fn new_table(client: &reqwest_like::Client, host: &str) -> String {
         .to_string()
 }
 
+// The DM's pages open the channel with a media pass, never the DM's key.
+async fn media_pass(client: &reqwest_like::Client, host: &str, table: &str) -> String {
+    client
+        .post(
+            &format!("http://{host}/api/tables/{table}/media-token"),
+            json!({}),
+        )
+        .await["pass"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 #[tokio::test]
 async fn tells_everyone_at_the_table_when_something_changes() {
     let host = serve().await;
     let client = reqwest_like::Client::new(KEY);
     let table = new_table(&client, &host).await;
+    let pass = media_pass(&client, &host, &table).await;
 
-    let mut request = format!("ws://{host}/api/tables/{table}/events?key={KEY}")
+    let mut request = format!("ws://{host}/api/tables/{table}/events?pass={pass}")
         .into_client_request()
         .unwrap();
     request
@@ -79,8 +93,9 @@ async fn refuses_other_websites_and_strangers() {
     let host = serve().await;
     let client = reqwest_like::Client::new(KEY);
     let table = new_table(&client, &host).await;
+    let pass = media_pass(&client, &host, &table).await;
 
-    let mut request = format!("ws://{host}/api/tables/{table}/events?key={KEY}")
+    let mut request = format!("ws://{host}/api/tables/{table}/events?pass={pass}")
         .into_client_request()
         .unwrap();
     request
@@ -92,6 +107,13 @@ async fn refuses_other_websites_and_strangers() {
         .into_client_request()
         .unwrap();
     assert!(tokio_tungstenite::connect_async(stranger).await.is_err());
+
+    // The DM's key in the address is no longer taken.
+    let mut keyed = format!("ws://{host}/api/tables/{table}/events?key={KEY}")
+        .into_client_request()
+        .unwrap();
+    keyed.headers_mut().insert("origin", SITE.parse().unwrap());
+    assert!(tokio_tungstenite::connect_async(keyed).await.is_err());
 }
 
 // Just enough of an HTTP client for these tests, on the same stack as the server.

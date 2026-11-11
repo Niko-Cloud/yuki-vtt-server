@@ -181,6 +181,31 @@ pub async fn renew_invite(
     Ok(Json(json!({ "inviteToken": invite })))
 }
 
+/// `POST /api/tables/{id}/media-token`: a pass for the DM's pages to load this table's
+/// pictures and live channel by address, where no header can go. It runs out in an hour.
+pub async fn media_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
+    access::owner(&state, &credentials(&headers))?;
+    let known: Option<String> = state
+        .db()
+        .query_row("SELECT id FROM tables WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    if known.is_none() {
+        return Err(AppError::not_found(format!("No table with id {id}")));
+    }
+    let (pass, expires) = access::media_pass(&state, &id);
+    Ok(Json(json!({
+        "pass": pass,
+        "expiresAt": ids::iso(expires),
+        "expiresInSeconds": access::MEDIA_PASS_SECONDS,
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct Lock {
     locked: bool,

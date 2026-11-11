@@ -63,6 +63,7 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/events", get(events::open))
         .route("/tables/{id}/party", get(tables::party))
         .route("/tables/{id}/invite", post(tables::renew_invite))
+        .route("/tables/{id}/media-token", post(tables::media_token))
         .route("/tables/{id}/lock", patch(tables::lock))
         .route("/tables/{id}/log", post(play::post))
         .route("/tables/{id}/log/{entry}/reveal", post(play::reveal))
