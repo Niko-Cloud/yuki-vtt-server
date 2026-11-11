@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yuki VTT Server</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <header class="head">
+        <img src="icon.png" alt="" width="40" height="40" />
+        <div>
+          <h1>Yuki VTT Server</h1>
+          <p class="muted">Hosts your tables on this computer</p>
+        </div>
+      </header>
+
+      <section class="card" aria-live="polite">
+        <div class="state">
+          <span id="dot" class="dot"></span>
+          <div>
+            <strong id="state-title">Checking...</strong>
+            <p id="state-note" class="muted"></p>
+          </div>
+        </div>
+        <button id="toggle" type="button" class="button button--main" disabled>Start hosting</button>
+        <p id="problem" class="problem" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>Your account</h2>
+        <div id="paired" hidden>
+          <p>Connected to <strong id="website"></strong></p>
+          <button id="unpair" type="button" class="link">Disconnect</button>
+        </div>
+        <form id="pair-form" hidden>
+          <p class="muted">Connect this computer to your Yuki Char Maker account, once.</p>
+          <label>
+            <span>Website</span>
+            <input id="pair-website" type="url" placeholder="https://your-yuki-site.example" required />
+          </label>
+          <label>
+            <span>Name for this computer</span>
+            <input id="pair-name" type="text" maxlength="60" placeholder="My laptop" />
+          </label>
+          <button type="submit" class="button">Connect</button>
+        </form>
+        <div id="pairing" hidden>
+          <p>On the website, open <strong>Settings &gt; My hosts</strong> and type this code:</p>
+          <p id="code" class="code">....-....</p>
+          <p class="muted">Waiting for you to type it. The code works for 10 minutes.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Tables on this computer</h2>
+        <ul id="tables" class="tables"></ul>
+        <p id="no-tables" class="muted" hidden>
+          None yet. On the website, make a party and pick this computer under "Runs on".
+        </p>
+      </section>
+
+      <footer class="foot">
+        <label class="check">
+          <input id="start-on-open" type="checkbox" />
+          <span>Start hosting when this app opens</span>
+        </label>
+        <button id="folder" type="button" class="link">Open the data folder</button>
+        <p id="tray-note" class="muted"></p>
+        <p id="version" class="muted"></p>
+      </footer>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

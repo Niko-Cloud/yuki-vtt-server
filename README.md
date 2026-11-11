@@ -25,6 +25,7 @@ It never receives passwords, website cookies or anything from the player's accou
 |---|---|
 | `crates/rules` | The table rules: dice, initiative, hit points, the map grid |
 | `crates/server` | The host itself, also the `yuki-vtt-server` program for running without a window |
+| `apps/desktop` | The window and tray app (Tauri) that starts and stops the host |
 
 ## Building
 
@@ -50,6 +51,27 @@ on. The address is new each time it starts.
 
 On its first start it makes the DM's key and keeps it in `data/owner-key`. It listens on
 this computer only (port 4610); players reach it through the tunnel, not the port.
+
+## The window app
+
+`apps/desktop` is the same host with a small window and a tray icon, for DMs who would
+rather not use a terminal:
+
+- **Connect** to your account with the code it shows (the same pairing as above).
+- **Start hosting** and **Stop hosting**, from the window or the tray.
+- It gets the cloudflared program by itself on the first start.
+- Closing the window keeps it running in the tray; **Quit** in the tray menu stops hosting
+  and closes it. Opening the app again shows the one already running.
+
+```sh
+cargo run -p yuki-vtt-desktop                      # run it
+cargo install tauri-cli --version '^2' --locked    # once, to make installers
+cd apps/desktop && cargo tauri build               # the installer for this system
+```
+
+On Linux the tray icon needs `libayatana-appindicator` (or `libappindicator`), and a desktop
+that shows tray icons. Without them the app still works from its window, which then
+minimizes when closed.
 
 ## How it keeps a table safe
 

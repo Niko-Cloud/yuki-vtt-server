@@ -3,3 +3,6 @@
 node_modules
 *.db
 *.db-*
+
+# Tauri writes its schemas here on every build.
+apps/desktop/gen
