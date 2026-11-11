@@ -606,10 +606,18 @@ pub struct TokenChange {
     size: Option<u32>,
     color: Option<String>,
     /// A picture's id, or null to take the picture off.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     image_id: Option<Value>,
     hidden: Option<bool>,
     locked: Option<bool>,
+}
+
+// A field that was sent, null included: Option alone reads null as not sent, so "take the
+// picture off" would change nothing. A field left out stays None.
+fn present<'de, D: serde::Deserializer<'de>>(
+    sent: D,
+) -> std::result::Result<Option<Value>, D::Error> {
+    Value::deserialize(sent).map(Some)
 }
 
 /// Moving takes "move-own" for your own character's token, "move-any" for the rest; changing a

@@ -430,6 +430,18 @@ async fn keeps_a_picture_library_and_shows_handouts() {
         Some(json!({ "name": "Owl", "x": 1, "y": 1, "imageId": portrait })),
     )
     .await;
+    // Null takes the picture off again.
+    let owl = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let owl_at = format!("/tables/{}/scenes/{cave}/tokens/{owl}", t.id);
+    let off = json!({ "imageId": null });
+    call(&app, As::Seat(&token), "PATCH", &owl_at, Some(off)).await;
+    let tokens = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    assert_eq!(tokens[0].get("imageId"), None);
+    let back = json!({ "imageId": portrait });
+    call(&app, As::Seat(&token), "PATCH", &owl_at, Some(back)).await;
     // Handouts reach players only when shown.
     let kinds: Vec<Value> = view(&app, As::Seat(&token), &t).await["assets"]
         .as_array()
