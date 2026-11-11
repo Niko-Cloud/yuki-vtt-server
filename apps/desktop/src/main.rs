@@ -268,8 +268,8 @@ fn computer_name() -> String {
     name.trim().chars().take(60).collect()
 }
 
-/// What a `yukivtt://` link asks for, from the website's buttons. Starting needs nothing more;
-/// pairing waits for the DM to say yes in the window, since any page could open such a link.
+/// What a `yukivtt://` link asks for, from the website's buttons. Any page could open such a
+/// link, so the app asks the DM first: pairing in the window, starting in a small dialog.
 fn handle_link(app: &AppHandle, url: &str) {
     let Some(link) = website::read_link(url) else {
         tracing::warn!("ignored a link the app doesn't know: {url}");
@@ -294,7 +294,21 @@ fn handle_link(app: &AppHandle, url: &str) {
             }
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                if start(&app).await.is_err() {
+                if app.state::<Shared>().running.lock().await.is_some() {
+                    return;
+                }
+                let ask = app
+                    .dialog()
+                    .message("A website asks to start hosting your tables on this computer.")
+                    .title("Start hosting?")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Start hosting".into(),
+                        "Not now".into(),
+                    ));
+                let yes = tauri::async_runtime::spawn_blocking(move || ask.blocking_show())
+                    .await
+                    .unwrap_or(false);
+                if yes && start(&app).await.is_err() {
                     show_window(&app);
                 }
             });
