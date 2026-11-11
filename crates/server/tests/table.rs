@@ -550,3 +550,32 @@ async fn gives_the_dm_view_every_character_as_it_is_now() {
     assert_eq!(party["members"], json!([]));
     assert_eq!(party["banned"], json!([{ "id": "user-1", "name": "Tam" }]));
 }
+
+#[tokio::test]
+async fn slows_down_someone_hammering_the_invite() {
+    let app = host();
+    let t = table(&app).await;
+    let mut refused = None;
+    for _ in 0..25 {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/join/{}", t.invite))
+            .header("content-type", "application/json")
+            // Through the tunnel: Cloudflare says who it is.
+            .header("cf-connecting-ip", "203.0.113.9")
+            // Unsigned, so none of them takes a seat.
+            .body(Body::from(
+                json!({ "snapshot": "{}", "signature": "" }).to_string(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            refused = Some(response);
+            break;
+        }
+    }
+    let refused = refused.expect("the host to say no before 25 joins");
+    assert_eq!(refused.headers()["retry-after"], "60");
+    // Someone else still gets in.
+    join(&app, &t.invite, "Tam", "user-1").await;
+}

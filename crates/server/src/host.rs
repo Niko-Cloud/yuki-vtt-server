@@ -103,11 +103,15 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
     let (stop, stopped) = oneshot::channel();
     let router = app(state.clone());
     let server = tokio::spawn(async move {
-        let served = axum::serve(listener, router)
-            .with_graceful_shutdown(async {
-                let _ = stopped.await;
-            })
-            .await;
+        // The visitor's address, for the rate limits.
+        let served = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stopped.await;
+        })
+        .await;
         if let Err(error) = served {
             tracing::error!("the host stopped by itself: {error}");
         }

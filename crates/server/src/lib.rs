@@ -8,6 +8,7 @@ pub mod error;
 pub mod events;
 pub mod host;
 pub mod ids;
+pub mod limits;
 pub mod maps;
 pub mod pictures;
 pub mod play;
@@ -98,6 +99,10 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .nest("/api", api)
+        .layer(axum::middleware::from_fn_with_state(
+            limits::Limits::default(),
+            limits::check,
+        ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(cors)
         .with_state(state)
