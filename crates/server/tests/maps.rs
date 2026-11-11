@@ -530,3 +530,34 @@ async fn pings_need_a_map_and_the_right_to_draw() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn sends_a_map_saved_before_fog_with_fog_off() {
+    let data = tempfile::tempdir().unwrap();
+    let config = yuki_vtt_server::state::Config {
+        owner_key_hash: yuki_vtt_server::ids::hash(KEY),
+        website_secret: Some(SECRET.to_vec()),
+        allowed_origins: vec![SITE.into()],
+        data_dir: data.path().to_path_buf(),
+    };
+    let db = yuki_vtt_server::db::open(&data.path().join("tables.db")).unwrap();
+    let app = yuki_vtt_server::app(yuki_vtt_server::state::AppState::new(db, config));
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    // The map as an older host saved it: no fog, walls, lights or notes.
+    let old = json!({
+        "width": 700, "height": 490, "image": null, "tokens": [], "props": [], "drawings": [],
+        "grid": { "size": 70, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true },
+    });
+    yuki_vtt_server::db::open(&data.path().join("tables.db"))
+        .unwrap()
+        .execute(
+            "UPDATE scenes SET data = ?1 WHERE id = ?2",
+            [old.to_string(), cave],
+        )
+        .unwrap();
+    let seen = view(&app, As::Dm, &t).await;
+    assert_eq!(seen["scene"]["fog"]["mode"], "off");
+    assert_eq!(seen["scene"]["walls"], json!([]));
+    assert_eq!(seen["scene"]["notes"], json!([]));
+}

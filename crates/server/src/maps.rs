@@ -353,7 +353,8 @@ pub fn scene(db: &Connection, table_id: &str, scene_id: &str) -> Result<Option<V
     let Some((name, data)) = row else {
         return Ok(None);
     };
-    let mut scene: Value = serde_json::from_str(&data)?;
+    // Read as a map, so one saved before newer parts (fog, walls) gets them as defaults.
+    let mut scene = serde_json::to_value(serde_json::from_str::<TableMap>(&data)?)?;
     scene["id"] = json!(scene_id);
     scene["name"] = json!(name);
     Ok(Some(scene))
