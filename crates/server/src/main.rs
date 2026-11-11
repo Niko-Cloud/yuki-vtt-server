@@ -1,10 +1,8 @@
 //! The headless host: `yuki-vtt-server`, for running without the window (on a home server,
 //! say). It listens on this computer only; the tunnel is what lets players in.
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use yuki_vtt_server::state::{AppState, Config};
-use yuki_vtt_server::{app, db, ids, secrets, tunnel, website};
+use std::path::PathBuf;
+use yuki_vtt_server::{cloudflared, host, tunnel, website};
 
 const HELP: &str = "yuki-vtt-server: hosts Yuki Char Maker tables on this computer
 
@@ -15,7 +13,7 @@ Options:
   --data <folder>     where tables and pictures are kept (default: ./data)
   --port <number>     the port on this computer (default: 4610)
   --tunnel            open a Cloudflare quick tunnel so players anywhere can reach
-                      this host (needs the cloudflared program)
+                      this host (cloudflared is downloaded on first use)
   --origin <url>      another website allowed to use this host; the paired one always is
                       (can be given more than once; also YUKI_VTT_ORIGINS, comma separated)
   --website <url>     pair: the Yuki Char Maker website, like https://yuki.example
@@ -100,24 +98,12 @@ async fn main() {
     }
 }
 
-// The DM's key is made on the first start and kept; the website gets it when pairing.
-fn owner_key(data: &Path) -> std::io::Result<String> {
-    let path = data.join("owner-key");
-    if let Some(key) = secrets::read(&path)? {
-        return Ok(key);
-    }
-    let key = ids::secret();
-    secrets::write(&path, &key)?;
-    println!("A new DM key was made and saved in {}", path.display());
-    Ok(key)
-}
-
 async fn pair(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let site = options
         .website
         .ok_or("pair needs --website, like --website https://yuki.example")?;
     std::fs::create_dir_all(&options.data)?;
-    let key = owner_key(&options.data)?;
+    let key = host::owner_key(&options.data)?;
     let name = options
         .name
         .or_else(|| std::env::var("HOSTNAME").ok())
@@ -138,54 +124,20 @@ async fn pair(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run(mut options: Options) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(&options.data)?;
-    let owner_key = owner_key(&options.data)?;
-    let paired = website::load(&options.data)?;
-    let website_secret =
-        secrets::read(&options.data.join("website-secret"))?.map(String::into_bytes);
-    match &paired {
-        // The paired website's pages may always use this host.
-        Some((site, _)) => options.origins.push(site.clone()),
-        None => tracing::warn!("not paired with a website yet: run `yuki-vtt-server pair`"),
+async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
+    if options.tunnel && tunnel::find(&options.data).is_none() {
+        println!("Getting cloudflared for the tunnel...");
+        cloudflared::download(&options.data).await?;
     }
-    if website_secret.is_none() {
-        tracing::warn!("character snapshots are taken unsigned until the host is paired");
-    }
-    if options.origins.is_empty() {
-        tracing::warn!("no website's pages can use this host until it is paired");
-    }
-    let connection = db::open(&options.data.join("tables.db"))?;
-    let state = AppState::new(
-        connection,
-        Config {
-            owner_key_hash: ids::hash(&owner_key),
-            website_secret,
-            allowed_origins: options.origins,
-            data_dir: options.data.clone(),
-        },
-    );
-    // This computer only: players come in through the tunnel, never straight to the port.
-    let address = SocketAddr::from(([127, 0, 0, 1], options.port));
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    tracing::info!("hosting on http://{address}");
-    // Kept alive for as long as the host runs; the tunnel stops with it.
-    let _tunnel = if options.tunnel {
-        let program = tunnel::find(&options.data)
-            .ok_or("--tunnel needs cloudflared: install it, or put it in the data folder's bin")?;
-        let address = tunnel::open(program, options.port);
-        // The website learns each new address, so the DM's invite links keep working.
-        if let Some((site, key)) = paired {
-            website::check_in(site, key, address.clone());
-        }
-        Some(address)
-    } else {
-        None
-    };
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(stopped())
-        .await?;
-    tracing::info!("stopped");
+    let running = host::start(host::Options {
+        data: options.data,
+        port: options.port,
+        tunnel: options.tunnel,
+        origins: options.origins,
+    })
+    .await?;
+    stopped().await;
+    running.stop().await;
     Ok(())
 }
 

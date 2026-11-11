@@ -22,6 +22,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+flate2 = "1"
+tar = "0.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

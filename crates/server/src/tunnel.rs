@@ -43,9 +43,14 @@ pub fn address_in(line: &str) -> Option<String> {
 
 /// Keeps a tunnel open to `port` for as long as the host runs, starting it again if it stops.
 /// The receiver always holds the address that works now, or `None` while there is none.
-pub fn open(program: PathBuf, port: u16) -> watch::Receiver<Option<String>> {
+///
+/// Stopping the returned task closes the tunnel: cloudflared goes with it.
+pub fn open(
+    program: PathBuf,
+    port: u16,
+) -> (watch::Receiver<Option<String>>, tokio::task::JoinHandle<()>) {
     let (address, receiver) = watch::channel(None);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut wait = Duration::from_secs(2);
         loop {
             match run(&program, port, &address).await {
@@ -58,7 +63,7 @@ pub fn open(program: PathBuf, port: u16) -> watch::Receiver<Option<String>> {
             wait = (wait * 2).min(Duration::from_secs(60));
         }
     });
-    receiver
+    (receiver, task)
 }
 
 async fn run(

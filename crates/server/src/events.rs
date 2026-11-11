@@ -51,6 +51,15 @@ impl Events {
             .send(json!({ "type": "ping", "ping": ping }).to_string());
     }
 
+    /// How many screens have a table open right now, over all tables.
+    pub fn listeners(&self) -> usize {
+        let channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
+        channels
+            .values()
+            .map(|sender| sender.receiver_count())
+            .sum()
+    }
+
     pub fn listen(&self, table_id: &str) -> broadcast::Receiver<String> {
         self.channel(table_id).subscribe()
     }

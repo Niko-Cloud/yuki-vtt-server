@@ -136,7 +136,11 @@ pub fn load(data_dir: &Path) -> std::io::Result<Option<(String, String)>> {
 
 /// Tells the website where players reach the host: as soon as the tunnel has an address, and
 /// every minute after, so the website shows the host as on.
-pub fn check_in(website: String, host_key: String, mut address: watch::Receiver<Option<String>>) {
+pub fn check_in(
+    website: String,
+    host_key: String,
+    mut address: watch::Receiver<Option<String>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let http = client();
         loop {
@@ -160,7 +164,7 @@ pub fn check_in(website: String, host_key: String, mut address: watch::Receiver<
             // A new address goes at once; otherwise the next check-in.
             let _ = tokio::time::timeout(CHECK_IN, address.changed()).await;
         }
-    });
+    })
 }
 
 #[cfg(test)]
