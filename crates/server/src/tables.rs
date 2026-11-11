@@ -424,10 +424,10 @@ pub async fn party(
 ) -> Result<Json<Value>> {
     let access = access::runner(&state, &id, &credentials(&headers))?;
     let db = state.db();
-    let (locked, banned): (bool, String) = db.query_row(
-        "SELECT locked, banned FROM tables WHERE id = ?1",
+    let (locked, banned, ask_to_join): (bool, String, bool) = db.query_row(
+        "SELECT locked, banned, ask_to_join FROM tables WHERE id = ?1",
         [&id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let mut rows =
         db.prepare("SELECT id, role, snapshot FROM seats WHERE table_id = ?1 ORDER BY created_at")?;
@@ -453,9 +453,15 @@ pub async fn party(
             "member": snapshot.dm_member(),
         }));
     }
-    Ok(Json(
-        json!({ "you": access.role, "locked": locked, "members": members, "banned": bans(&banned)? }),
-    ))
+    Ok(Json(json!({
+        "you": access.role,
+        "locked": locked,
+        // Newcomers wait for the DM to let them in, and these are waiting.
+        "askToJoin": ask_to_join,
+        "requests": crate::requests::waiting(&db, &id)?,
+        "members": members,
+        "banned": bans(&banned)?,
+    })))
 }
 
 fn found(changed: usize) -> Result<()> {

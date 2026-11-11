@@ -130,6 +130,8 @@ pub async fn view(
         "assets": pictures::list(&db, &id, access.runs())?,
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         "log": log_for(&db, &id, &access)?,
+        // Waiting to join: for whoever runs the table, to let in from the map room.
+        "requests": if access.runs() { crate::requests::waiting(&db, &id)? } else { vec![] },
     })))
 }
 

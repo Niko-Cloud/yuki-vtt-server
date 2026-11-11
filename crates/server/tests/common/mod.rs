@@ -102,6 +102,16 @@ pub async fn table(app: &Router) -> Table {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
+    let id = made["id"].as_str().unwrap();
+    // These tests seat players at once; asking to join has its own tests.
+    call(
+        app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{id}/ask"),
+        Some(json!({ "askToJoin": false })),
+    )
+    .await;
     Table {
         id: made["id"].as_str().unwrap().into(),
         invite: made["inviteToken"].as_str().unwrap().into(),

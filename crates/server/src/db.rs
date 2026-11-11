@@ -67,6 +67,18 @@ const STEPS: &[&str] = &[
     );
     CREATE INDEX assets_by_table ON assets(table_id, created_at);
 "#,
+    r#"
+    ALTER TABLE tables ADD COLUMN ask_to_join INTEGER NOT NULL DEFAULT 1;
+    CREATE TABLE join_requests (
+        id TEXT PRIMARY KEY,
+        table_id TEXT NOT NULL REFERENCES tables(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        player_id TEXT,
+        snapshot TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX join_requests_by_table ON join_requests(table_id, created_at);
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

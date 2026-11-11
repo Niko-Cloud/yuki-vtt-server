@@ -13,6 +13,7 @@ pub mod limits;
 pub mod maps;
 pub mod pictures;
 pub mod play;
+pub mod requests;
 pub mod seats;
 pub mod secrets;
 pub mod snapshot;
@@ -95,6 +96,9 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/assets", post(pictures::add).layer(DefaultBodyLimit::max(pictures::LIBRARY_LIMIT + 1024)))
         .route("/tables/{id}/assets/{asset}", get(pictures::picture).delete(pictures::remove))
         .route("/tables/{id}/handout", axum::routing::put(pictures::show).delete(pictures::hide))
+        .route("/tables/{id}/ask", patch(requests::set_asking))
+        .route("/tables/{id}/requests/{request}/{choice}", post(requests::decide))
+        .route("/seats/{token}/status", get(requests::status))
         .route("/join/{invite}", get(seats::invite).post(seats::join))
         .route("/seats/{token}", get(seats::pull).put(seats::push).delete(seats::leave));
 

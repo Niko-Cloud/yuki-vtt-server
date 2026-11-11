@@ -4,6 +4,7 @@
 
 use crate::error::{AppError, Result};
 use crate::ids;
+use crate::requests;
 use crate::snapshot::{self, Signed, Snapshot};
 use crate::state::AppState;
 use axum::Json;
@@ -22,12 +23,13 @@ struct Invited {
     edition: String,
     dm_name: String,
     locked: bool,
+    ask_to_join: bool,
     banned: Vec<crate::tables::Banned>,
 }
 
 fn invited(db: &Connection, invite: &str) -> Result<Invited> {
     db.query_row(
-        "SELECT id, name, edition, dm_name, locked, banned FROM tables WHERE invite_token = ?1",
+        "SELECT id, name, edition, dm_name, locked, banned, ask_to_join FROM tables WHERE invite_token = ?1",
         [invite],
         |row| {
             Ok((
@@ -37,18 +39,20 @@ fn invited(db: &Connection, invite: &str) -> Result<Invited> {
                 row.get(3)?,
                 row.get(4)?,
                 row.get::<_, String>(5)?,
+                row.get(6)?,
             ))
         },
     )
     .optional()?
     .map(
-        |(id, name, edition, dm_name, locked, banned)| -> Result<Invited> {
+        |(id, name, edition, dm_name, locked, banned, ask_to_join)| -> Result<Invited> {
             Ok(Invited {
                 id,
                 name,
                 edition,
                 dm_name,
                 locked,
+                ask_to_join,
                 banned: crate::tables::bans(&banned)?,
             })
         },
@@ -111,6 +115,19 @@ pub async fn join(
             )));
         }
         let (seat_id, token, now) = (ids::id(), ids::secret(), ids::now());
+        // The DM lets each newcomer in by hand: the player waits with their token, and only
+        // gets a seat once the DM says yes.
+        if table.ask_to_join {
+            requests::ask(&db, &table.id, &seat_id, &token, &snapshot)?;
+            drop(db);
+            state.events.changed(&table.id);
+            return Ok((
+                StatusCode::CREATED,
+                Json(
+                    json!({ "partyId": table.id, "seatId": seat_id, "seatToken": token, "waiting": true }),
+                ),
+            ));
+        }
         db.execute(
             "INSERT INTO seats (id, table_id, token_hash, player_id, snapshot, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
             params![seat_id, table.id, ids::hash(&token), snapshot.player_id, serde_json::to_string(&snapshot)?, now],

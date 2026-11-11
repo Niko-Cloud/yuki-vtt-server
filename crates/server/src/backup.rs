@@ -33,6 +33,7 @@ const PARTS: [(&str, &[&str]); 5] = [
             "active_scene_id",
             "created_at",
             "updated_at",
+            "ask_to_join",
         ],
     ),
     (
@@ -259,14 +260,21 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
             if owner.as_str() != Some(id.as_str()) {
                 continue;
             }
-            let values: Vec<Sql> = columns.iter().map(|column| as_sql(&row[*column])).collect();
-            let marks = (1..=columns.len())
+            // Only the columns the row has: an older backup lacks newer ones, which keep their
+            // defaults.
+            let present: Vec<&str> = columns
+                .iter()
+                .copied()
+                .filter(|column| row.get(*column).is_some())
+                .collect();
+            let values: Vec<Sql> = present.iter().map(|column| as_sql(&row[*column])).collect();
+            let marks = (1..=present.len())
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!(
                 "INSERT INTO {part} ({}) VALUES ({marks})",
-                columns.join(", ")
+                present.join(", ")
             );
             tx.execute(&sql, params_from_iter(values))
                 .map_err(|e| format!("The backup's {part} didn't fit: {e}"))?;
