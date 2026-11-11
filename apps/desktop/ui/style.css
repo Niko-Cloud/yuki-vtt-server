@@ -352,3 +352,13 @@ details summary {
 details[open] summary {
   margin-bottom: 10px;
 }
+
+.tables li.request {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.request .button {
+  min-height: 36px;
+  padding: 4px 14px;
+}

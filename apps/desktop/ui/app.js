@@ -34,6 +34,34 @@ function draw(status) {
   $('problem').hidden = !status.problem;
   $('problem').textContent = status.problem ?? '';
 
+  $('waiting-card').hidden = status.requests.length === 0;
+  $('waiting').replaceChildren(
+    ...status.requests.map((request) => {
+      const row = document.createElement('li');
+      row.className = 'request';
+      const who = document.createElement('span');
+      const name = document.createElement('strong');
+      name.textContent = request.name;
+      const what = document.createElement('span');
+      what.className = 'muted';
+      what.textContent = ` ${request.classes || 'No class yet'} · ${request.table}${request.account ? '' : ' · guest'}`;
+      who.append(name, what);
+      const buttons = document.createElement('span');
+      buttons.className = 'row';
+      for (const [label, accept] of [['Let in', true], ['Turn away', false]]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = accept ? 'button button--main' : 'button';
+        button.textContent = label;
+        button.addEventListener('click', () =>
+          run('answer_request', { tableId: request.tableId, id: request.id, accept }),
+        );
+        buttons.append(button);
+      }
+      row.append(who, buttons);
+      return row;
+    }),
+  );
   $('offer').hidden = !status.linkOffer;
   $('offer-website').textContent = status.linkOffer ?? '';
   $('paired').hidden = !status.website || status.pairing;

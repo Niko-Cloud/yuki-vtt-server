@@ -11,6 +11,18 @@ use tokio::sync::watch;
 const CHECK_IN: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_secs(3);
 
+// Waits up to a minute and a half for the host to answer through its own tunnel.
+async fn answers(http: &reqwest::Client, url: &str) -> bool {
+    for _ in 0..30 {
+        let health = http.get(format!("{url}/api/health")).send().await;
+        if health.is_ok_and(|response| response.status().is_success()) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    false
+}
+
 /// What pairing leaves in the data folder.
 pub struct Paired {
     pub website: String,
@@ -231,8 +243,19 @@ pub fn check_in(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let http = client();
+        // The last address the host found answering through its tunnel.
+        let mut working: Option<String> = None;
         loop {
             let now = address.borrow_and_update().clone();
+            // A new tunnel takes a moment before Cloudflare sends anything to it: wait until
+            // it answers, so the website never sends a DM to an address that doesn't work yet.
+            if let Some(url) = now.as_ref().filter(|url| working.as_ref() != Some(*url)) {
+                if answers(&http, url).await {
+                    working = Some(url.clone());
+                } else {
+                    tracing::warn!("the tunnel isn't answering yet; telling the website anyway");
+                }
+            }
             if let Some(url) = now {
                 let sent = http
                     .put(format!("{website}/api/hosts/me"))

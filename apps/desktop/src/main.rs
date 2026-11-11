@@ -61,6 +61,8 @@ struct Status {
     link_offer: Option<String>,
     /// Screens with a table open right now.
     screens: usize,
+    /// Players waiting for the DM to let them in, at every table.
+    requests: Vec<serde_json::Value>,
     tables: Vec<TableCard>,
     data_folder: String,
     start_on_open: bool,
@@ -109,6 +111,7 @@ async fn status(shared: State<'_, Shared>) -> Result<Status, String> {
             .as_ref()
             .map(|r| r.state.events.listeners())
             .unwrap_or(0),
+        requests: running.as_ref().map(waiting).unwrap_or_default(),
         tables: host::tables(&shared.data).unwrap_or_default(),
         data_folder: shared.data.display().to_string(),
         start_on_open: start_on_open(&shared),
@@ -119,6 +122,28 @@ async fn status(shared: State<'_, Shared>) -> Result<Status, String> {
             .is_some(),
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+fn waiting(running: &Running) -> Vec<serde_json::Value> {
+    yuki_vtt_server::requests::all_waiting(&running.state.db()).unwrap_or_default()
+}
+
+/// The DM lets a waiting player in, or turns them away.
+#[tauri::command]
+async fn answer_request(
+    app: AppHandle,
+    table_id: String,
+    id: String,
+    accept: bool,
+) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let running = shared.running.lock().await;
+    let Some(host) = running.as_ref() else {
+        return Err("Start hosting to answer: the player is waiting on this computer".into());
+    };
+    yuki_vtt_server::requests::answer(&host.state, &table_id, &id, accept)
+        .map_err(|error| error.message)?;
+    Ok(())
 }
 
 /// Switches hosting on: gets cloudflared the first time, then starts the host with its tunnel.
@@ -132,7 +157,7 @@ async fn start(app: &AppHandle) -> Result<(), String> {
         n.starting = true;
         n.problem = None;
     });
-    refresh_tray(app, false, None);
+    refresh_tray(app, false, None, 0);
     let started = async {
         if tunnel::find(&shared.data).is_none() {
             cloudflared::download(&shared.data).await?;
@@ -150,12 +175,12 @@ async fn start(app: &AppHandle) -> Result<(), String> {
     match started {
         Ok(host) => {
             *running = Some(host);
-            refresh_tray(app, true, None);
+            refresh_tray(app, true, None, 0);
             Ok(())
         }
         Err(problem) => {
             note(&shared, |n| n.problem = Some(problem.clone()));
-            refresh_tray(app, false, None);
+            refresh_tray(app, false, None, 0);
             Err(problem)
         }
     }
@@ -166,7 +191,7 @@ async fn stop(app: &AppHandle) {
     if let Some(host) = shared.running.lock().await.take() {
         host.stop().await;
     }
-    refresh_tray(app, false, None);
+    refresh_tray(app, false, None, 0);
 }
 
 #[tauri::command]
@@ -479,7 +504,7 @@ fn show_window(app: &AppHandle) {
 }
 
 // The tray's two lines: what the host is doing, and the switch.
-fn refresh_tray(app: &AppHandle, hosting: bool, address: Option<&str>) {
+fn refresh_tray(app: &AppHandle, hosting: bool, address: Option<&str>, waiting: usize) {
     let shared = app.state::<Shared>();
     let starting = shared
         .notes
@@ -489,10 +514,12 @@ fn refresh_tray(app: &AppHandle, hosting: bool, address: Option<&str>) {
     let lines = shared.tray.lock().unwrap_or_else(|p| p.into_inner());
     let Some(lines) = lines.as_ref() else { return };
     let status = match (hosting, starting, address) {
-        (_, true, _) => "Starting...",
-        (true, _, Some(_)) => "Hosting: on, players can join",
-        (true, _, None) => "Hosting: on, opening the tunnel...",
-        _ => "Hosting: off",
+        (_, true, _) => "Starting...".to_string(),
+        (true, _, _) if waiting == 1 => "Hosting: on, 1 player waiting to join".to_string(),
+        (true, _, _) if waiting > 1 => format!("Hosting: on, {waiting} players waiting to join"),
+        (true, _, Some(_)) => "Hosting: on, players can join".to_string(),
+        (true, _, None) => "Hosting: on, opening the tunnel...".to_string(),
+        _ => "Hosting: off".to_string(),
     };
     let _ = lines.status.set_text(status);
     let _ = lines.toggle.set_text(if hosting {
@@ -501,6 +528,26 @@ fn refresh_tray(app: &AppHandle, hosting: bool, address: Option<&str>) {
         "Start hosting"
     });
     let _ = lines.toggle.set_enabled(!starting);
+}
+
+// Someone opened the invite link: the DM hears about it even with the window shut.
+fn notify_request(app: &AppHandle, request: &serde_json::Value) {
+    use tauri_plugin_notification::NotificationExt;
+    let who = request["name"].as_str().unwrap_or("Someone");
+    let classes = request["classes"].as_str().filter(|c| !c.is_empty());
+    let table = request["table"].as_str().unwrap_or("your table");
+    let character = classes.map(|c| format!(" ({c})")).unwrap_or_default();
+    let shown = app
+        .notification()
+        .builder()
+        .title(format!("{who} wants to join {table}"))
+        .body(format!(
+            "{who}{character} is waiting. Open Yuki VTT Server, or your DM page, to let them in."
+        ))
+        .show();
+    if let Err(error) = shown {
+        tracing::warn!("couldn't show a notification: {error}");
+    }
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<TrayLines> {
@@ -573,6 +620,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             status,
@@ -583,6 +631,7 @@ fn main() {
             set_start_on_open,
             open_data_folder,
             answer_link,
+            answer_request,
             backup_table,
             restore_table
         ])
@@ -659,17 +708,27 @@ fn main() {
                 if paired_website(&shared).is_some() && start_on_open(&shared) {
                     let _ = start(&handle).await;
                 }
-                // The tray follows the tunnel as its address comes and goes.
+                // The tray follows the tunnel as its address comes and goes, and says when
+                // someone waits to join; each new one also gets a notification.
+                let mut told: std::collections::HashSet<String> = Default::default();
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    let (hosting, address) = {
+                    let (hosting, address, requests) = {
                         let running = shared.running.lock().await;
                         (
                             running.is_some(),
                             running.as_ref().and_then(Running::public_address),
+                            running.as_ref().map(waiting).unwrap_or_default(),
                         )
                     };
-                    refresh_tray(&handle, hosting, address.as_deref());
+                    refresh_tray(&handle, hosting, address.as_deref(), requests.len());
+                    for request in &requests {
+                        let id = request["id"].as_str().unwrap_or_default().to_string();
+                        if told.insert(id) {
+                            notify_request(&handle, request);
+                        }
+                    }
+                    told.retain(|id| requests.iter().any(|r| r["id"] == id.as_str()));
                 }
             });
             Ok(())
