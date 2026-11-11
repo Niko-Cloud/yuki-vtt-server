@@ -15,6 +15,7 @@ use rand::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use yuki_vtt_rules::changes::{self, Change};
 use yuki_vtt_rules::encounter::{self, Combatant, Encounter};
 use yuki_vtt_rules::{Advantage, parse_dice, roll_detail};
 
@@ -176,6 +177,84 @@ fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value
     Ok(shown)
 }
 
+/// Who a whisper is for, and who may read it. The DM whispers to one seat; a player only to
+/// the DM. Either way whoever runs the table sees it, and the whispering player's own seat.
+fn whisper_to(
+    db: &Connection,
+    access: &Access,
+    table_id: &str,
+    to: &str,
+) -> Result<(String, Vec<String>)> {
+    if !access.runs() {
+        if to != "dm" {
+            return Err(AppError::bad("A player whispers only to the DM"));
+        }
+        let mut visible_to = vec!["dm".to_string()];
+        visible_to.extend(access.seat_ids.iter().cloned());
+        return Ok(("the DM".into(), visible_to));
+    }
+    let text: String = db
+        .query_row(
+            "SELECT snapshot FROM seats WHERE table_id = ?1 AND id = ?2",
+            [table_id, to],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("That character left the party"))?;
+    let name = serde_json::from_str::<Snapshot>(&text)?.summary.name;
+    Ok((name, vec!["dm".into(), to.to_string()]))
+}
+
+// Saves this close together from one player make one note, not a stream of them.
+const SAME_CHANGE_MS: i64 = 2 * 60 * 1000;
+
+/// What a player changed on their own sheet, in the log for the DM's eyes only. Added to the
+/// player's last note when it is recent, so a run of saves reads as one change.
+pub fn note_changes(
+    db: &Connection,
+    table_id: &str,
+    author: &str,
+    changes: Vec<Change>,
+) -> Result<()> {
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let last: Option<(i64, String, String, String, i64)> = db
+        .query_row(
+            "SELECT seq, kind, author, data, created_at FROM log WHERE table_id = ?1 ORDER BY seq DESC LIMIT 1",
+            [table_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .optional()?;
+    if let Some((seq, kind, by, data, at)) = last
+        && kind == "change"
+        && by == author
+        && at > ids::now() - SAME_CHANGE_MS
+    {
+        let earlier: Vec<Change> =
+            serde_json::from_value(serde_json::from_str::<Value>(&data)?["changes"].clone())?;
+        let merged = changes::merge(&earlier, &changes);
+        if merged.is_empty() {
+            // Changed and changed back: nothing to tell.
+            db.execute("DELETE FROM log WHERE seq = ?1", [seq])?;
+        } else {
+            db.execute(
+                "UPDATE log SET data = ?2, created_at = ?3 WHERE seq = ?1",
+                params![seq, json!({ "changes": merged }).to_string(), ids::now()],
+            )?;
+        }
+        return Ok(());
+    }
+    log(
+        db,
+        table_id,
+        "change",
+        author,
+        json!({ "changes": changes }),
+        &["dm".to_string()],
+    )
+}
+
 /// Writes to the log and keeps only the newest entries: an evening's play, not a campaign's.
 pub fn log(
     db: &Connection,
@@ -237,6 +316,8 @@ pub enum Post {
         text: String,
         #[serde(rename = "seatId")]
         seat_id: Option<String>,
+        /// A whisper: from the DM to one seat, or from a player to the DM ("dm").
+        to: Option<String>,
     },
     /// A roll a sheet made on the device, one whose result it needed that instant (a death
     /// save): the log says so.
@@ -268,16 +349,24 @@ pub async fn post(
             Post::Chat {
                 text: line,
                 seat_id,
+                to,
             } => {
                 let author = author(&db, &access, &id, seat_id.as_deref())?;
-                log(
-                    &db,
-                    &id,
-                    "chat",
-                    &author,
-                    json!({ "text": text(&line, 500, "A message")? }),
-                    &[],
-                )?;
+                let line = text(&line, 500, "A message")?;
+                match to {
+                    None => log(&db, &id, "chat", &author, json!({ "text": line }), &[])?,
+                    Some(to) => {
+                        let (name, visible_to) = whisper_to(&db, &access, &id, &to)?;
+                        log(
+                            &db,
+                            &id,
+                            "chat",
+                            &author,
+                            json!({ "text": line, "to": name }),
+                            &visible_to,
+                        )?;
+                    }
+                }
             }
             Post::Roll {
                 label,

@@ -382,6 +382,9 @@ pub async fn change(
             AppError::conflict(format!("{} has no sheet yet", snapshot.summary.name))
         })?;
         snapshot.set_state(hit_points::apply(&snapshot.state(), sheet, &change));
+        // The DM's own change isn't the player's: the facts the next save is compared with
+        // have it already.
+        snapshot.refresh_table_facts();
         db.execute(
             "UPDATE seats SET snapshot = ?3, updated_at = ?4 WHERE table_id = ?1 AND id = ?2",
             params![id, seat, serde_json::to_string(&snapshot)?, ids::now()],

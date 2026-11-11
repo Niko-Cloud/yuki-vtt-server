@@ -177,6 +177,9 @@ pub async fn push(
         if let Some(base) = &body.play_base {
             given.set_state(snapshot::merge(base, &given.state(), &stored.state()));
         }
+        // What the player changed on their sheet, for the DM.
+        let noted = yuki_vtt_rules::changes::changes(&stored.facts, &given.facts);
+        crate::play::note_changes(&db, &table, &given.summary.name, noted)?;
         db.execute(
             "UPDATE seats SET snapshot = ?2, player_id = COALESCE(?3, player_id), updated_at = ?4 WHERE id = ?1",
             params![seat, serde_json::to_string(&given)?, given.player_id, ids::now()],

@@ -8,6 +8,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::Sha256;
+use yuki_vtt_rules::changes::Fact;
 use yuki_vtt_rules::hit_points;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +43,9 @@ pub struct Snapshot {
     /// worked out by the website.
     #[serde(default)]
     pub member: Value,
+    /// Its numbers and gear, as the website lists them, to tell the DM what a player changed.
+    #[serde(default)]
+    pub facts: Vec<Fact>,
 }
 
 /// What a browser sends to sit down or to update its character: the snapshot as the website
@@ -155,6 +159,54 @@ impl Snapshot {
             "missing": [],
             "sharedBy": Value::Null,
         })
+    }
+
+    /// Brings the facts the DM changes at the table (hit points, conditions) up to date with
+    /// the play state, in the website's words.
+    pub fn refresh_table_facts(&mut self) {
+        let state = self.state();
+        let hp = self.hit_points();
+        let mut set = |key: &str, value: String| {
+            if let Some(fact) = self.facts.iter_mut().find(|f| f.key == key) {
+                fact.value = value;
+            }
+        };
+        if let (Some(current), Some(max)) = (hp["current"].as_i64(), hp["max"].as_i64()) {
+            set("hp", format!("{current}/{max}"));
+        }
+        if let Some(temporary) = hp["temporary"].as_i64() {
+            set("temp", temporary.to_string());
+        }
+        let mut conditions: Vec<&str> = state
+            .get("conditions")
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        conditions.sort_unstable();
+        set(
+            "conditions",
+            if conditions.is_empty() {
+                "none".into()
+            } else {
+                conditions.join(", ")
+            },
+        );
+        set(
+            "exhaustion",
+            state
+                .get("exhaustion")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .to_string(),
+        );
+        let concentrating = state
+            .get("concentrating")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        set(
+            "concentrating",
+            if concentrating { "yes" } else { "no" }.into(),
+        );
     }
 
     /// The character for the DM view: the website's summary, with what the DM may have
