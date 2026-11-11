@@ -6,3 +6,4 @@ node_modules
 
 # Tauri writes its schemas here on every build.
 apps/desktop/gen
+/dist
