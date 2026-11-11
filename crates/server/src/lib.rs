@@ -2,6 +2,7 @@
 //! pages talk to it with the same routes as the website's own tables, under `/api`.
 
 pub mod access;
+pub mod backup;
 pub mod cloudflared;
 pub mod db;
 pub mod error;

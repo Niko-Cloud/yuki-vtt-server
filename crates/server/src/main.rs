@@ -2,12 +2,14 @@
 //! say). It listens on this computer only; the tunnel is what lets players in.
 
 use std::path::PathBuf;
-use yuki_vtt_server::{cloudflared, host, tunnel, website};
+use yuki_vtt_server::{backup, cloudflared, host, tunnel, website};
 
 const HELP: &str = "yuki-vtt-server: hosts Yuki Char Maker tables on this computer
 
   yuki-vtt-server [options]                      host tables
   yuki-vtt-server pair --website <url> [options] connect this host to your account, once
+  yuki-vtt-server backup <table id> <file>       keep a table in one file
+  yuki-vtt-server restore <file> [--replace]     bring a backed-up table onto this computer
 
 Options:
   --data <folder>     where tables and pictures are kept (default: ./data)
@@ -22,6 +24,10 @@ Options:
 
 struct Options {
     pair: bool,
+    // backup: the table and the file; restore: the file.
+    backup: Option<(String, PathBuf)>,
+    restore: Option<PathBuf>,
+    replace: bool,
     data: PathBuf,
     port: u16,
     origins: Vec<String>,
@@ -33,6 +39,9 @@ struct Options {
 fn options() -> Result<Options, String> {
     let mut options = Options {
         pair: false,
+        backup: None,
+        restore: None,
+        replace: false,
         data: PathBuf::from("data"),
         port: 4610,
         origins: Vec::new(),
@@ -49,9 +58,24 @@ fn options() -> Result<Options, String> {
         );
     }
     let mut args = std::env::args().skip(1).peekable();
-    if args.peek().map(String::as_str) == Some("pair") {
-        args.next();
-        options.pair = true;
+    match args.peek().map(String::as_str) {
+        Some("pair") => {
+            args.next();
+            options.pair = true;
+        }
+        Some("backup") => {
+            args.next();
+            let (Some(table), Some(file)) = (args.next(), args.next()) else {
+                return Err("backup needs the table's id and a file".into());
+            };
+            options.backup = Some((table, PathBuf::from(file)));
+        }
+        Some("restore") => {
+            args.next();
+            let file = args.next().ok_or("restore needs the backup file")?;
+            options.restore = Some(PathBuf::from(file));
+        }
+        _ => {}
     }
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -66,6 +90,7 @@ fn options() -> Result<Options, String> {
             "--tunnel" => options.tunnel = true,
             "--website" => options.website = Some(value()?),
             "--name" => options.name = Some(value()?),
+            "--replace" => options.replace = true,
             "--help" | "-h" => return Err(HELP.to_string()),
             other => return Err(format!("Unknown option {other}\n\n{HELP}")),
         }
@@ -87,6 +112,18 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    if let Some((table, file)) = &options.backup {
+        finish(
+            backup::export(&options.data, table, file)
+                .map(|()| format!("Saved in {}", file.display())),
+        );
+    }
+    if let Some(file) = &options.restore {
+        finish(
+            backup::restore(&options.data, file, options.replace)
+                .map(|(_, name)| format!("{name} is on this computer now")),
+        );
+    }
     let done = if options.pair {
         pair(options).await
     } else {
@@ -141,6 +178,19 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     stopped().await;
     running.stop().await;
     Ok(())
+}
+
+fn finish(outcome: Result<String, String>) -> ! {
+    match outcome {
+        Ok(said) => {
+            println!("{said}");
+            std::process::exit(0)
+        }
+        Err(problem) => {
+            eprintln!("{problem}");
+            std::process::exit(1)
+        }
+    }
 }
 
 // Ctrl+C, or the system asking it to stop (a plain `kill`, a service manager, logging out).
