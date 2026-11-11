@@ -234,3 +234,76 @@ async fn runs_fog_of_war_like_the_website() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn turns_tokens_and_keeps_cones_of_light_and_sight() {
+    let app = host();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    let tokens = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    let id = tokens[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(tokens[0]["seatId"], tam_seat.as_str());
+    let path = format!("{at}/tokens/{id}");
+
+    // Its player turns it, as they may move it.
+    let turned = call(
+        &app,
+        As::Seat(&tam),
+        "PATCH",
+        &path,
+        Some(json!({ "facing": 90 })),
+    )
+    .await;
+    assert_eq!(turned.0, StatusCode::NO_CONTENT);
+    let cones = json!({
+        "vision": { "range": 60, "falloff": 10, "shape": "cone", "width": 90 },
+        "light": { "bright": 30, "dim": 60, "shape": "cone", "width": 60, "edge": "sharp" },
+    });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &path, Some(cones)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let odd = json!({ "light": { "bright": 30, "dim": 60, "shape": "star" } });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &path, Some(odd)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let lantern = json!({ "id": "l", "x": 70, "y": 70, "bright": 15, "dim": 30, "shape": "cone", "width": 45, "angle": 30, "edge": "sharp" });
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "dark", "remember": true },
+        "walls": [],
+        "lights": [lantern.clone()],
+    });
+    let lit = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting),
+    )
+    .await;
+    assert_eq!(lit.0, StatusCode::NO_CONTENT);
+    let mut wide = lantern.clone();
+    wide["width"] = json!(1);
+    let bad = json!({ "fog": { "mode": "off", "light": "bright", "remember": true }, "walls": [], "lights": [wide] });
+    let refused = call(&app, As::Dm, "PUT", &format!("{at}/lighting"), Some(bad)).await;
+    assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+
+    let seen = view(&app, As::Seat(&tam), &t).await["scene"].clone();
+    assert_eq!(seen["tokens"][0]["facing"], 90.0);
+    assert_eq!(seen["tokens"][0]["vision"]["shape"], "cone");
+    assert_eq!(seen["tokens"][0]["light"]["edge"], "sharp");
+    assert_eq!(seen["lights"][0]["angle"], 30.0);
+    assert_eq!(seen["lights"][0]["width"], 45.0);
+}

@@ -49,10 +49,15 @@ impl Lighting {
                 .iter()
                 .all(|w| short_id(&w.id) && on_map(w.a[0], w.a[1]) && on_map(w.b[0], w.b[1]));
         let lights = self.lights.len() <= MOST_LIGHTS
-            && self
-                .lights
-                .iter()
-                .all(|l| short_id(&l.id) && on_map(l.x, l.y) && l.bright <= 1000 && l.dim <= 1000);
+            && self.lights.iter().all(|l| {
+                short_id(&l.id)
+                    && on_map(l.x, l.y)
+                    && l.bright <= 1000
+                    && l.dim <= 1000
+                    && maps::spread_ok(&l.shape, l.width, &l.edge)
+                    && l.angle
+                        .is_none_or(|a| a.is_finite() && (-360.0..=360.0).contains(&a))
+            });
         if fog && walls && lights {
             Ok(())
         } else {

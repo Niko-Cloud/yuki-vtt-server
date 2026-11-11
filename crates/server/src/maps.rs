@@ -60,22 +60,47 @@ pub struct Token {
     /// Seats that see through it too (a familiar), beside its own player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_with: Option<Vec<String>>,
+    /// Which way it faces, in degrees, for cones of light and sight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facing: Option<f64>,
 }
 
 /// How far a token sees in the dark: clear out to the range, fading over the falloff, in feet.
+/// A cone looks the way the token faces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vision {
     pub range: u32,
     pub falloff: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
 }
 
-/// A light's reach in feet: bright out to one radius, dim to the other.
+/// A light's reach in feet: bright out to one radius, dim to the other. A cone (a bullseye
+/// lantern) shines the way its token faces; a sharp edge stops instead of fading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Carried {
     pub bright: u32,
     pub dim: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+}
+
+/// Whether a light's or a sight's spread is one the map knows: all around or a cone of 5 to
+/// 360 degrees, soft or sharp.
+pub(crate) fn spread_ok(shape: &Option<String>, width: Option<f64>, edge: &Option<String>) -> bool {
+    shape
+        .as_deref()
+        .is_none_or(|s| s == "radius" || s == "cone")
+        && width.is_none_or(|w| w.is_finite() && (5.0..=360.0).contains(&w))
+        && edge.as_deref().is_none_or(|e| e == "soft" || e == "sharp")
 }
 
 /// How a map's fog works: off, or dynamic on a bright or dark map, remembering explored
@@ -110,7 +135,7 @@ pub struct Door {
     pub open: bool,
 }
 
-/// A light on the map, like a campfire.
+/// A light on the map, like a campfire, or a cone of light aimed one way.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Light {
     pub id: String,
@@ -118,6 +143,15 @@ pub struct Light {
     pub y: f64,
     pub bright: u32,
     pub dim: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+    /// Where a cone points, in degrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<f64>,
 }
 
 /// A note pinned on the map for the DM alone.
@@ -650,6 +684,7 @@ pub async fn add_token(
         vision: None,
         light: None,
         shared_with: None,
+        facing: None,
     };
     if let Some(image) = &token.image_id {
         picture_exists(&state.db(), &id, image)?;
@@ -717,6 +752,7 @@ pub async fn place_party(
                 vision: None,
                 light: None,
                 shared_with: None,
+                facing: None,
             };
             let token = map.keep_token(token);
             map.tokens.push(token);
@@ -746,6 +782,7 @@ pub struct TokenChange {
     #[serde(default, deserialize_with = "present")]
     light: Option<Value>,
     shared_with: Option<Vec<String>>,
+    facing: Option<f64>,
 }
 
 // A field that was sent, null included: Option alone reads null as not sent, so "take the
@@ -793,10 +830,24 @@ pub async fn change_token(
     if let Some(Some(v)) = &vision {
         feet(v.range)?;
         feet(v.falloff)?;
+        if !spread_ok(&v.shape, v.width, &None) {
+            return Err(AppError::bad("A cone of sight is 5 to 360 degrees"));
+        }
     }
     if let Some(Some(l)) = &light {
         feet(l.bright)?;
         feet(l.dim)?;
+        if !spread_ok(&l.shape, l.width, &l.edge) {
+            return Err(AppError::bad(
+                "A cone of light is 5 to 360 degrees, soft or sharp",
+            ));
+        }
+    }
+    if body
+        .facing
+        .is_some_and(|f| !f.is_finite() || !(-360.0..=360.0).contains(&f))
+    {
+        return Err(AppError::bad("A token faces -360 to 360 degrees"));
     }
     if let Some(seats) = &body.shared_with
         && (seats.len() > 20 || seats.iter().any(|s| s.len() > 40))
@@ -819,7 +870,8 @@ pub async fn change_token(
             .position(|t| t.id == token_id && (access.runs() || t.hidden != Some(true)))
             .ok_or_else(|| AppError::not_found("That token is gone"))?;
         let mut token = map.tokens[at].clone();
-        let moving = body.x.is_some() || body.y.is_some();
+        // Turning a token is moving it, as far as who may.
+        let moving = body.x.is_some() || body.y.is_some() || body.facing.is_some();
         let restyling =
             body.name.is_some() || body.size.is_some() || body.color.is_some() || picture.is_some();
         let mine = token
@@ -855,6 +907,9 @@ pub async fn change_token(
         }
         if let Some(seats) = &body.shared_with {
             token.shared_with = (!seats.is_empty()).then(|| seats.clone());
+        }
+        if let Some(facing) = body.facing {
+            token.facing = Some(facing.round());
         }
         if let Some(name) = &body.name {
             token.name = token_name(name)?;
