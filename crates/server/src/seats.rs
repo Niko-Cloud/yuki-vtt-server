@@ -8,8 +8,9 @@ use crate::requests;
 use crate::snapshot::{self, Signed, Snapshot};
 use crate::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{FromRequestParts, Path, State};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -166,6 +167,24 @@ fn once(db: &Connection, signature: &str) -> Result<()> {
     Ok(())
 }
 
+/// The seat token a player's browser sends, in the `x-seat-token` header. It never goes in
+/// the address, which ends up in logs.
+pub struct SeatToken(pub String);
+
+impl<S: Send + Sync> FromRequestParts<S> for SeatToken {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self> {
+        parts
+            .headers
+            .get("x-seat-token")
+            .and_then(|value| value.to_str().ok())
+            .filter(|token| !token.is_empty())
+            .map(|token| SeatToken(token.to_string()))
+            .ok_or_else(|| AppError::not_found("That seat is gone: the DM may have removed it"))
+    }
+}
+
 fn by_token(db: &Connection, token: &str) -> Result<(String, String, Snapshot, i64)> {
     let row: Option<(String, String, String, i64)> = db
         .query_row(
@@ -188,11 +207,11 @@ pub struct Push {
     play_base: Option<Map<String, Value>>,
 }
 
-/// `PUT /api/seats/{token}`: the player saved their character; the answer is the play state
+/// `PUT /api/seat`: the player saved their character; the answer is the play state
 /// with the DM's changes merged in.
 pub async fn push(
     State(state): State<AppState>,
-    Path(token): Path<String>,
+    SeatToken(token): SeatToken,
     Json(body): Json<Push>,
 ) -> Result<Json<Value>> {
     let secret = state.config.website_secret.as_deref();
@@ -219,16 +238,22 @@ pub async fn push(
     Ok(Json(json!({ "state": merged })))
 }
 
-/// `GET /api/seats/{token}`: the seat's play state, for the player's open sheet to pick up
+/// `GET /api/seat`: the seat's play state, for the player's open sheet to pick up
 /// the DM's changes.
-pub async fn pull(State(state): State<AppState>, Path(token): Path<String>) -> Result<Json<Value>> {
+pub async fn pull(
+    State(state): State<AppState>,
+    SeatToken(token): SeatToken,
+) -> Result<Json<Value>> {
     let (_, _, snapshot, updated) = by_token(&state.db(), &token)?;
     Ok(Json(
         json!({ "state": snapshot.state(), "updatedAt": ids::iso(updated) }),
     ))
 }
 
-pub async fn leave(State(state): State<AppState>, Path(token): Path<String>) -> Result<StatusCode> {
+pub async fn leave(
+    State(state): State<AppState>,
+    SeatToken(token): SeatToken,
+) -> Result<StatusCode> {
     let table_id = {
         let db = state.db();
         let (seat, table, _, _) = by_token(&db, &token)?;

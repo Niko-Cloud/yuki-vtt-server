@@ -211,7 +211,7 @@ async fn the_dms_damage_reaches_the_players_sheet_and_survives_their_save() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(member["hitPoints"]["current"], 18);
-    let (_, pulled) = call(&app, As::Nobody, "GET", &format!("/seats/{token}"), None).await;
+    let (_, pulled) = call(&app, As::Seat(&token), "GET", "/seat", None).await;
     assert_eq!(pulled["state"]["currentHitPoints"], 18);
 
     // The player spent a slot from the old state; the DM's damage stays.
@@ -222,14 +222,7 @@ async fn the_dms_damage_reaches_the_players_sheet_and_survives_their_save() {
         body["playBase"] = fresh();
         body
     };
-    let (_, saved) = call(
-        &app,
-        As::Nobody,
-        "PUT",
-        &format!("/seats/{token}"),
-        Some(push(theirs)),
-    )
-    .await;
+    let (_, saved) = call(&app, As::Seat(&token), "PUT", "/seat", Some(push(theirs))).await;
     assert_eq!(saved["state"]["currentHitPoints"], 18);
     assert_eq!(saved["state"]["spellSlotsLeft"], json!([1]));
 

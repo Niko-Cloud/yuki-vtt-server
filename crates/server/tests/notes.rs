@@ -141,17 +141,17 @@ async fn tells_the_dm_what_a_player_changed_but_not_the_dms_own_damage() {
     let push = |facts: Value| with_facts("Tam", "user-1", facts, For::Seat(seat_id));
     call(
         &app,
-        As::Nobody,
+        As::Seat(token),
         "PUT",
-        &format!("/seats/{token}"),
+        "/seat",
         Some(push(facts("22/28", "17", Some(2)))),
     )
     .await;
     call(
         &app,
-        As::Nobody,
+        As::Seat(token),
         "PUT",
-        &format!("/seats/{token}"),
+        "/seat",
         Some(push(facts("22/28", "17", Some(3)))),
     )
     .await;

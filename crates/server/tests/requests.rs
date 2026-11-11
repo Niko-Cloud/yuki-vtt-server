@@ -45,14 +45,7 @@ async fn keeps_newcomers_waiting_until_the_dm_lets_them_in() {
     let (request, token) = ask(&app, &t.invite, "Wren", "user-2").await;
 
     // Waiting: not at the table yet.
-    let (_, status) = call(
-        &app,
-        As::Nobody,
-        "GET",
-        &format!("/seats/{token}/status"),
-        None,
-    )
-    .await;
+    let (_, status) = call(&app, As::Seat(&token), "GET", "/seat/status", None).await;
     assert_eq!(status["status"], "waiting");
     let (status, _) = call(
         &app,
@@ -88,14 +81,7 @@ async fn keeps_newcomers_waiting_until_the_dm_lets_them_in() {
         None,
     )
     .await;
-    let (_, status) = call(
-        &app,
-        As::Nobody,
-        "GET",
-        &format!("/seats/{token}/status"),
-        None,
-    )
-    .await;
+    let (_, status) = call(&app, As::Seat(&token), "GET", "/seat/status", None).await;
     assert_eq!(status["status"], "seated");
     // The same token is the seat's now.
     let (status, view) = call(
@@ -146,14 +132,7 @@ async fn turns_people_away_and_only_the_dm_decides() {
         None,
     )
     .await;
-    let (status, refused) = call(
-        &app,
-        As::Nobody,
-        "GET",
-        &format!("/seats/{token}/status"),
-        None,
-    )
-    .await;
+    let (status, refused) = call(&app, As::Seat(&token), "GET", "/seat/status", None).await;
     assert_eq!(
         (status, refused["message"].as_str()),
         (StatusCode::NOT_FOUND, Some("The DM didn't let you in"))

@@ -307,7 +307,7 @@ async fn routes_never_answer_500() {
         format!("/tables/{}/handout", t.id),
         format!("/tables/{}/ask", t.id),
         format!("/tables/{}/lock", t.id),
-        format!("/seats/{token}"),
+        "/seat".to_string(),
         format!("/join/{}", t.invite),
         "/tables".to_string(),
     ];
@@ -335,7 +335,7 @@ async fn routes_never_answer_500() {
         };
         let method = methods[rng.random_range(0..methods.len())];
         // Never delete the table or the seat out from under the rest of the run.
-        if method == "DELETE" && (path.ends_with(&t.id) || path.contains("/seats/")) {
+        if method == "DELETE" && (path.ends_with(&t.id) || path == "/seat") {
             continue;
         }
         let body = rng.random_bool(0.9).then(|| any_json(&mut rng, 3));

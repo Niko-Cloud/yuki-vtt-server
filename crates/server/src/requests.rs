@@ -189,11 +189,11 @@ pub async fn set_asking(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /api/seats/{token}/status`: whether a player is in yet. Turned away (or removed),
-/// the token is unknown.
+/// `GET /api/seat/status`: whether a player is in yet. Turned away (or removed), the token
+/// is unknown.
 pub async fn status(
     State(state): State<AppState>,
-    Path(token): Path<String>,
+    crate::seats::SeatToken(token): crate::seats::SeatToken,
 ) -> Result<Json<Value>> {
     let db = state.db();
     let hash = ids::hash(&token);

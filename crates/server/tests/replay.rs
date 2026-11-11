@@ -26,15 +26,9 @@ async fn sit(app: &axum::Router, invite: &str, body: Value) -> StatusCode {
 }
 
 async fn save(app: &axum::Router, token: &str, body: &Value) -> StatusCode {
-    call(
-        app,
-        As::Nobody,
-        "PUT",
-        &format!("/seats/{token}"),
-        Some(body.clone()),
-    )
-    .await
-    .0
+    call(app, As::Seat(token), "PUT", "/seat", Some(body.clone()))
+        .await
+        .0
 }
 
 #[tokio::test]
@@ -78,8 +72,13 @@ async fn a_save_goes_to_its_own_seat_and_never_back_in_time() {
     // Kept from before and sent again: refused, and the seat keeps the newer state.
     assert_eq!(save(&app, &tam, &older).await, StatusCode::CONFLICT);
     assert_eq!(save(&app, &tam, &newer).await, StatusCode::CONFLICT);
-    let (_, pulled) = call(&app, As::Nobody, "GET", &format!("/seats/{tam}"), None).await;
+    let (_, pulled) = call(&app, As::Seat(&tam), "GET", "/seat", None).await;
     assert_eq!(pulled["state"]["currentHitPoints"], 9);
+    // The seat token goes in a header; an address with it in finds nothing.
+    let (status, _) = call(&app, As::Nobody, "GET", &format!("/seats/{tam}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&app, As::Nobody, "GET", "/seat", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Tam's copy doesn't fit Wren's seat, and an old one isn't taken.
     let tams = signed("Tam", "user-1", 18, fresh(), For::Seat(&tam_seat));

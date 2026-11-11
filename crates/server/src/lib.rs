@@ -100,9 +100,10 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/handout", axum::routing::put(pictures::show).delete(pictures::hide))
         .route("/tables/{id}/ask", patch(requests::set_asking))
         .route("/tables/{id}/requests/{request}/{choice}", post(requests::decide))
-        .route("/seats/{token}/status", get(requests::status))
+        // The seat token comes in the x-seat-token header, never in the address.
+        .route("/seat/status", get(requests::status))
         .route("/join/{invite}", get(seats::invite).post(seats::join))
-        .route("/seats/{token}", get(seats::pull).put(seats::push).delete(seats::leave));
+        .route("/seat", get(seats::pull).put(seats::push).delete(seats::leave));
 
     Router::new()
         .nest("/api", api)
