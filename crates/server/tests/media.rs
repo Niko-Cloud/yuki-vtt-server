@@ -46,7 +46,8 @@ async fn lets_the_dms_pages_load_pictures_with_a_pass() {
     // The DM's key no longer goes in an address, and a pass is no good changed or elsewhere.
     let (status, _, _) = fetch(&app, &format!("{picture}?key={KEY}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let changed = format!("{}0", &pass[..pass.len() - 1]);
+    let last = if pass.ends_with('0') { '1' } else { '0' };
+    let changed = format!("{}{last}", &pass[..pass.len() - 1]);
     let (status, _, _) = fetch(&app, &format!("{picture}?pass={changed}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = fetch(&app, &format!("{picture}?pass=4102444800000.00")).await;
