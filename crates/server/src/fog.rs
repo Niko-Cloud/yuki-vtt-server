@@ -214,6 +214,9 @@ pub fn for_players(scene: &mut Value) {
     if let Some(drawings) = scene["drawings"].as_array_mut() {
         drawings.retain(|d| d["hidden"] != json!(true));
     }
+    if let Some(templates) = scene["templates"].as_array_mut() {
+        templates.retain(|t| t["hidden"] != json!(true));
+    }
     scene["notes"] = json!([]);
 }
 

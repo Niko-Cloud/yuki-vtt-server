@@ -324,6 +324,8 @@ async fn routes_never_answer_500() {
         format!("{scene}/explored"),
         format!("{scene}/notes"),
         format!("{scene}/doors/door"),
+        format!("{scene}/templates"),
+        format!("{scene}/templates/area-x"),
         format!("{scene}/tokens/party"),
     ];
     let methods = ["GET", "POST", "PUT", "PATCH", "DELETE"];

@@ -2,6 +2,7 @@
 //! pages talk to it with the same routes as the website's own tables, under `/api`.
 
 pub mod access;
+pub mod areas;
 pub mod backup;
 pub mod cloudflared;
 pub mod db;
@@ -96,6 +97,9 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/drawings", post(maps::add_drawing).delete(maps::clear_drawings))
         .route("/tables/{id}/scenes/{scene}/drawings/{drawing}", axum::routing::delete(maps::remove_drawing))
         .route("/tables/{id}/ping", post(maps::ping))
+        // Spell areas, placed by those the DM lets.
+        .route("/tables/{id}/scenes/{scene}/templates", post(areas::add).delete(areas::clear))
+        .route("/tables/{id}/scenes/{scene}/templates/{area}", patch(areas::change).delete(areas::remove))
         // Fog of war: the DM's walls, doors, lights and notes; doors players stand next to.
         .route("/tables/{id}/sight", patch(fog::set_sight))
         .route("/tables/{id}/scenes/{scene}/lighting", axum::routing::put(fog::set_lighting))

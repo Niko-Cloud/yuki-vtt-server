@@ -10,7 +10,7 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use sha2::Sha256;
 
-pub const PERMISSIONS: [&str; 4] = ["move-own", "move-any", "tokens", "draw"];
+pub const PERMISSIONS: [&str; 5] = ["move-own", "move-any", "tokens", "draw", "templates"];
 
 /// How long a media pass lets a page load pictures and the live channel.
 pub const MEDIA_PASS_SECONDS: i64 = 60 * 60;

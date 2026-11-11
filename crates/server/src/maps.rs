@@ -129,6 +129,32 @@ pub struct Note {
     pub text: String,
 }
 
+/// A spell's area: a cone or line from where it starts, a sphere around a point, a cube with
+/// that point on one face. Sizes in feet; the angle is where it points, in degrees.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Template {
+    pub id: String,
+    pub shape: String,
+    pub x: f64,
+    pub y: f64,
+    pub size: u32,
+    #[serde(default = "five")]
+    pub width: u32,
+    #[serde(default)]
+    pub angle: f64,
+    pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Who placed it: a seat, or "dm". They may move or take it away.
+    pub by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+}
+
+fn five() -> u32 {
+    5
+}
+
 /// A picture laid on the map that isn't a token: a door, a chest, a cart. Sized in cells.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,6 +204,8 @@ pub struct TableMap {
     /// The DM's notes; players never receive them.
     #[serde(default)]
     pub notes: Vec<Note>,
+    #[serde(default)]
+    pub templates: Vec<Template>,
 }
 
 /// What the DM sets for a map: its size and grid.
@@ -227,6 +255,7 @@ fn blank() -> TableMap {
         walls: vec![],
         lights: vec![],
         notes: vec![],
+        templates: vec![],
     }
 }
 
@@ -277,7 +306,7 @@ pub(crate) fn not_allowed(what: &str) -> AppError {
     AppError::not_found(format!("The DM hasn't let you {what}"))
 }
 
-fn allow(allowed: bool, what: &str) -> Result<()> {
+pub(crate) fn allow(allowed: bool, what: &str) -> Result<()> {
     if allowed {
         Ok(())
     } else {
@@ -285,7 +314,7 @@ fn allow(allowed: bool, what: &str) -> Result<()> {
     }
 }
 
-fn color(value: &str) -> Result<String> {
+pub(crate) fn color(value: &str) -> Result<String> {
     let ok = value.len() == 7
         && value.starts_with('#')
         && value[1..].bytes().all(|b| b.is_ascii_hexdigit());
