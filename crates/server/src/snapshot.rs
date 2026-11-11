@@ -31,6 +31,14 @@ pub struct Snapshot {
     /// A character saved on the website's account; none for one kept in the browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_id: Option<String>,
+    /// When the website signed it (milliseconds), and what for: a save names its seat, a
+    /// join names the table. So a signed copy can't be kept and sent again later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_id: Option<String>,
     pub summary: Summary,
     pub character: Map<String, Value>,
     #[serde(default)]
@@ -58,6 +66,47 @@ pub struct Signed {
 }
 
 const BIGGEST: usize = 1024 * 1024;
+
+// How far from this computer's clock a signed copy may be. A save reaches the host within a
+// second; the slack is for a DM's clock that is a few minutes off.
+const FRESH_MS: i64 = 10 * 60_000;
+
+impl Snapshot {
+    fn fresh(&self, now: i64) -> Result<()> {
+        match self.issued_at {
+            Some(at) if (now - at).abs() <= FRESH_MS => Ok(()),
+            _ => Err(AppError::forbidden(
+                "That save is out of date (or this computer's clock is wrong): save again",
+            )),
+        }
+    }
+
+    /// A copy signed for joining this table, just now.
+    pub fn check_join(&self, table_id: &str, now: i64) -> Result<()> {
+        if self.table_id.as_deref() != Some(table_id) {
+            return Err(AppError::forbidden(
+                "That character was signed for another table",
+            ));
+        }
+        self.fresh(now)
+    }
+
+    /// A copy signed for this seat, just now, and newer than the one the seat has.
+    pub fn check_save(&self, seat_id: &str, stored: &Snapshot, now: i64) -> Result<()> {
+        if self.seat_id.as_deref() != Some(seat_id) {
+            return Err(AppError::forbidden(
+                "That character was signed for another seat",
+            ));
+        }
+        self.fresh(now)?;
+        if self.issued_at <= stored.issued_at {
+            return Err(AppError::conflict(
+                "A newer save of this character is at the table already",
+            ));
+        }
+        Ok(())
+    }
+}
 
 impl Signed {
     /// The snapshot, once the signature shows the website made it.

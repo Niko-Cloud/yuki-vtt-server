@@ -88,10 +88,15 @@ pub async fn join(
     Path(invite): Path<String>,
     Json(signed): Json<Signed>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    let snapshot = signed.open(state.config.website_secret.as_deref())?;
+    let secret = state.config.website_secret.as_deref();
+    let snapshot = signed.open(secret)?;
     let (table_id, seat_id, token) = {
         let db = state.db();
         let table = invited(&db, &invite)?;
+        if secret.is_some() {
+            snapshot.check_join(&table.id, ids::now())?;
+            once(&db, &signed.signature)?;
+        }
         if table.locked {
             return Err(AppError::forbidden(
                 "The DM locked this table: ask them to open it",
@@ -141,6 +146,26 @@ pub async fn join(
     ))
 }
 
+// A signed copy for joining sits down once. The ones kept are only as old as a copy can be
+// and still be fresh.
+fn once(db: &Connection, signature: &str) -> Result<()> {
+    let now = ids::now();
+    db.execute(
+        "DELETE FROM used_joins WHERE used_at < ?1",
+        [now - 30 * 60_000],
+    )?;
+    let fresh = db.execute(
+        "INSERT OR IGNORE INTO used_joins (signature, used_at) VALUES (?1, ?2)",
+        params![signature, now],
+    )?;
+    if fresh == 0 {
+        return Err(AppError::conflict(
+            "That join was used already: open the invite again",
+        ));
+    }
+    Ok(())
+}
+
 fn by_token(db: &Connection, token: &str) -> Result<(String, String, Snapshot, i64)> {
     let row: Option<(String, String, String, i64)> = db
         .query_row(
@@ -170,10 +195,14 @@ pub async fn push(
     Path(token): Path<String>,
     Json(body): Json<Push>,
 ) -> Result<Json<Value>> {
-    let mut given = body.signed.open(state.config.website_secret.as_deref())?;
+    let secret = state.config.website_secret.as_deref();
+    let mut given = body.signed.open(secret)?;
     let (table_id, merged) = {
         let db = state.db();
         let (seat, table, stored, _) = by_token(&db, &token)?;
+        if secret.is_some() {
+            given.check_save(&seat, &stored, ids::now())?;
+        }
         if let Some(base) = &body.play_base {
             given.set_state(snapshot::merge(base, &given.state(), &stored.state()));
         }

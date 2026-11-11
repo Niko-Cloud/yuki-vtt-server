@@ -66,7 +66,7 @@ async fn seats_a_signed_character_and_shows_the_table() {
     // Strangers learn nothing; a forged sheet doesn't sit down.
     let (status, _) = call(&app, As::Nobody, "GET", &format!("/tables/{}", t.id), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let mut forged = signed("Tam", "user-2", 18, fresh());
+    let mut forged = signed("Tam", "user-2", 18, fresh(), For::Join(&t.id));
     forged["snapshot"] = json!(forged["snapshot"].as_str().unwrap().replace("18", "30"));
     let (status, _) = call(
         &app,
@@ -218,7 +218,7 @@ async fn the_dms_damage_reaches_the_players_sheet_and_survives_their_save() {
     let mut theirs = fresh();
     theirs["spellSlotsLeft"] = json!([1]);
     let push = |state: Value| {
-        let mut body = signed("Tam", "user-1", 18, state);
+        let mut body = signed("Tam", "user-1", 18, state, For::Seat(&seat));
         body["playBase"] = fresh();
         body
     };
@@ -377,7 +377,7 @@ async fn locks_bans_and_makes_co_dms() {
         As::Nobody,
         "POST",
         &format!("/join/{}", t.invite),
-        Some(signed("Wren", "user-2", 14, fresh())),
+        Some(signed("Wren", "user-2", 14, fresh(), For::Join(&t.id))),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -412,7 +412,7 @@ async fn locks_bans_and_makes_co_dms() {
         As::Nobody,
         "POST",
         &format!("/join/{}", t.invite),
-        Some(signed("Tam again", "user-1", 18, fresh())),
+        Some(signed("Tam again", "user-1", 18, fresh(), For::Join(&t.id))),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);

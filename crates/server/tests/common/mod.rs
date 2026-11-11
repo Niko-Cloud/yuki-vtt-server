@@ -67,17 +67,40 @@ pub async fn call(
     )
 }
 
+/// What the website signs a copy for: joining a table, or saving a seat.
+#[derive(Clone, Copy)]
+pub enum For<'a> {
+    Join(&'a str),
+    Seat(&'a str),
+}
+
+// Each copy is signed a moment after the one before, as the website's clock moves on.
+static SIGNED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+pub fn issued_now() -> i64 {
+    ids::now() + SIGNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 // A character as the website hands it over: the snapshot text and its signature.
-pub fn signed(name: &str, player: &str, armor_class: i64, state: Value) -> Value {
-    let snapshot = json!({
+pub fn signed(name: &str, player: &str, armor_class: i64, state: Value, signed_for: For) -> Value {
+    let mut snapshot = json!({
         "playerId": player,
+        "issuedAt": issued_now(),
         "summary": { "name": name, "classes": "Fighter 3", "armorClass": armor_class, "initiative": 2, "maxHitPoints": 28, "edition": "2014" },
         "character": { "name": name, "state": state },
         "member": { "name": name, "level": 3, "classes": "Fighter 3", "passive": { "perception": 13, "insight": 11, "investigation": 10 }, "hitPoints": { "current": 28, "max": 28, "temporary": 0 }, "conditions": [] },
         "sheet": { "armorClass": { "value": armor_class } },
         "play": { "hitPoints": { "current": 28, "max": 28, "temporary": 0 } },
-    })
-    .to_string();
+    });
+    match signed_for {
+        For::Join(table) => snapshot["tableId"] = json!(table),
+        For::Seat(seat) => snapshot["seatId"] = json!(seat),
+    }
+    sign(&snapshot.to_string())
+}
+
+/// The website's signature over exactly this text.
+pub fn sign(snapshot: &str) -> Value {
     let mut mac = Hmac::<Sha256>::new_from_slice(SECRET).unwrap();
     mac.update(snapshot.as_bytes());
     json!({ "snapshot": snapshot, "signature": hex::encode(mac.finalize().into_bytes()) })
@@ -118,13 +141,20 @@ pub async fn table(app: &Router) -> Table {
     }
 }
 
+/// The table an invite is for, as the website learns it before signing a join.
+pub async fn table_of(app: &Router, invite: &str) -> String {
+    let (_, invited) = call(app, As::Nobody, "GET", &format!("/join/{invite}"), None).await;
+    invited["party"]["id"].as_str().unwrap().into()
+}
+
 pub async fn join(app: &Router, invite: &str, name: &str, player: &str) -> (String, String) {
+    let table = table_of(app, invite).await;
     let (status, seat) = call(
         app,
         As::Nobody,
         "POST",
         &format!("/join/{invite}"),
-        Some(signed(name, player, 18, fresh())),
+        Some(signed(name, player, 18, fresh(), For::Join(&table))),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{seat}");

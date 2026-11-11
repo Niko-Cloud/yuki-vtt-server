@@ -4,22 +4,22 @@ mod common;
 
 use axum::http::StatusCode;
 use common::*;
-use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
-use sha2::Sha256;
 
 // A character as the website hands it over, with its numbers and gear as facts.
-fn with_facts(name: &str, player: &str, facts: Value) -> Value {
-    let snapshot = json!({
+fn with_facts(name: &str, player: &str, facts: Value, signed_for: For) -> Value {
+    let mut snapshot = json!({
         "playerId": player,
+        "issuedAt": issued_now(),
         "summary": { "name": name, "classes": "Fighter 3", "armorClass": 15, "initiative": 2, "maxHitPoints": 28, "edition": "2014" },
         "character": { "name": name, "state": { "currentHitPoints": null, "temporaryHitPoints": 0, "conditions": [] } },
         "facts": facts,
-    })
-    .to_string();
-    let mut mac = Hmac::<Sha256>::new_from_slice(SECRET).unwrap();
-    mac.update(snapshot.as_bytes());
-    json!({ "snapshot": snapshot, "signature": hex::encode(mac.finalize().into_bytes()) })
+    });
+    match signed_for {
+        For::Join(table) => snapshot["tableId"] = json!(table),
+        For::Seat(seat) => snapshot["seatId"] = json!(seat),
+    }
+    sign(&snapshot.to_string())
 }
 
 fn facts(hp: &str, ac: &str, potions: Option<u32>) -> Value {
@@ -115,7 +115,12 @@ async fn tells_the_dm_what_a_player_changed_but_not_the_dms_own_damage() {
         As::Nobody,
         "POST",
         &format!("/join/{}", t.invite),
-        Some(with_facts("Tam", "user-1", facts("28/28", "15", None))),
+        Some(with_facts(
+            "Tam",
+            "user-1",
+            facts("28/28", "15", None),
+            For::Join(&t.id),
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -133,7 +138,7 @@ async fn tells_the_dm_what_a_player_changed_but_not_the_dms_own_damage() {
         Some(json!({ "kind": "damage", "amount": 6 })),
     )
     .await;
-    let push = |facts: Value| with_facts("Tam", "user-1", facts);
+    let push = |facts: Value| with_facts("Tam", "user-1", facts, For::Seat(seat_id));
     call(
         &app,
         As::Nobody,

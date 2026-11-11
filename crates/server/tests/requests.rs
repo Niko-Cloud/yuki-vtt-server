@@ -21,12 +21,13 @@ async fn asking(app: &axum::Router) -> Table {
 }
 
 async fn ask(app: &axum::Router, invite: &str, name: &str, player: &str) -> (String, String) {
+    let table = table_of(app, invite).await;
     let (status, asked) = call(
         app,
         As::Nobody,
         "POST",
         &format!("/join/{invite}"),
-        Some(signed(name, player, 15, fresh())),
+        Some(signed(name, player, 15, fresh(), For::Join(&table))),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{asked}");

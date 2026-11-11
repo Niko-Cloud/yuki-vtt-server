@@ -79,6 +79,12 @@ const STEPS: &[&str] = &[
     );
     CREATE INDEX join_requests_by_table ON join_requests(table_id, created_at);
 "#,
+    r#"
+    CREATE TABLE used_joins (
+        signature TEXT PRIMARY KEY,
+        used_at INTEGER NOT NULL
+    );
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
