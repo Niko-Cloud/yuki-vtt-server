@@ -38,6 +38,10 @@ pub struct Snapshot {
     pub play: Value,
     #[serde(default)]
     pub companions: Value,
+    /// The character as the DM view lists it (level, passive scores, spell slots and more),
+    /// worked out by the website.
+    #[serde(default)]
+    pub member: Value,
 }
 
 /// What a browser sends to sit down or to update its character: the snapshot as the website
@@ -148,7 +152,68 @@ impl Snapshot {
             "sheet": self.sheet,
             "play": play,
             "companions": if self.companions.is_null() { json!([]) } else { self.companions.clone() },
+            "missing": [],
+            "sharedBy": Value::Null,
         })
+    }
+
+    /// The character for the DM view: the website's summary, with what the DM may have
+    /// changed since (hit points, conditions) as it is now.
+    pub fn dm_member(&self) -> Value {
+        let state = self.state();
+        let mut member = match &self.member {
+            Value::Object(member) => member.clone(),
+            // An older website sent only the short summary.
+            _ => json!({
+                "name": self.summary.name,
+                "edition": self.summary.edition,
+                "level": 0,
+                "classes": self.summary.classes,
+                "armorClass": self.summary.armor_class,
+                "initiative": self.summary.initiative,
+                "speed": Value::Null,
+                "passive": Value::Null,
+                "spellSaveDcs": [],
+                "spellSlots": [],
+                "pactSlots": Value::Null,
+                "hitDiceLeft": 0,
+                "hitDiceTotal": 0,
+                "inspiration": false,
+                "missing": 0,
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        };
+        member.insert("hitPoints".into(), self.hit_points());
+        member.insert(
+            "conditions".into(),
+            state
+                .get("conditions")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        );
+        member.insert(
+            "exhaustion".into(),
+            json!(state.get("exhaustion").and_then(Value::as_i64).unwrap_or(0)),
+        );
+        member.insert(
+            "concentrating".into(),
+            json!(
+                state
+                    .get("concentrating")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            ),
+        );
+        member.insert(
+            "deathSaves".into(),
+            state
+                .get("deathSaves")
+                .cloned()
+                .unwrap_or_else(|| json!({ "successes": 0, "failures": 0 })),
+        );
+        Value::Object(member)
     }
 }
 

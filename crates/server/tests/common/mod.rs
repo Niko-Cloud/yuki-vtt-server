@@ -73,6 +73,7 @@ pub fn signed(name: &str, player: &str, armor_class: i64, state: Value) -> Value
         "playerId": player,
         "summary": { "name": name, "classes": "Fighter 3", "armorClass": armor_class, "initiative": 2, "maxHitPoints": 28, "edition": "2014" },
         "character": { "name": name, "state": state },
+        "member": { "name": name, "level": 3, "classes": "Fighter 3", "passive": { "perception": 13, "insight": 11, "investigation": 10 }, "hitPoints": { "current": 28, "max": 28, "temporary": 0 }, "conditions": [] },
         "sheet": { "armorClass": { "value": armor_class } },
         "play": { "hitPoints": { "current": 28, "max": 28, "temporary": 0 } },
     })

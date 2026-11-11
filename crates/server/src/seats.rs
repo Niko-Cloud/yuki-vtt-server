@@ -22,7 +22,7 @@ struct Invited {
     edition: String,
     dm_name: String,
     locked: bool,
-    banned: Vec<String>,
+    banned: Vec<crate::tables::Banned>,
 }
 
 fn invited(db: &Connection, invite: &str) -> Result<Invited> {
@@ -49,7 +49,7 @@ fn invited(db: &Connection, invite: &str) -> Result<Invited> {
                 edition,
                 dm_name,
                 locked,
-                banned: serde_json::from_str(&banned)?,
+                banned: crate::tables::bans(&banned)?,
             })
         },
     )
@@ -96,7 +96,7 @@ pub async fn join(
         if snapshot
             .player_id
             .as_ref()
-            .is_some_and(|player| table.banned.contains(player))
+            .is_some_and(|player| table.banned.iter().any(|b| &b.id == player))
         {
             return Err(AppError::forbidden("The DM removed you from this table"));
         }

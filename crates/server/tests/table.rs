@@ -471,3 +471,82 @@ async fn lets_only_the_paired_website_call_from_a_browser() {
         .unwrap();
     assert!(other.headers().get("access-control-allow-origin").is_none());
 }
+
+#[tokio::test]
+async fn gives_the_dm_view_every_character_as_it_is_now() {
+    let app = host();
+    let t = table(&app).await;
+    let (seat, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/seats/{seat}/change", t.id),
+        Some(json!({ "kind": "damage", "amount": 9 })),
+    )
+    .await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/seats/{seat}/change", t.id),
+        Some(json!({ "kind": "conditions", "conditions": ["prone"], "exhaustion": 1 })),
+    )
+    .await;
+
+    let (status, party) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}/party", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(party["you"], "dm");
+    let tam = &party["members"][0];
+    assert_eq!(
+        (
+            tam["seatId"].as_str(),
+            tam["account"].as_bool(),
+            tam["role"].as_str()
+        ),
+        (Some(seat.as_str()), Some(true), Some("player"))
+    );
+    // The website's summary, with the DM's changes since.
+    assert_eq!(tam["member"]["level"], 3);
+    assert_eq!(tam["member"]["passive"]["perception"], 13);
+    assert_eq!(tam["member"]["hitPoints"]["current"], 19);
+    assert_eq!(tam["member"]["conditions"], json!(["prone"]));
+    assert_eq!(tam["member"]["exhaustion"], 1);
+    // Players don't get the DM's view.
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}/party", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A ban is listed by the character that was played.
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/seats/{seat}/ban", t.id),
+        None,
+    )
+    .await;
+    let (_, party) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}/party", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(party["members"], json!([]));
+    assert_eq!(party["banned"], json!([{ "id": "user-1", "name": "Tam" }]));
+}

@@ -281,14 +281,17 @@ pub async fn ban(
     access::owner(&state, &credentials(&headers))?;
     {
         let db = state.db();
-        let player: Option<Option<String>> = db
+        let found: Option<(Option<String>, String)> = db
             .query_row(
-                "SELECT player_id FROM seats WHERE table_id = ?1 AND id = ?2",
+                "SELECT player_id, snapshot FROM seats WHERE table_id = ?1 AND id = ?2",
                 params![id, seat],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let player = player.ok_or_else(|| AppError::not_found("That character left the party"))?;
+        let (player, snapshot) =
+            found.ok_or_else(|| AppError::not_found("That character left the party"))?;
+        // The DM sees who is kept out by the character they played.
+        let name = serde_json::from_str::<Snapshot>(&snapshot)?.summary.name;
         let player = player.ok_or_else(|| {
             AppError::bad("The website didn't say who plays that seat, so it can only be removed")
         })?;
@@ -296,9 +299,9 @@ pub async fn ban(
             db.query_row("SELECT banned FROM tables WHERE id = ?1", [&id], |row| {
                 row.get(0)
             })?;
-        let mut banned: Vec<String> = serde_json::from_str(&banned)?;
-        if !banned.contains(&player) {
-            banned.push(player);
+        let mut banned = bans(&banned)?;
+        if !banned.iter().any(|b| b.id == player) {
+            banned.push(Banned { id: player, name });
         }
         db.execute(
             "UPDATE tables SET banned = ?2 WHERE id = ?1",
@@ -326,9 +329,9 @@ pub async fn unban(
         })
         .optional()?
         .ok_or_else(|| AppError::not_found(format!("No table with id {id}")))?;
-    let banned: Vec<String> = serde_json::from_str::<Vec<String>>(&banned)?
+    let banned: Vec<Banned> = bans(&banned)?
         .into_iter()
-        .filter(|p| p != &player)
+        .filter(|b| b.id != player)
         .collect();
     db.execute(
         "UPDATE tables SET banned = ?2 WHERE id = ?1",
@@ -387,6 +390,72 @@ pub async fn change(
     };
     state.events.changed(&id);
     Ok(Json(member))
+}
+
+/// Someone the DM keeps out of a table: the id the website gave them, and the character they
+/// played, for the DM's list.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct Banned {
+    pub id: String,
+    pub name: String,
+}
+
+/// A table's bans as stored. Early versions kept the ids alone.
+pub fn bans(stored: &str) -> Result<Vec<Banned>> {
+    let rows: Vec<Value> = serde_json::from_str(stored)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| match row {
+            Value::String(id) => Some(Banned {
+                id,
+                name: "A player".into(),
+            }),
+            other => serde_json::from_value(other).ok(),
+        })
+        .collect())
+}
+
+/// `GET /api/tables/{id}/party`: the DM view's side of a table: every seated character with
+/// the numbers a DM asks for, who is a co-DM, and who is kept out.
+pub async fn party(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
+    let access = access::runner(&state, &id, &credentials(&headers))?;
+    let db = state.db();
+    let (locked, banned): (bool, String) = db.query_row(
+        "SELECT locked, banned FROM tables WHERE id = ?1",
+        [&id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut rows =
+        db.prepare("SELECT id, role, snapshot FROM seats WHERE table_id = ?1 ORDER BY created_at")?;
+    let seats = rows
+        .query_map([&id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut members = Vec::new();
+    for (seat_id, role, text) in seats {
+        let snapshot: Snapshot = serde_json::from_str(&text)?;
+        members.push(json!({
+            "seatId": seat_id,
+            "browser": snapshot.character_id.is_none(),
+            "player": Value::Null,
+            "role": role,
+            // The website said who plays it: they can be made co-DM or kept out.
+            "account": snapshot.player_id.is_some(),
+            "member": snapshot.dm_member(),
+        }));
+    }
+    Ok(Json(
+        json!({ "you": access.role, "locked": locked, "members": members, "banned": bans(&banned)? }),
+    ))
 }
 
 fn found(changed: usize) -> Result<()> {

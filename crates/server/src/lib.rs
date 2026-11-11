@@ -56,6 +56,7 @@ pub fn app(state: AppState) -> Router {
         .route("/tables", get(tables::list).post(tables::create))
         .route("/tables/{id}", get(play::view).patch(tables::rename).delete(tables::delete))
         .route("/tables/{id}/events", get(events::open))
+        .route("/tables/{id}/party", get(tables::party))
         .route("/tables/{id}/invite", post(tables::renew_invite))
         .route("/tables/{id}/lock", patch(tables::lock))
         .route("/tables/{id}/log", post(play::post))
