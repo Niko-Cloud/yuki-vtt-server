@@ -211,7 +211,7 @@ async fn stop_hosting(app: AppHandle) -> Result<(), String> {
 async fn pair(app: AppHandle, website_url: String, name: String) -> Result<(), String> {
     let shared = app.state::<Shared>();
     let Some(site) = website::origin_of(&website_url) else {
-        let problem = "The website is an address like https://yuki.example".to_string();
+        let problem = "The website is an https address like https://yuki.example".to_string();
         note(&shared, |n| n.problem = Some(problem.clone()));
         return Err(problem);
     };

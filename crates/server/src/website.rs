@@ -31,13 +31,33 @@ pub struct Paired {
 }
 
 /// The website as the host keeps it: "https://yuki.example", no path, no slash at the end.
+/// Plain http is only taken for a website on this computer or the home network, since the
+/// host key and the shared secret travel over it.
 pub fn origin_of(url: &str) -> Option<String> {
     let (scheme, rest) = url.trim().split_once("://")?;
-    if scheme != "https" && scheme != "http" {
-        return None;
-    }
     let host = rest.split('/').next().filter(|h| !h.is_empty())?;
+    match scheme {
+        "https" => {}
+        "http" if is_local(host) => {}
+        _ => return None,
+    }
     Some(format!("{scheme}://{host}"))
+}
+
+// "localhost:5173", "127.0.0.1", "[::1]:3000", "192.168.1.150" and the like.
+fn is_local(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(name, _port)| name),
+    };
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match name.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+        Err(_) => false,
+    }
 }
 
 fn client() -> reqwest::Client {
@@ -87,7 +107,7 @@ pub async fn pair(
     show: impl FnOnce(&str),
 ) -> Result<Paired, String> {
     let website =
-        origin_of(website).ok_or("The website is an address like https://yuki.example")?;
+        origin_of(website).ok_or("The website is an https address like https://yuki.example")?;
     let http = client();
     let response = http
         .post(format!("{website}/api/hosts/pair"))
@@ -140,7 +160,7 @@ pub async fn pair_with_link(
     name: &str,
     owner_key: &str,
 ) -> Result<Paired, String> {
-    let website = origin_of(website).ok_or("The link's website is not an address")?;
+    let website = origin_of(website).ok_or("The link's website is not an https address")?;
     let response = client()
         .post(format!("{website}/api/hosts/pair/link"))
         .json(&json!({ "token": token, "name": name, "ownerKey": owner_key }))
@@ -227,11 +247,16 @@ pub fn save(data_dir: &Path, paired: &Paired) -> std::io::Result<()> {
     crate::secrets::write(&data_dir.join("website-secret"), &paired.secret)
 }
 
-/// The pairing kept in the data folder, if the host was paired.
+/// The pairing kept in the data folder, if the host was paired. A pairing with a plain http
+/// website out on the internet (older versions took those) counts as none: pair again.
 pub fn load(data_dir: &Path) -> std::io::Result<Option<(String, String)>> {
     let website = crate::secrets::read(&data_dir.join("website"))?;
     let key = crate::secrets::read(&data_dir.join("host-key"))?;
-    Ok(website.zip(key))
+    let safe = website.as_deref().and_then(origin_of);
+    if website.is_some() && safe.is_none() {
+        tracing::warn!("the paired website isn't https; pair again");
+    }
+    Ok(safe.zip(key))
 }
 
 /// Tells the website where players reach the host: as soon as the tunnel has an address, and
@@ -317,5 +342,55 @@ mod tests {
         );
         assert_eq!(origin_of("yuki.example"), None);
         assert_eq!(origin_of("ftp://yuki.example"), None);
+    }
+
+    #[test]
+    fn takes_plain_http_only_close_to_home() {
+        for local in [
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+            "http://10.0.0.4",
+            "http://172.16.0.2",
+            "http://172.31.255.1:8080",
+            "http://192.168.1.150:5173",
+        ] {
+            assert_eq!(origin_of(local).as_deref(), Some(local), "{local}");
+        }
+        for far in [
+            "http://yuki.example",
+            "http://172.32.0.1",
+            "http://8.8.8.8",
+            "http://192.168.1.150.evil.example",
+            "http://localhost.evil.example",
+            "http://[2001:db8::1]",
+        ] {
+            assert_eq!(origin_of(far), None, "{far}");
+        }
+        assert_eq!(
+            read_link("yukivtt://pair?website=http%3A%2F%2Fyuki.example&token=abc"),
+            None
+        );
+    }
+
+    #[test]
+    fn forgets_a_pairing_over_plain_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let paired = Paired {
+            website: "http://yuki.example".into(),
+            host_key: "key".into(),
+            secret: "secret".into(),
+        };
+        save(dir.path(), &paired).unwrap();
+        assert_eq!(load(dir.path()).unwrap(), None);
+        let paired = Paired {
+            website: "https://yuki.example".into(),
+            ..paired
+        };
+        save(dir.path(), &paired).unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap(),
+            Some(("https://yuki.example".into(), "key".into()))
+        );
     }
 }
