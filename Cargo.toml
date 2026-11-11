@@ -11,3 +11,10 @@ repository = "https://github.com/yuki/yuki-vtt-server"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Release builds are made small without giving up speed: one pass over the whole program,
+# and no debug symbols in the file.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
