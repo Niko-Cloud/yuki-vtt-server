@@ -112,3 +112,29 @@ async fn turns_down_files_that_are_not_backups() {
     );
     assert!(backup::export(data.path(), "nope", &data.path().join("x")).is_err());
 }
+
+#[tokio::test]
+async fn turns_down_a_backup_that_unpacks_into_too_much() {
+    // A picture of zeros packs into almost nothing and unpacks past what a map may be.
+    let data = tempfile::tempdir().unwrap();
+    let bomb = data.path().join("bomb.yukitable");
+    let zipped = flate2::write::GzEncoder::new(
+        std::fs::File::create(&bomb).unwrap(),
+        flate2::Compression::best(),
+    );
+    let mut archive = tar::Builder::new(zipped);
+    let zeros = vec![0u8; 64 * 1024 * 1024];
+    let mut header = tar::Header::new_gnu();
+    header.set_size(zeros.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "pictures/Ab1.map", zeros.as_slice())
+        .unwrap();
+    archive.into_inner().unwrap().finish().unwrap();
+    assert!(std::fs::metadata(&bomb).unwrap().len() < 1024 * 1024);
+    assert_eq!(
+        backup::restore(data.path(), &bomb, false).unwrap_err(),
+        "That backup unpacks into more than a table can hold"
+    );
+}

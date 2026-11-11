@@ -15,6 +15,8 @@ use std::path::Path;
 const FORMAT: u64 = 1;
 // A table's pictures are at most 200 of 8 MB; a file bigger than this isn't one of ours.
 const BIGGEST: u64 = 2 * 1024 * 1024 * 1024;
+// The table's rows, without pictures: far more than any real table's log and maps.
+const TABLE_LIMIT: u64 = 256 * 1024 * 1024;
 
 // The rows a table owns, and the columns kept for each. Only these names ever reach SQL.
 const PARTS: [(&str, &[&str]); 5] = [
@@ -197,6 +199,8 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
     let mut manifest: Option<Value> = None;
     let mut pictures: Vec<(String, Vec<u8>)> = Vec::new();
     let not_ours = |_| "That isn't a table backup".to_string();
+    // A small file can unpack into a huge one: nothing is read past what a table can hold.
+    let mut unpacked: u64 = 0;
     for entry in archive.entries().map_err(not_ours)? {
         let mut entry = entry.map_err(not_ours)?;
         if !entry.header().entry_type().is_file() {
@@ -207,8 +211,20 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
             .map_err(not_ours)?
             .to_string_lossy()
             .to_string();
+        let limit = if path == "table.json" {
+            TABLE_LIMIT
+        } else {
+            crate::pictures::MAP_LIMIT as u64
+        };
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).map_err(not_ours)?;
+        (&mut entry)
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(not_ours)?;
+        unpacked += bytes.len() as u64;
+        if bytes.len() as u64 > limit || unpacked > BIGGEST {
+            return Err("That backup unpacks into more than a table can hold".into());
+        }
         if path == "table.json" {
             manifest = Some(
                 serde_json::from_slice(&bytes)
