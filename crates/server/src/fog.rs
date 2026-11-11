@@ -131,8 +131,17 @@ pub async fn set_door(
             if !near {
                 return Err(not_allowed("open a door your token is not next to"));
             }
+            // A closed secret door isn't a door at all to players.
+            if door.door.as_ref().is_some_and(|d| d.secret && !d.open) {
+                return Err(AppError::not_found("That door is gone"));
+            }
         }
-        map.walls[at].door = Some(maps::Door { open: body.open });
+        // A locked door stays as it is, for the DM too, until the DM unlocks it.
+        let door = map.walls[at].door.as_mut().expect("found as a door");
+        if door.locked {
+            return Err(AppError::bad("That door is locked"));
+        }
+        door.open = body.open;
         Ok(map)
     })
 }
@@ -223,6 +232,19 @@ pub fn for_players(scene: &mut Value) {
         templates.retain(|t| t["hidden"] != json!(true));
     }
     scene["notes"] = json!([]);
+    // A closed secret door is a wall to players; an open one an open door, its secret kept.
+    if let Some(walls) = scene["walls"].as_array_mut() {
+        for wall in walls {
+            let Some(door) = wall.get_mut("door").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            let open = door.get("open") == Some(&json!(true));
+            let secret = door.remove("secret") == Some(json!(true));
+            if secret && !open {
+                wall.as_object_mut().expect("a wall").remove("door");
+            }
+        }
+    }
 }
 
 // Explored cells as text: each row's runs, like "3:0-5,8-9;4:1-2", as the website packs them.

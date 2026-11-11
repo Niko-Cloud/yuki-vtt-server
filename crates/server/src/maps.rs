@@ -128,11 +128,20 @@ pub struct Wall {
     pub b: [f64; 2],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub door: Option<Door>,
+    /// A window: sight and light go through it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub window: bool,
 }
 
+/// A door: a locked one stays shut until the DM unlocks it; a secret one is a plain wall to
+/// players while it is closed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Door {
     pub open: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
 }
 
 /// A light on the map, like a campfire, or a cone of light aimed one way.

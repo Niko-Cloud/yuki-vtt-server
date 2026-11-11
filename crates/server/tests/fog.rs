@@ -307,3 +307,69 @@ async fn turns_tokens_and_keeps_cones_of_light_and_sight() {
     assert_eq!(seen["lights"][0]["angle"], 30.0);
     assert_eq!(seen["lights"][0]["width"], 45.0);
 }
+
+#[tokio::test]
+async fn keeps_locked_doors_shut_and_secret_doors_hidden() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    // Tam lands at the top left, beside all three doors.
+    let walls = json!([
+        { "id": "locked", "a": [140, 0], "b": [140, 70], "door": { "open": false, "locked": true } },
+        { "id": "secret", "a": [0, 140], "b": [70, 140], "door": { "open": false, "secret": true } },
+        { "id": "plain", "a": [70, 140], "b": [140, 140], "door": { "open": false } },
+        { "id": "glass", "a": [210, 0], "b": [210, 140], "window": true },
+    ]);
+    let lighting = |walls: Value| json!({ "fog": { "mode": "dynamic", "light": "bright", "remember": true }, "walls": walls, "lights": [] });
+    let lit = format!("{at}/lighting");
+    let put = call(&app, As::Dm, "PUT", &lit, Some(lighting(walls.clone()))).await;
+    assert_eq!(put.0, StatusCode::NO_CONTENT);
+
+    let seen = view(&app, As::Seat(&tam), &t).await["scene"]["walls"].clone();
+    assert_eq!(seen[0]["door"], json!({ "open": false, "locked": true }));
+    assert_eq!(
+        seen[1],
+        json!({ "id": "secret", "a": [0.0, 140.0], "b": [70.0, 140.0] })
+    );
+    assert_eq!(seen[3]["window"], true);
+
+    let door = |who, wall: &str| {
+        let path = format!("{at}/doors/{wall}");
+        let app = app.clone();
+        async move {
+            call(&app, who, "POST", &path, Some(json!({ "open": true })))
+                .await
+                .0
+        }
+    };
+    assert_eq!(
+        door(As::Seat(&tam), "locked").await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(door(As::Seat(&tam), "secret").await, StatusCode::NOT_FOUND);
+    assert_eq!(door(As::Seat(&tam), "plain").await, StatusCode::NO_CONTENT);
+    // Locked means shut for the DM too, until unlocked.
+    assert_eq!(door(As::Dm, "locked").await, StatusCode::BAD_REQUEST);
+    let mut unlocked = walls.clone();
+    unlocked[0]["door"] = json!({ "open": false });
+    let put = call(&app, As::Dm, "PUT", &lit, Some(lighting(unlocked))).await;
+    assert_eq!(put.0, StatusCode::NO_CONTENT);
+    assert_eq!(door(As::Seat(&tam), "locked").await, StatusCode::NO_CONTENT);
+
+    // Opened by the DM, the secret door shows as an open door, its secret kept.
+    assert_eq!(door(As::Dm, "secret").await, StatusCode::NO_CONTENT);
+    let seen = view(&app, As::Seat(&tam), &t).await["scene"]["walls"].clone();
+    assert_eq!(seen[1]["door"], json!({ "open": true }));
+    let dm = view(&app, As::Dm, &t).await["scene"]["walls"].clone();
+    assert_eq!(dm[1]["door"], json!({ "open": true, "secret": true }));
+}
