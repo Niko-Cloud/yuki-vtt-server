@@ -190,6 +190,8 @@ impl Snapshot {
             "exhaustion": state.get("exhaustion").and_then(Value::as_i64).unwrap_or(0),
             "concentrating": state.get("concentrating").and_then(Value::as_bool).unwrap_or(false),
             "deathSaves": state.get("deathSaves").cloned().unwrap_or_else(|| json!({ "successes": 0, "failures": 0 })),
+            // Their token's sight on a map with fog starts from it.
+            "darkvision": self.member.get("darkvision").cloned().unwrap_or(Value::Null),
         })
     }
 

@@ -293,6 +293,15 @@ async fn routes_never_answer_500() {
     let app = host();
     let t = table(&app).await;
     let (seat, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let scene = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
     let paths = [
         format!("/tables/{}", t.id),
         format!("/tables/{}/log", t.id),
@@ -310,6 +319,12 @@ async fn routes_never_answer_500() {
         "/seat".to_string(),
         format!("/join/{}", t.invite),
         "/tables".to_string(),
+        format!("/tables/{}/sight", t.id),
+        format!("{scene}/lighting"),
+        format!("{scene}/explored"),
+        format!("{scene}/notes"),
+        format!("{scene}/doors/door"),
+        format!("{scene}/tokens/party"),
     ];
     let methods = ["GET", "POST", "PUT", "PATCH", "DELETE"];
     for _ in 0..ROUNDS / 4 {

@@ -85,6 +85,18 @@ const STEPS: &[&str] = &[
         used_at INTEGER NOT NULL
     );
 "#,
+    r#"
+    ALTER TABLE tables ADD COLUMN shared_sight INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE explored (
+        scene_id TEXT NOT NULL REFERENCES scenes(id) ON DELETE CASCADE,
+        table_id TEXT NOT NULL REFERENCES tables(id) ON DELETE CASCADE,
+        viewer TEXT NOT NULL,
+        cells TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (scene_id, viewer)
+    );
+    CREATE INDEX explored_by_table ON explored(table_id);
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

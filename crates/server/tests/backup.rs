@@ -54,6 +54,32 @@ async fn backs_up_a_table_and_brings_it_back_on_another_computer() {
         Some(json!({ "label": "Luck", "expression": "1d20" })),
     )
     .await;
+    // The fog comes along too: walls, shared sight and what the party explored.
+    let fog = json!({
+        "fog": { "mode": "dynamic", "light": "dark", "remember": true },
+        "walls": [{ "id": "w", "a": [0, 70], "b": [700, 70] }],
+        "lights": [],
+    });
+    let at = format!("/tables/{}/scenes/{scene}", t.id);
+    call(&app, As::Dm, "PUT", &format!("{at}/lighting"), Some(fog)).await;
+    let shared = json!({ "shared": true });
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/sight", t.id),
+        Some(shared),
+    )
+    .await;
+    let seen = json!({ "cells": "0:0-3" });
+    call(
+        &app,
+        As::Seat(&token),
+        "POST",
+        &format!("{at}/explored"),
+        Some(seen),
+    )
+    .await;
 
     let file = first.path().join("night.yukitable");
     backup::export(first.path(), &t.id, &file).unwrap();
@@ -78,6 +104,17 @@ async fn backs_up_a_table_and_brings_it_back_on_another_computer() {
     assert_eq!(view["members"][0]["name"], "Tam");
     assert_eq!(view["scene"]["name"], "Cave");
     assert_eq!(view["log"][0]["data"]["label"], "Luck");
+    assert_eq!(view["scene"]["walls"][0]["id"], "w");
+    assert_eq!(view["party"]["sharedSight"], true);
+    let (_, explored) = call(
+        &moved,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}/scenes/{scene}/explored", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(explored["cells"], "0:0-3");
     let (status, kind, size) = fetch(
         &moved,
         &format!(

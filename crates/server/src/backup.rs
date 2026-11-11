@@ -19,7 +19,7 @@ const BIGGEST: u64 = 2 * 1024 * 1024 * 1024;
 const TABLE_LIMIT: u64 = 256 * 1024 * 1024;
 
 // The rows a table owns, and the columns kept for each. Only these names ever reach SQL.
-const PARTS: [(&str, &[&str]); 5] = [
+const PARTS: [(&str, &[&str]); 6] = [
     (
         "tables",
         &[
@@ -36,6 +36,7 @@ const PARTS: [(&str, &[&str]); 5] = [
             "created_at",
             "updated_at",
             "ask_to_join",
+            "shared_sight",
         ],
     ),
     (
@@ -55,6 +56,11 @@ const PARTS: [(&str, &[&str]); 5] = [
     (
         "scenes",
         &["id", "table_id", "name", "position", "data", "created_at"],
+    ),
+    // What players explored of each map with fog; after the scenes it belongs to.
+    (
+        "explored",
+        &["scene_id", "table_id", "viewer", "cells", "updated_at"],
     ),
     (
         "assets",
@@ -100,9 +106,10 @@ fn as_json(value: ValueRef<'_>) -> Value {
 }
 
 // Columns kept as numbers; every other one is text.
-const NUMBERS: [&str; 8] = [
+const NUMBERS: [&str; 9] = [
     "locked",
     "ask_to_join",
+    "shared_sight",
     "created_at",
     "updated_at",
     "position",
@@ -356,6 +363,13 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
                 .map_err(|e| format!("The backup's {part} didn't fit: {e}"))?;
         }
     }
+    // Explored places only for this table's own maps.
+    tx.execute(
+        "DELETE FROM explored WHERE table_id = ?1
+         AND scene_id NOT IN (SELECT id FROM scenes WHERE table_id = ?1)",
+        [&id],
+    )
+    .map_err(|e| e.to_string())?;
     let folder = data_dir.join("pictures").join(&id);
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::create_dir_all(&folder).map_err(problem("Couldn't make the pictures folder"))?;

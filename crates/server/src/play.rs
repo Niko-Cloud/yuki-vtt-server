@@ -106,13 +106,11 @@ pub async fn view(
         Some(scene) => maps::scene(&db, &id, scene)?,
         None => None,
     };
-    // Hidden tokens never leave the host for players.
-    if let Some(tokens) = shown
-        .as_mut()
-        .and_then(|scene| scene["tokens"].as_array_mut())
+    // The DM's layer (hidden tokens and drawings, notes) never leaves the host for players.
+    if let Some(scene) = shown.as_mut()
         && !access.runs()
     {
-        tokens.retain(|t| t["hidden"] != json!(true));
+        crate::fog::for_players(scene);
     }
     let characters: Vec<Value> = seated
         .iter()
@@ -120,7 +118,7 @@ pub async fn view(
         .map(|seat| json!({ "seatId": seat.id, "characterId": seat.snapshot.character_id }))
         .collect();
     Ok(Json(json!({
-        "party": { "id": id, "name": name, "edition": edition },
+        "party": { "id": id, "name": name, "edition": edition, "sharedSight": crate::fog::shared_sight(&db, &id)? },
         "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "characters": characters },
         // Player characters' health is everyone's to see, as at a real table.
         "members": seated.iter().map(|seat| seat.snapshot.member(&seat.id, &seat.permissions)).collect::<Vec<_>>(),

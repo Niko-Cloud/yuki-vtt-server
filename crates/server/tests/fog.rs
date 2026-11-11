@@ -1,0 +1,236 @@
+//! Fog of war: walls, doors, lights and notes, shared sight, and what players explored.
+
+mod common;
+
+use axum::http::StatusCode;
+use common::*;
+use serde_json::{Value, json};
+
+async fn view(app: &axum::Router, who: As<'_>, t: &Table) -> Value {
+    call(app, who, "GET", &format!("/tables/{}", t.id), None)
+        .await
+        .1
+}
+
+#[tokio::test]
+async fn runs_fog_of_war_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, wren) = join(&app, &t.invite, "Wren", "user-2").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    let place = call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    assert_eq!(place.0, StatusCode::NO_CONTENT);
+
+    // The party lands on the top row, Tam first: a door one cell over, another far off.
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "dark", "remember": true },
+        "walls": [
+            { "id": "near", "a": [140, 0], "b": [140, 70], "door": { "open": false } },
+            { "id": "far", "a": [1000, 500], "b": [1000, 600], "door": { "open": false } },
+            { "id": "wall", "a": [0, 300], "b": [600, 300] },
+        ],
+        "lights": [{ "id": "fire", "x": 700, "y": 700, "bright": 10, "dim": 20 }],
+    });
+    let lit = format!("{at}/lighting");
+    let put = |who, body| call(&app, who, "PUT", &lit, Some(body));
+    assert_eq!(
+        put(As::Seat(&tam), lighting.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        put(As::Dm, lighting.clone()).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let mut off_map = lighting.clone();
+    off_map["walls"] = json!([{ "id": "x", "a": [-5, 0], "b": [1, 1] }]);
+    assert_eq!(put(As::Dm, off_map).await.0, StatusCode::BAD_REQUEST);
+    let mut odd = lighting.clone();
+    odd["fog"]["light"] = json!("dusk");
+    assert_eq!(put(As::Dm, odd).await.0, StatusCode::BAD_REQUEST);
+
+    // A player opens the door next to their token, not one across the map.
+    let door = |who, wall: &str, open: bool| {
+        let path = format!("{at}/doors/{wall}");
+        let app = app.clone();
+        async move {
+            call(&app, who, "POST", &path, Some(json!({ "open": open })))
+                .await
+                .0
+        }
+    };
+    assert_eq!(
+        door(As::Seat(&tam), "near", true).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        door(As::Seat(&tam), "far", true).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        door(As::Seat(&tam), "wall", true).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(door(As::Dm, "far", true).await, StatusCode::NO_CONTENT);
+    let walls = view(&app, As::Seat(&tam), &t).await["scene"]["walls"].clone();
+    assert_eq!(walls[0]["door"]["open"], true);
+    assert_eq!(walls[1]["door"]["open"], true);
+
+    // The DM's layer: notes and hidden drawings never reach players.
+    let note = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{at}/notes"),
+        Some(json!({ "x": 100, "y": 100, "text": "Pit trap" })),
+    )
+    .await;
+    assert_eq!(note.0, StatusCode::NO_CONTENT);
+    let mine = call(
+        &app,
+        As::Seat(&tam),
+        "POST",
+        &format!("{at}/notes"),
+        Some(json!({ "x": 1, "y": 1, "text": "Mine" })),
+    )
+    .await;
+    assert_eq!(mine.0, StatusCode::FORBIDDEN);
+    let line = json!({ "shape": "rect", "color": "#ff9090", "points": [[0, 0], [70, 70]], "hidden": true });
+    let drawn = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{at}/drawings"),
+        Some(line.clone()),
+    )
+    .await;
+    assert_eq!(drawn.0, StatusCode::NO_CONTENT);
+    let dm = view(&app, As::Dm, &t).await;
+    assert_eq!(dm["scene"]["notes"][0]["text"], "Pit trap");
+    assert_eq!(dm["scene"]["drawings"].as_array().unwrap().len(), 1);
+    let player = view(&app, As::Seat(&tam), &t).await;
+    assert_eq!(player["scene"]["notes"], json!([]));
+    assert_eq!(player["scene"]["drawings"], json!([]));
+    assert!(player["members"][0].get("darkvision").is_some());
+    let note_id = dm["scene"]["notes"][0]["id"].as_str().unwrap().to_string();
+    let gone = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!("{at}/notes/{note_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(gone.0, StatusCode::NO_CONTENT);
+
+    // Only the DM sets a token's sight.
+    let token = dm["scene"]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["seatId"] == tam_seat.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let sight =
+        json!({ "vision": { "range": 30, "falloff": 5 }, "light": { "bright": 20, "dim": 40 } });
+    let path = format!("{at}/tokens/{token}");
+    assert_eq!(
+        call(&app, As::Seat(&tam), "PATCH", &path, Some(sight.clone()))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &path, Some(sight)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let too_far = json!({ "light": { "bright": 2000, "dim": 40 } });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &path, Some(too_far)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &path,
+        Some(json!({ "vision": null })),
+    )
+    .await;
+    let after = view(&app, As::Dm, &t).await["scene"]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == token.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(after["light"], json!({ "bright": 20, "dim": 40 }));
+    assert!(after.get("vision").is_none());
+
+    // Each player keeps what they explored, until the DM shares sight or forgets it.
+    let explored = format!("{at}/explored");
+    let add = |who, cells: &str| {
+        let (app, path) = (app.clone(), explored.clone());
+        let body = json!({ "cells": cells });
+        async move { call(&app, who, "POST", &path, Some(body)).await.0 }
+    };
+    let read = |who| {
+        let (app, path) = (app.clone(), explored.clone());
+        async move { call(&app, who, "GET", &path, None).await.1["cells"].clone() }
+    };
+    assert_eq!(
+        add(As::Seat(&tam), "0:0-2;1:0").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        add(As::Seat(&tam), "1:1;99:0-3").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(read(As::Seat(&tam)).await, "0:0-2;1:0-1");
+    assert_eq!(read(As::Seat(&wren)).await, "");
+    let as_tam = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("{explored}?viewer={tam_seat}"),
+        None,
+    )
+    .await;
+    assert_eq!(as_tam.1["cells"], "0:0-2;1:0-1");
+    let shared = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/sight", t.id),
+        Some(json!({ "shared": true })),
+    )
+    .await;
+    assert_eq!(shared.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        view(&app, As::Seat(&tam), &t).await["party"]["sharedSight"],
+        true
+    );
+    assert_eq!(add(As::Seat(&wren), "2:2").await, StatusCode::NO_CONTENT);
+    assert_eq!(read(As::Seat(&tam)).await, "2:2");
+    let forget = |who| {
+        let (app, path) = (app.clone(), explored.clone());
+        async move { call(&app, who, "DELETE", &path, None).await.0 }
+    };
+    assert_eq!(forget(As::Seat(&tam)).await, StatusCode::FORBIDDEN);
+    assert_eq!(forget(As::Dm).await, StatusCode::NO_CONTENT);
+    assert_eq!(read(As::Seat(&tam)).await, "");
+    assert_eq!(
+        call(&app, As::Nobody, "GET", &explored, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+}

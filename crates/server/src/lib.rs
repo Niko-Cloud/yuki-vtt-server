@@ -7,6 +7,7 @@ pub mod cloudflared;
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod fog;
 pub mod host;
 pub mod ids;
 pub mod limits;
@@ -95,6 +96,13 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/drawings", post(maps::add_drawing).delete(maps::clear_drawings))
         .route("/tables/{id}/scenes/{scene}/drawings/{drawing}", axum::routing::delete(maps::remove_drawing))
         .route("/tables/{id}/ping", post(maps::ping))
+        // Fog of war: the DM's walls, doors, lights and notes; doors players stand next to.
+        .route("/tables/{id}/sight", patch(fog::set_sight))
+        .route("/tables/{id}/scenes/{scene}/lighting", axum::routing::put(fog::set_lighting))
+        .route("/tables/{id}/scenes/{scene}/doors/{wall}", post(fog::set_door))
+        .route("/tables/{id}/scenes/{scene}/notes", post(fog::add_note))
+        .route("/tables/{id}/scenes/{scene}/notes/{note}", axum::routing::delete(fog::remove_note))
+        .route("/tables/{id}/scenes/{scene}/explored", get(fog::explored).post(fog::explore).delete(fog::forget_explored))
         .route("/tables/{id}/assets", post(pictures::add).layer(DefaultBodyLimit::max(pictures::LIBRARY_LIMIT + 1024)))
         .route("/tables/{id}/assets/{asset}", get(pictures::picture).delete(pictures::remove))
         .route("/tables/{id}/handout", axum::routing::put(pictures::show).delete(pictures::hide))

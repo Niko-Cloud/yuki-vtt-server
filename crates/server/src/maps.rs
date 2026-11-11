@@ -50,6 +50,83 @@ pub struct Token {
     pub hidden: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
+    /// What it sees when the map has fog, in feet. Without one, a seated character sees by
+    /// their darkvision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<Vision>,
+    /// A light it carries, like a torch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<Carried>,
+    /// Seats that see through it too (a familiar), beside its own player.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_with: Option<Vec<String>>,
+}
+
+/// How far a token sees in the dark: clear out to the range, fading over the falloff, in feet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Vision {
+    pub range: u32,
+    pub falloff: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off: Option<bool>,
+}
+
+/// A light's reach in feet: bright out to one radius, dim to the other.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Carried {
+    pub bright: u32,
+    pub dim: u32,
+}
+
+/// How a map's fog works: off, or dynamic on a bright or dark map, remembering explored
+/// places or not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Fog {
+    pub mode: String,
+    pub light: String,
+    pub remember: bool,
+}
+
+fn no_fog() -> Fog {
+    Fog {
+        mode: "off".into(),
+        light: "bright".into(),
+        remember: true,
+    }
+}
+
+/// A wall that stops sight, in the picture's pixels. A door is a wall that can be open.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Wall {
+    pub id: String,
+    pub a: [f64; 2],
+    pub b: [f64; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub door: Option<Door>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Door {
+    pub open: bool,
+}
+
+/// A light on the map, like a campfire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Light {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub bright: u32,
+    pub dim: u32,
+}
+
+/// A note pinned on the map for the DM alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Note {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub text: String,
 }
 
 /// A picture laid on the map that isn't a token: a door, a chest, a cart. Sized in cells.
@@ -75,6 +152,9 @@ pub struct Drawing {
     pub points: Vec<[f64; 2]>,
     /// Who drew it: a seat, or "dm" for whoever runs the table. They may erase it.
     pub by: String,
+    /// On the DM's layer: players never receive it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +169,15 @@ pub struct TableMap {
     pub props: Vec<Prop>,
     #[serde(default)]
     pub drawings: Vec<Drawing>,
+    #[serde(default = "no_fog")]
+    pub fog: Fog,
+    #[serde(default)]
+    pub walls: Vec<Wall>,
+    #[serde(default)]
+    pub lights: Vec<Light>,
+    /// The DM's notes; players never receive them.
+    #[serde(default)]
+    pub notes: Vec<Note>,
 }
 
 /// What the DM sets for a map: its size and grid.
@@ -134,6 +223,10 @@ fn blank() -> TableMap {
         tokens: vec![],
         props: vec![],
         drawings: vec![],
+        fog: no_fog(),
+        walls: vec![],
+        lights: vec![],
+        notes: vec![],
     }
 }
 
@@ -176,11 +269,11 @@ impl TableMap {
     }
 }
 
-fn credentials(headers: &HeaderMap) -> Credentials {
+pub(crate) fn credentials(headers: &HeaderMap) -> Credentials {
     Credentials::from(headers, None)
 }
 
-fn not_allowed(what: &str) -> AppError {
+pub(crate) fn not_allowed(what: &str) -> AppError {
     AppError::not_found(format!("The DM hasn't let you {what}"))
 }
 
@@ -278,7 +371,7 @@ pub fn list(db: &Connection, table_id: &str) -> Result<Vec<Value>> {
     Ok(scenes)
 }
 
-fn active_scene(db: &Connection, table_id: &str) -> Result<Option<String>> {
+pub(crate) fn active_scene(db: &Connection, table_id: &str) -> Result<Option<String>> {
     Ok(db.query_row(
         "SELECT active_scene_id FROM tables WHERE id = ?1",
         [table_id],
@@ -287,7 +380,7 @@ fn active_scene(db: &Connection, table_id: &str) -> Result<Option<String>> {
 }
 
 // Changes a map. Players act on the map everyone sees, never on the DM's others.
-fn edit(
+pub(crate) fn edit(
     state: &AppState,
     access: &Access,
     table_id: &str,
@@ -524,6 +617,9 @@ pub async fn add_token(
         image_id: body.image_id,
         hidden: None,
         locked: None,
+        vision: None,
+        light: None,
+        shared_with: None,
     };
     if let Some(image) = &token.image_id {
         picture_exists(&state.db(), &id, image)?;
@@ -588,6 +684,9 @@ pub async fn place_party(
                 image_id: None,
                 hidden: None,
                 locked: None,
+                vision: None,
+                light: None,
+                shared_with: None,
             };
             let token = map.keep_token(token);
             map.tokens.push(token);
@@ -610,6 +709,13 @@ pub struct TokenChange {
     image_id: Option<Value>,
     hidden: Option<bool>,
     locked: Option<bool>,
+    /// What it sees, or null for its character's darkvision.
+    #[serde(default, deserialize_with = "present")]
+    vision: Option<Value>,
+    /// A light it carries, or null for none.
+    #[serde(default, deserialize_with = "present")]
+    light: Option<Value>,
+    shared_with: Option<Vec<String>>,
 }
 
 // A field that was sent, null included: Option alone reads null as not sent, so "take the
@@ -618,6 +724,29 @@ fn present<'de, D: serde::Deserializer<'de>>(
     sent: D,
 ) -> std::result::Result<Option<Value>, D::Error> {
     Value::deserialize(sent).map(Some)
+}
+
+// Distances a person sets on the map, in feet.
+fn feet(value: u32) -> Result<u32> {
+    if value <= 1000 {
+        Ok(value)
+    } else {
+        Err(AppError::bad("Distances on the map are 0 to 1000 feet"))
+    }
+}
+
+// A new sight or light for a token: the shape, or null to take it away.
+fn sight_part<T: serde::de::DeserializeOwned>(
+    value: &Option<Value>,
+    what: &str,
+) -> Result<Option<Option<T>>> {
+    match value {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(|part| Some(Some(part)))
+            .map_err(|_| AppError::bad(format!("That isn't a token's {what}"))),
+    }
 }
 
 /// Moving takes "move-own" for your own character's token, "move-any" for the rest; changing a
@@ -629,6 +758,21 @@ pub async fn change_token(
     Json(body): Json<TokenChange>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let vision = sight_part::<Vision>(&body.vision, "sight")?;
+    let light = sight_part::<Carried>(&body.light, "light")?;
+    if let Some(Some(v)) = &vision {
+        feet(v.range)?;
+        feet(v.falloff)?;
+    }
+    if let Some(Some(l)) = &light {
+        feet(l.bright)?;
+        feet(l.dim)?;
+    }
+    if let Some(seats) = &body.shared_with
+        && (seats.len() > 20 || seats.iter().any(|s| s.len() > 40))
+    {
+        return Err(AppError::bad("A token is shared with up to 20 seats"));
+    }
     let picture = match &body.image_id {
         None => None,
         Some(Value::Null) => Some(None),
@@ -669,6 +813,18 @@ pub async fn change_token(
         }
         if body.hidden.is_some() || body.locked.is_some() {
             allow(access.runs(), "hide or lock tokens")?;
+        }
+        if vision.is_some() || light.is_some() || body.shared_with.is_some() {
+            allow(access.runs(), "change a token's sight")?;
+        }
+        if let Some(vision) = vision {
+            token.vision = vision;
+        }
+        if let Some(light) = light {
+            token.light = light;
+        }
+        if let Some(seats) = &body.shared_with {
+            token.shared_with = (!seats.is_empty()).then(|| seats.clone());
         }
         if let Some(name) = &body.name {
             token.name = token_name(name)?;
@@ -818,6 +974,8 @@ pub struct NewDrawing {
     shape: String,
     color: String,
     points: Vec<[f64; 2]>,
+    #[serde(default)]
+    hidden: bool,
 }
 
 fn pen() -> String {
@@ -832,6 +990,9 @@ pub async fn add_drawing(
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     allow(access.may("draw"), "draw")?;
+    if body.hidden {
+        allow(access.runs(), "draw on the DM's layer")?;
+    }
     if !["pen", "line", "rect", "circle"].contains(&body.shape.as_str()) {
         return Err(AppError::bad(
             "A drawing is a pen line, a line, a square or a circle",
@@ -859,6 +1020,7 @@ pub async fn add_drawing(
         color: color(&body.color)?,
         points: body.points,
         by,
+        hidden: body.hidden.then_some(true),
     };
     edit(&state, &access, &id, &scene, |mut map| {
         map.drawings.push(drawing);
