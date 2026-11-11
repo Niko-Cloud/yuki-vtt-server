@@ -99,6 +99,63 @@ fn as_json(value: ValueRef<'_>) -> Value {
     }
 }
 
+// Columns kept as numbers; every other one is text.
+const NUMBERS: [&str; 8] = [
+    "locked",
+    "ask_to_join",
+    "created_at",
+    "updated_at",
+    "position",
+    "width",
+    "height",
+    "seq",
+];
+
+// Text that must read back as `T`.
+fn holds<T: serde::de::DeserializeOwned>(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|text| serde_json::from_str::<T>(text).is_ok())
+}
+
+/// Whether a backed-up value is what the host reads back from that column. SQLite keeps
+/// whatever it is given, so a damaged or made-up backup would otherwise give a table that
+/// breaks each time it is opened.
+fn fits(column: &str, value: &Value) -> bool {
+    use crate::snapshot::Snapshot;
+    match column {
+        c if NUMBERS.contains(&c) => value.is_i64() || value.is_boolean(),
+        "snapshot" => holds::<Snapshot>(value),
+        "permissions" | "visible_to" => holds::<Vec<String>>(value),
+        "banned" => holds::<Vec<Value>>(value),
+        "encounter" => value.is_null() || holds::<yuki_vtt_rules::encounter::Encounter>(value),
+        "handout" => value.is_null() || holds::<Value>(value),
+        "active_scene_id" | "player_id" => value.is_null() || value.is_string(),
+        _ => value.is_string(),
+    }
+}
+
+// The parts of a row that only make sense together.
+fn row_fits(part: &str, row: &Value) -> bool {
+    match part {
+        "scenes" => holds::<crate::maps::TableMap>(&row["data"]),
+        "log" => {
+            let data = row["data"]
+                .as_str()
+                .and_then(|text| serde_json::from_str::<Value>(text).ok());
+            match data {
+                Some(data) if row["kind"] == "change" => serde_json::from_value::<
+                    Vec<yuki_vtt_rules::changes::Change>,
+                >(data["changes"].clone())
+                .is_ok(),
+                Some(_) => true,
+                None => false,
+            }
+        }
+        _ => true,
+    }
+}
+
 fn as_sql(value: &Value) -> Sql {
     match value {
         Value::Null => Sql::Null,
@@ -283,6 +340,9 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
                 .copied()
                 .filter(|column| row.get(*column).is_some())
                 .collect();
+            if !present.iter().all(|column| fits(column, &row[*column])) || !row_fits(part, row) {
+                return Err(format!("The backup's {part} are damaged"));
+            }
             let values: Vec<Sql> = present.iter().map(|column| as_sql(&row[*column])).collect();
             let marks = (1..=present.len())
                 .map(|i| format!("?{i}"))

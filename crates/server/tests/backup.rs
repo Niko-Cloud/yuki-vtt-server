@@ -138,3 +138,35 @@ async fn turns_down_a_backup_that_unpacks_into_too_much() {
         "That backup unpacks into more than a table can hold"
     );
 }
+
+#[tokio::test]
+async fn turns_down_a_backup_whose_rows_the_host_couldnt_read() {
+    // A table whose bans aren't a list would break each time it is opened.
+    let data = tempfile::tempdir().unwrap();
+    let damaged = data.path().join("damaged.yukitable");
+    let manifest = serde_json::json!({
+        "format": 1,
+        "rows": { "tables": [{
+            "id": "Ab1", "name": "Odd", "edition": "2014", "dm_name": "DM",
+            "invite_token": "inv", "banned": "5", "created_at": 1, "updated_at": 1,
+        }] },
+    })
+    .to_string();
+    let zipped = flate2::write::GzEncoder::new(
+        std::fs::File::create(&damaged).unwrap(),
+        flate2::Compression::fast(),
+    );
+    let mut archive = tar::Builder::new(zipped);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(manifest.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "table.json", manifest.as_bytes())
+        .unwrap();
+    archive.into_inner().unwrap().finish().unwrap();
+    assert_eq!(
+        backup::restore(data.path(), &damaged, false).unwrap_err(),
+        "The backup's tables are damaged"
+    );
+}
