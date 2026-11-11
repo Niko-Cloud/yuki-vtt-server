@@ -34,9 +34,12 @@ function draw(status) {
   $('problem').hidden = !status.problem;
   $('problem').textContent = status.problem ?? '';
 
+  $('offer').hidden = !status.linkOffer;
+  $('offer-website').textContent = status.linkOffer ?? '';
   $('paired').hidden = !status.website || status.pairing;
   $('website').textContent = status.website ?? '';
-  $('pair-form').hidden = !!status.website || status.pairing;
+  $('unpaired').hidden = !!status.website || status.pairing;
+  $('by-code').hidden = !!status.website || status.pairing;
   $('pairing').hidden = !status.pairing;
   $('code').textContent = status.pairingCode ?? '....-....';
 
@@ -49,7 +52,12 @@ function draw(status) {
       const seats = document.createElement('span');
       seats.className = 'muted';
       seats.textContent = `${table.seats} ${table.seats === 1 ? 'player' : 'players'}`;
-      row.append(name, seats);
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'link';
+      save.textContent = 'Back up';
+      save.addEventListener('click', () => backUp(table));
+      row.append(name, seats, save);
       return row;
     }),
   );
@@ -84,6 +92,31 @@ async function run(command, args) {
   await refresh();
 }
 
+function notice(text) {
+  $('notice').hidden = !text;
+  $('notice').textContent = text ?? '';
+}
+
+async function backUp(table) {
+  try {
+    const where = await invoke('backup_table', { id: table.id, name: table.name });
+    if (where) notice(`${table.name} is saved in ${where}`);
+  } catch (error) {
+    notice(`Couldn't back up ${table.name}: ${error}`);
+  }
+}
+
+$('restore').addEventListener('click', async () => {
+  try {
+    const name = await invoke('restore_table');
+    if (name) notice(`${name} is back on this computer.`);
+    await refresh();
+  } catch (error) {
+    notice(`Couldn't restore it: ${error}`);
+  }
+});
+$('offer-yes').addEventListener('click', () => run('answer_link', { accept: true }));
+$('offer-no').addEventListener('click', () => run('answer_link', { accept: false }));
 $('toggle').addEventListener('click', () => run(latest?.hosting ? 'stop_hosting' : 'start_hosting'));
 $('pair-form').addEventListener('submit', (event) => {
   event.preventDefault();

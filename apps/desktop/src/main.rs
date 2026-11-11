@@ -10,6 +10,8 @@ use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent, Wry};
+use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_opener::OpenerExt;
 use yuki_vtt_server::host::{self, Running, TableCard};
 use yuki_vtt_server::{cloudflared, secrets, tunnel, website};
@@ -33,6 +35,9 @@ struct Notes {
     pairing_code: Option<String>,
     pairing: bool,
     problem: Option<String>,
+    /// The website asked, by a link, to pair this computer: its address and the link's token,
+    /// until the DM says yes or no in the window.
+    link_offer: Option<(String, String)>,
 }
 
 struct TrayLines {
@@ -52,6 +57,8 @@ struct Status {
     pairing: bool,
     pairing_code: Option<String>,
     problem: Option<String>,
+    /// A website asking to pair this computer, waiting for a yes.
+    link_offer: Option<String>,
     /// Screens with a table open right now.
     screens: usize,
     tables: Vec<TableCard>,
@@ -97,6 +104,7 @@ async fn status(shared: State<'_, Shared>) -> Result<Status, String> {
         pairing: notes.pairing,
         pairing_code: notes.pairing_code,
         problem: notes.problem,
+        link_offer: notes.link_offer.map(|(site, _)| site),
         screens: running
             .as_ref()
             .map(|r| r.state.events.listeners())
@@ -197,35 +205,193 @@ async fn pair(app: AppHandle, website_url: String, name: String) -> Result<(), S
     });
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let shared = app.state::<Shared>();
         let show = app.clone();
         let outcome = website::pair(&site, &name, &key, move |code| {
             note(&show.state::<Shared>(), |n| {
                 n.pairing_code = Some(code.to_string())
             });
         })
-        .await
-        .and_then(|paired| {
-            website::save(&shared.data, &paired)
-                .map_err(|error| format!("Couldn't keep the pairing: {error}"))
-        });
-        note(&shared, |n| {
-            n.pairing = false;
-            n.pairing_code = None;
-            n.problem = outcome.as_ref().err().cloned();
-        });
-        if outcome.is_ok() {
-            // A host that is on starts again, to trust the website and tell it where it is.
-            let was_on = shared.running.lock().await.is_some();
-            if was_on {
-                stop(&app).await;
-            }
-            if was_on || start_on_open(&shared) {
-                let _ = start(&app).await;
-            }
-        }
+        .await;
+        paired(&app, outcome).await;
     });
     Ok(())
+}
+
+// After pairing, by code or by link: keeps it, and starts hosting so the website sees the
+// computer at once. A host that was on starts again, to trust the website.
+async fn paired(app: &AppHandle, outcome: Result<website::Paired, String>) {
+    let shared = app.state::<Shared>();
+    let outcome = outcome.and_then(|paired| {
+        website::save(&shared.data, &paired)
+            .map_err(|error| format!("Couldn't keep the pairing: {error}"))
+    });
+    note(&shared, |n| {
+        n.pairing = false;
+        n.pairing_code = None;
+        n.problem = outcome.as_ref().err().cloned();
+    });
+    if outcome.is_ok() {
+        stop(app).await;
+        let _ = start(app).await;
+    }
+}
+
+fn computer_name() -> String {
+    let name = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "My computer".into());
+    name.trim().chars().take(60).collect()
+}
+
+/// What a `yukivtt://` link asks for, from the website's buttons. Starting needs nothing more;
+/// pairing waits for the DM to say yes in the window, since any page could open such a link.
+fn handle_link(app: &AppHandle, url: &str) {
+    let Some(link) = website::read_link(url) else {
+        tracing::warn!("ignored a link the app doesn't know: {url}");
+        return;
+    };
+    // The pairing token is a secret: only what the link is for goes in the log.
+    match &link {
+        website::Link::Start => tracing::info!("opened by a link to start hosting"),
+        website::Link::Pair { website, .. } => {
+            tracing::info!("opened by a link to pair with {website}")
+        }
+    }
+    let shared = app.state::<Shared>();
+    match link {
+        website::Link::Start => {
+            if paired_website(&shared).is_none() {
+                note(&shared, |n| {
+                    n.problem = Some("Connect this computer to your account first: Settings > My hosts on the website".into())
+                });
+                show_window(app);
+                return;
+            }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if start(&app).await.is_err() {
+                    show_window(&app);
+                }
+            });
+        }
+        website::Link::Pair { website, token } => {
+            note(&shared, |n| {
+                n.link_offer = Some((website, token));
+                n.problem = None;
+            });
+            show_window(app);
+        }
+    }
+}
+
+/// The DM's answer to a website asking, by a link, to pair this computer.
+#[tauri::command]
+async fn answer_link(app: AppHandle, accept: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let offer = shared
+        .notes
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .link_offer
+        .take();
+    let Some((site, token)) = offer else {
+        return Ok(());
+    };
+    if !accept {
+        return Ok(());
+    }
+    let key = host::owner_key(&shared.data)
+        .map_err(|error| format!("Couldn't keep the DM's key: {error}"))?;
+    note(&shared, |n| {
+        n.pairing = true;
+        n.problem = None;
+    });
+    let outcome = website::pair_with_link(&site, &token, &computer_name(), &key).await;
+    paired(&app, outcome).await;
+    Ok(())
+}
+
+/// Saves one table in a file the DM picks.
+#[tauri::command]
+async fn backup_table(app: AppHandle, id: String, name: String) -> Result<Option<String>, String> {
+    let data = app.state::<Shared>().data.clone();
+    let suggested: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let dialog = app
+        .dialog()
+        .file()
+        .add_filter("Table backup", &["yukitable"])
+        .set_file_name(format!("{}.yukitable", suggested.trim()));
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_save_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(path) = picked.and_then(|file| file.into_path().ok()) else {
+        return Ok(None);
+    };
+    let saved = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        yuki_vtt_server::backup::export(&data, &id, &saved)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(Some(path.display().to_string()))
+}
+
+/// Brings a table back from a backup file. A table already here is replaced only after the DM
+/// says so.
+#[tauri::command]
+async fn restore_table(app: AppHandle) -> Result<Option<String>, String> {
+    let data = app.state::<Shared>().data.clone();
+    let dialog = app
+        .dialog()
+        .file()
+        .add_filter("Table backup", &["yukitable"]);
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(path) = picked.and_then(|file| file.into_path().ok()) else {
+        return Ok(None);
+    };
+    let attempt = |replace: bool| {
+        let (data, path) = (data.clone(), path.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            yuki_vtt_server::backup::restore(&data, &path, replace)
+        })
+    };
+    match attempt(false).await.map_err(|e| e.to_string())? {
+        Ok((_, name)) => Ok(Some(name)),
+        Err(problem) if problem.ends_with("is already on this computer") => {
+            let ask = app
+                .dialog()
+                .message(format!(
+                    "{problem}. Put the backup in its place? What the table has now is lost."
+                ))
+                .title("Replace the table?")
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Replace".into(),
+                    "Keep it".into(),
+                ));
+            let replace = tauri::async_runtime::spawn_blocking(move || ask.blocking_show())
+                .await
+                .map_err(|e| e.to_string())?;
+            if !replace {
+                return Ok(None);
+            }
+            attempt(true)
+                .await
+                .map_err(|e| e.to_string())?
+                .map(|(_, name)| Some(name))
+        }
+        Err(problem) => Err(problem),
+    }
 }
 
 /// Forgets the website. The tables stay; nobody can reach them until the host is paired again.
@@ -253,6 +419,55 @@ fn open_data_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), Str
     app.opener()
         .open_path(shared.data.display().to_string(), None::<&str>)
         .map_err(|error| format!("Couldn't open the folder: {error}"))
+}
+
+/// The link entry the deep-link plugin writes quotes the program's path, which the desktop
+/// spec allows but `xdg-open` can't read outside GNOME and KDE (it then hands the link to the
+/// browser). Chrome opens links through `xdg-open`, so the entry gets a plain path: the program
+/// itself, or a shortcut to it in the data folder when its own path has spaces (an AppImage
+/// kept as downloaded).
+#[cfg(target_os = "linux")]
+fn plain_link_entry(data: &std::path::Path) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let entry = std::path::PathBuf::from(home)
+        .join(".local/share/applications/yuki-vtt-server-desktop-handler.desktop");
+    let Ok(text) = std::fs::read_to_string(&entry) else {
+        return;
+    };
+    // An AppImage runs from a temporary mount; the file itself is what to start next time.
+    let program = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
+    let Some(program) = program else { return };
+    let program = if program.to_string_lossy().contains(char::is_whitespace) {
+        let shortcut = data.join("yuki-vtt-server-desktop");
+        let _ = std::fs::remove_file(&shortcut);
+        if std::os::unix::fs::symlink(&program, &shortcut).is_err()
+            || shortcut.to_string_lossy().contains(char::is_whitespace)
+        {
+            return;
+        }
+        shortcut
+    } else {
+        program
+    };
+    let plain = format!("Exec={} %u", program.display());
+    let fixed: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.starts_with("Exec=") {
+                plain.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    let fixed = fixed.join("\n") + "\n";
+    if fixed != text {
+        let _ = std::fs::write(&entry, fixed);
+    }
 }
 
 fn show_window(app: &AppHandle) {
@@ -349,10 +564,15 @@ fn main() {
         )
         .init();
     let app = tauri::Builder::default()
-        // Opening the app again shows the one that is running.
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            show_window(app)
+        // Opening the app again shows the one that is running; a yukivtt:// link opened while
+        // it runs reaches it the same way (and the deep-link plugin hands it over).
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _| {
+            if !argv.iter().any(|arg| arg.starts_with("yukivtt://")) {
+                show_window(app)
+            }
         }))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             status,
@@ -361,7 +581,10 @@ fn main() {
             pair,
             unpair,
             set_start_on_open,
-            open_data_folder
+            open_data_folder,
+            answer_link,
+            backup_table,
+            restore_table
         ])
         .setup(|app| {
             let data = app.path().app_data_dir()?;
@@ -373,6 +596,30 @@ fn main() {
                 tray: Mutex::new(None),
             });
             let handle = app.handle().clone();
+            // The website's buttons open yukivtt:// links. Installers register the scheme;
+            // registering here too covers the AppImage and running from the source.
+            #[cfg(any(target_os = "linux", windows))]
+            if let Err(error) = app.deep_link().register_all() {
+                tracing::warn!("couldn't register yukivtt:// links: {error}");
+            }
+            #[cfg(target_os = "linux")]
+            if let Ok(data) = app.path().app_data_dir() {
+                plain_link_entry(&data);
+            }
+            {
+                let links = handle.clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        handle_link(&links, url.as_str());
+                    }
+                });
+            }
+            // The app may have been started by a link.
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for url in urls {
+                    handle_link(&handle, url.as_str());
+                }
+            }
             // Some Linux desktops have no tray (or lack its library, which fails loudly):
             // the app then works from its window alone.
             let tray =
