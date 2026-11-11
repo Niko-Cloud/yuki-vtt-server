@@ -71,7 +71,8 @@ async fn run(
     port: u16,
     address: &watch::Sender<Option<String>>,
 ) -> std::io::Result<()> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args([
             "tunnel",
             "--no-autoupdate",
@@ -81,8 +82,11 @@ async fn run(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         // The tunnel goes when the host does.
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    // On Windows a console program would flash a black window each time it starts.
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let mut child = command.spawn()?;
     // cloudflared writes its news, the address among it, to stderr.
     let mut lines = BufReader::new(child.stderr.take().expect("stderr was piped")).lines();
     while let Some(line) = lines.next_line().await? {

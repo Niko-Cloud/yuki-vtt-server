@@ -107,6 +107,8 @@ async fn pair(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let name = options
         .name
         .or_else(|| std::env::var("HOSTNAME").ok())
+        // Windows keeps the computer's name here.
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
         .unwrap_or_else(|| "My computer".into());
     let name: String = name.trim().chars().take(60).collect();
     let paired = website::pair(&site, &name, &key, |code| {

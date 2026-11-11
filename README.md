@@ -69,6 +69,10 @@ cargo install tauri-cli --version '^2' --locked    # once, to make installers
 cd apps/desktop && cargo tauri build               # the installer for this system
 ```
 
+Installers for Windows, macOS and Linux are built on GitHub by the **Installers** workflow
+(Actions tab > Installers > Run workflow, or push a tag like `v0.1.0`); they are attached to
+the run. They are not signed yet, so Windows and macOS warn before the first start.
+
 On Linux the tray icon needs `libayatana-appindicator` (or `libappindicator`), and a desktop
 that shows tray icons. Without them the app still works from its window, which then
 minimizes when closed.
