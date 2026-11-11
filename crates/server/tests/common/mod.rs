@@ -194,6 +194,20 @@ pub async fn upload(
     )
 }
 
+/// A seat's media pass, asked for with the seat token in a header, for addresses.
+pub async fn seat_pass(app: &Router, table: &str, token: &str) -> String {
+    let (status, given) = call(
+        app,
+        As::Seat(token),
+        "POST",
+        &format!("/tables/{table}/seat-pass"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{given}");
+    given["pass"].as_str().unwrap().to_string()
+}
+
 /// Fetches a picture by its address, as an <img> does: no headers, the seat in the query.
 pub async fn fetch(app: &Router, path: &str) -> (StatusCode, String, usize) {
     let request = Request::builder()

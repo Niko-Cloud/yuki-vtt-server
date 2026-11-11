@@ -68,7 +68,6 @@ impl Events {
 #[derive(Deserialize)]
 pub struct EventsQuery {
     pass: Option<String>,
-    seat: Option<String>,
 }
 
 /// `GET /api/tables/{id}/events`: opens the live channel for someone at the table.
@@ -91,7 +90,7 @@ pub async fn open(
     }) {
         return Err(AppError::forbidden("This website may not use this host"));
     }
-    let credentials = Credentials::from(&headers, query.pass, query.seat);
+    let credentials = Credentials::from(&headers, query.pass);
     access::at_table(&state, &table_id, &credentials)?;
     let events = state.events.listen(&table_id);
     Ok(upgrade.on_upgrade(move |socket| stream(socket, events)))

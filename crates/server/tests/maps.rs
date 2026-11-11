@@ -376,12 +376,16 @@ async fn keeps_map_pictures_for_those_at_the_table() {
         (map["width"].as_u64(), map["image"]["mime"].as_str()),
         (Some(1000), Some("image/png"))
     );
-    let (status, kind, size) = fetch(&app, &format!("{path}?v=1&seat={token}")).await;
+    let pass = seat_pass(&app, &t.id, &token).await;
+    let (status, kind, size) = fetch(&app, &format!("{path}?v=1&pass={pass}")).await;
     assert_eq!(
         (status, kind.as_str(), size),
         (StatusCode::OK, "image/png", PNG.len())
     );
-    let (status, _, _) = fetch(&app, &format!("{path}?v=1&seat=wrong")).await;
+    // The seat token itself no longer goes in an address.
+    let (status, _, _) = fetch(&app, &format!("{path}?v=1&seat={token}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = fetch(&app, &format!("{path}?v=1&pass=wrong")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -448,7 +452,11 @@ async fn keeps_a_picture_library_and_shows_handouts() {
     );
     let (status, kind, _) = fetch(
         &app,
-        &format!("/tables/{}/assets/{letter}?v=1&seat={token}", t.id),
+        &format!(
+            "/tables/{}/assets/{letter}?v=1&pass={}",
+            t.id,
+            seat_pass(&app, &t.id, &token).await
+        ),
     )
     .await;
     assert_eq!((status, kind.as_str()), (StatusCode::OK, "image/png"));

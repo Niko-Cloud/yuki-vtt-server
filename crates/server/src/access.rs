@@ -12,7 +12,7 @@ use sha2::Sha256;
 
 pub const PERMISSIONS: [&str; 4] = ["move-own", "move-any", "tokens", "draw"];
 
-/// How long a media pass lets the DM's pages load pictures and the live channel.
+/// How long a media pass lets a page load pictures and the live channel.
 pub const MEDIA_PASS_SECONDS: i64 = 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -45,9 +45,8 @@ impl Access {
 }
 
 /// The credentials a request brought. Pictures and the live channel can't send headers, so
-/// they may come in the query: a player's `?seat=`, or the DM's `?pass=`, a media pass that
-/// runs out, since addresses end up in logs and the browser's history and the DM's key must
-/// not.
+/// they bring `?pass=`, a media pass that runs out: addresses end up in logs and the
+/// browser's history, and the DM's key and seat tokens must not.
 #[derive(Debug, Default, Clone)]
 pub struct Credentials {
     pub key: Option<String>,
@@ -56,7 +55,7 @@ pub struct Credentials {
 }
 
 impl Credentials {
-    pub fn from(headers: &HeaderMap, pass: Option<String>, seat: Option<String>) -> Self {
+    pub fn from(headers: &HeaderMap, pass: Option<String>) -> Self {
         let header = |name: &str| {
             headers
                 .get(name)
@@ -67,7 +66,7 @@ impl Credentials {
             header("authorization").and_then(|v| v.strip_prefix("Bearer ").map(str::to_string));
         Self {
             key: bearer,
-            seat: header("x-seat-token").or(seat),
+            seat: header("x-seat-token"),
             pass,
         }
     }
@@ -79,33 +78,41 @@ impl Credentials {
     }
 }
 
-// Signed with the DM key's hash, so a pass is good for one table on this host only, and
-// changing the key ends every pass.
-fn media_mac(state: &AppState, table_id: &str, expires: i64) -> Hmac<Sha256> {
+// Signed with the DM key's hash, so a pass is good for one table (and one seat) on this host
+// only, and changing the key ends every pass.
+fn media_mac(state: &AppState, table_id: &str, seat_id: &str, expires: i64) -> Hmac<Sha256> {
     let mut mac = Hmac::<Sha256>::new_from_slice(state.config.owner_key_hash.as_bytes())
         .expect("any key length works");
-    mac.update(format!("media:{table_id}:{expires}").as_bytes());
+    mac.update(format!("media:{table_id}:{seat_id}:{expires}").as_bytes());
     mac
 }
 
-/// A media pass for one table: "<expires>.<signature>", and when it runs out (milliseconds).
-pub fn media_pass(state: &AppState, table_id: &str) -> (String, i64) {
+/// A media pass for one table: "<seat>.<expires>.<signature>", the seat left empty for the
+/// DM's own, and when it runs out (milliseconds). A seat's pass stands in for the seat token
+/// in addresses, which never runs out.
+pub fn media_pass(state: &AppState, table_id: &str, seat_id: Option<&str>) -> (String, i64) {
+    let seat_id = seat_id.unwrap_or("");
     let expires = ids::now() + MEDIA_PASS_SECONDS * 1000;
-    let signature = media_mac(state, table_id, expires).finalize().into_bytes();
-    (format!("{expires}.{}", hex::encode(signature)), expires)
+    let signature = media_mac(state, table_id, seat_id, expires)
+        .finalize()
+        .into_bytes();
+    (
+        format!("{seat_id}.{expires}.{}", hex::encode(signature)),
+        expires,
+    )
 }
 
-fn is_media_pass(state: &AppState, table_id: &str, pass: &str) -> bool {
-    let Some((expires, signature)) = pass.split_once('.') else {
-        return false;
-    };
-    let (Ok(expires), Ok(signature)) = (expires.parse::<i64>(), hex::decode(signature)) else {
-        return false;
-    };
-    expires > ids::now()
-        && media_mac(state, table_id, expires)
+/// Whose pass this is, while it still works: the DM's (None) or a seat's.
+fn pass_holder(state: &AppState, table_id: &str, pass: &str) -> Option<Option<String>> {
+    let mut parts = pass.splitn(3, '.');
+    let (seat_id, expires, signature) = (parts.next()?, parts.next()?, parts.next()?);
+    let expires = expires.parse::<i64>().ok()?;
+    let signature = hex::decode(signature).ok()?;
+    let good = expires > ids::now()
+        && media_mac(state, table_id, seat_id, expires)
             .verify_slice(&signature)
-            .is_ok()
+            .is_ok();
+    good.then(|| (!seat_id.is_empty()).then(|| seat_id.to_string()))
 }
 
 /// Only the DM: making, renaming and deleting tables, roles, bans, the invite.
@@ -132,9 +139,11 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
         )
         .optional()?
         .ok_or_else(missing)?;
-    let pass = credentials.pass.as_deref();
-    if credentials.is_owner(state) || pass.is_some_and(|pass| is_media_pass(state, table_id, pass))
-    {
+    let held = credentials
+        .pass
+        .as_deref()
+        .and_then(|pass| pass_holder(state, table_id, pass));
+    if credentials.is_owner(state) || held == Some(None) {
         return Ok(Access {
             role: Role::Dm,
             name: dm_name,
@@ -142,13 +151,16 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
             permissions: all(),
         });
     }
-    let Some(token) = &credentials.seat else {
-        return Err(missing());
+    // A seat by its token, or by its pass; a seat the DM removed takes its passes with it.
+    let (column, value) = match (&credentials.seat, held.flatten()) {
+        (Some(token), _) => ("token_hash", ids::hash(token)),
+        (None, Some(seat_id)) => ("id", seat_id),
+        (None, None) => return Err(missing()),
     };
     let seat: Option<(String, String, String, String)> = db
         .query_row(
-            "SELECT id, role, permissions, snapshot FROM seats WHERE table_id = ?1 AND token_hash = ?2",
-            [table_id, &ids::hash(token)],
+            &format!("SELECT id, role, permissions, snapshot FROM seats WHERE table_id = ?1 AND {column} = ?2"),
+            [table_id, &value],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;

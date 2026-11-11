@@ -28,7 +28,7 @@ fn d20() -> i32 {
 }
 
 fn credentials(headers: &HeaderMap) -> Credentials {
-    Credentials::from(headers, None, None)
+    Credentials::from(headers, None)
 }
 
 struct Seat {

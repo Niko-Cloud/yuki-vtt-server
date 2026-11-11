@@ -85,3 +85,82 @@ async fn hands_out_passes_only_to_the_dm() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn gives_a_player_a_pass_for_their_own_seat_only() {
+    let app = host();
+    let t = table(&app).await;
+    let (seat, token) = join(&app, &t.invite, "Wren", "player-1").await;
+    let (_, letter) = upload(
+        &app,
+        As::Dm,
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=handout&name=Letter&width=300&height=200",
+            t.id
+        ),
+        PNG,
+    )
+    .await;
+    let letter = letter["id"].as_str().unwrap();
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/handout", t.id),
+        Some(serde_json::json!({ "assetId": letter, "title": "A letter" })),
+    )
+    .await;
+    let pass = seat_pass(&app, &t.id, &token).await;
+    assert!(!pass.contains(&token));
+    let picture = format!("/tables/{}/assets/{letter}?pass={pass}", t.id);
+    assert_eq!(fetch(&app, &picture).await.0, StatusCode::OK);
+
+    // Only for this table, never by the seat token in the address, and not for a stranger.
+    let other = table(&app).await;
+    let (status, _, _) = fetch(
+        &app,
+        &format!("/tables/{}/assets/{letter}?pass={pass}", other.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &app,
+        As::Nobody,
+        "POST",
+        &format!("/tables/{}/seat-pass", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "POST",
+        &format!("/tables/{}/seat-pass", other.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A seat's pass doesn't make it the DM, and a removed seat's pass stops working.
+    let forged = pass.replacen(&seat, "", 1);
+    assert_eq!(
+        fetch(
+            &app,
+            &format!("/tables/{}/assets/{letter}?pass={forged}", t.id)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!("/tables/{}/seats/{seat}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(fetch(&app, &picture).await.0, StatusCode::NOT_FOUND);
+}

@@ -18,7 +18,7 @@ use yuki_vtt_rules::hit_points::{self, TableChange};
 const MOST_TABLES: i64 = 20;
 
 fn credentials(headers: &HeaderMap) -> Credentials {
-    Credentials::from(headers, None, None)
+    Credentials::from(headers, None)
 }
 
 pub fn name(text: &str, what: &str) -> Result<String> {
@@ -198,7 +198,34 @@ pub async fn media_token(
     if known.is_none() {
         return Err(AppError::not_found(format!("No table with id {id}")));
     }
-    let (pass, expires) = access::media_pass(&state, &id);
+    let (pass, expires) = access::media_pass(&state, &id, None);
+    Ok(Json(json!({
+        "pass": pass,
+        "expiresAt": ids::iso(expires),
+        "expiresInSeconds": access::MEDIA_PASS_SECONDS,
+    })))
+}
+
+/// `POST /api/tables/{id}/seat-pass`: the same for a player, with their seat token in the
+/// `x-seat-token` header, so the token itself never has to go in an address.
+pub async fn seat_pass(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
+    let token = credentials(&headers)
+        .seat
+        .ok_or_else(|| AppError::not_found(format!("No table with id {id}")))?;
+    let seat: Option<String> = state
+        .db()
+        .query_row(
+            "SELECT id FROM seats WHERE table_id = ?1 AND token_hash = ?2",
+            [&id, &ids::hash(&token)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let seat = seat.ok_or_else(|| AppError::not_found(format!("No table with id {id}")))?;
+    let (pass, expires) = access::media_pass(&state, &id, Some(&seat));
     Ok(Json(json!({
         "pass": pass,
         "expiresAt": ids::iso(expires),

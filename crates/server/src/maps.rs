@@ -177,7 +177,7 @@ impl TableMap {
 }
 
 fn credentials(headers: &HeaderMap) -> Credentials {
-    Credentials::from(headers, None, None)
+    Credentials::from(headers, None)
 }
 
 fn not_allowed(what: &str) -> AppError {

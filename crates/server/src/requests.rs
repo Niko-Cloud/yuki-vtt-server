@@ -152,7 +152,7 @@ pub async fn decide(
     headers: HeaderMap,
     Path((id, request, choice)): Path<(String, String, String)>,
 ) -> Result<StatusCode> {
-    access::runner(&state, &id, &Credentials::from(&headers, None, None))?;
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
     let accept = match choice.as_str() {
         "accept" => true,
         "reject" => false,
@@ -177,7 +177,7 @@ pub async fn set_asking(
     Path(id): Path<String>,
     Json(body): Json<AskSetting>,
 ) -> Result<StatusCode> {
-    access::owner(&state, &Credentials::from(&headers, None, None))?;
+    access::owner(&state, &Credentials::from(&headers, None))?;
     let changed = state.db().execute(
         "UPDATE tables SET ask_to_join = ?2 WHERE id = ?1",
         params![id, body.ask_to_join],

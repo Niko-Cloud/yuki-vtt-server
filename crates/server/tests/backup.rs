@@ -80,7 +80,11 @@ async fn backs_up_a_table_and_brings_it_back_on_another_computer() {
     assert_eq!(view["log"][0]["data"]["label"], "Luck");
     let (status, kind, size) = fetch(
         &moved,
-        &format!("/tables/{}/scenes/{scene}/image?v=1&seat={token}", t.id),
+        &format!(
+            "/tables/{}/scenes/{scene}/image?v=1&pass={}",
+            t.id,
+            seat_pass(&moved, &t.id, &token).await
+        ),
     )
     .await;
     assert_eq!(

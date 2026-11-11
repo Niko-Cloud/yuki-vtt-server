@@ -130,7 +130,7 @@ pub async fn set_map(
     Query(size): Query<Measured>,
     data: Bytes,
 ) -> Result<StatusCode> {
-    access::runner(&state, &id, &Credentials::from(&headers, None, None))?;
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
     let mime = picture_type(&data, MAP_LIMIT)?;
     if !(100..=16_384).contains(&size.width) || !(100..=16_384).contains(&size.height) {
         return Err(AppError::bad("The picture must be 100 to 16384 pixels"));
@@ -148,7 +148,6 @@ pub async fn set_map(
 #[derive(Deserialize)]
 pub struct Seen {
     pass: Option<String>,
-    seat: Option<String>,
 }
 
 /// `GET /api/tables/{id}/scenes/{scene}/image`: the map's picture, for anyone at the table.
@@ -158,11 +157,7 @@ pub async fn map(
     Path((id, scene)): Path<(String, String)>,
     Query(seen): Query<Seen>,
 ) -> Result<Response> {
-    access::at_table(
-        &state,
-        &id,
-        &Credentials::from(&headers, seen.pass, seen.seat),
-    )?;
+    access::at_table(&state, &id, &Credentials::from(&headers, seen.pass))?;
     let picture = maps::load(&state.db(), &id, &scene)?
         .image
         .ok_or_else(|| AppError::not_found("This map has no picture"))?;
@@ -186,7 +181,7 @@ pub async fn add(
     Query(upload): Query<Upload>,
     data: Bytes,
 ) -> Result<Json<Value>> {
-    let access = access::at_table(&state, &id, &Credentials::from(&headers, None, None))?;
+    let access = access::at_table(&state, &id, &Credentials::from(&headers, None))?;
     if !KINDS.contains(&upload.kind.as_str()) {
         return Err(AppError::bad("A picture is a token, a prop or a handout"));
     }
@@ -267,11 +262,7 @@ pub async fn picture(
     Path((id, asset)): Path<(String, String)>,
     Query(seen): Query<Seen>,
 ) -> Result<Response> {
-    access::at_table(
-        &state,
-        &id,
-        &Credentials::from(&headers, seen.pass, seen.seat),
-    )?;
+    access::at_table(&state, &id, &Credentials::from(&headers, seen.pass))?;
     let mime: String = state
         .db()
         .query_row(
@@ -290,7 +281,7 @@ pub async fn remove(
     headers: HeaderMap,
     Path((id, asset)): Path<(String, String)>,
 ) -> Result<StatusCode> {
-    access::runner(&state, &id, &Credentials::from(&headers, None, None))?;
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
     {
         let db = state.db();
         if db.execute(
@@ -323,7 +314,7 @@ pub async fn show(
     Path(id): Path<String>,
     Json(handout): Json<Handout>,
 ) -> Result<StatusCode> {
-    access::runner(&state, &id, &Credentials::from(&headers, None, None))?;
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
     let title: String = handout.title.trim().chars().take(100).collect();
     {
         let db = state.db();
@@ -350,7 +341,7 @@ pub async fn hide(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    access::runner(&state, &id, &Credentials::from(&headers, None, None))?;
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
     state
         .db()
         .execute("UPDATE tables SET handout = NULL WHERE id = ?1", [&id])?;

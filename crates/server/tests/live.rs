@@ -103,7 +103,7 @@ async fn refuses_other_websites_and_strangers() {
         .insert("origin", "https://evil.test".parse().unwrap());
     assert!(tokio_tungstenite::connect_async(request).await.is_err());
 
-    let stranger = format!("ws://{host}/api/tables/{table}/events?seat=guess")
+    let stranger = format!("ws://{host}/api/tables/{table}/events?pass=.1.guess")
         .into_client_request()
         .unwrap();
     assert!(tokio_tungstenite::connect_async(stranger).await.is_err());
