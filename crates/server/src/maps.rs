@@ -716,6 +716,9 @@ pub struct NewToken {
     size: u32,
     color: Option<String>,
     image_id: Option<String>,
+    /// On the DM's layer from the start, as a copy of a hidden monster is.
+    #[serde(default)]
+    hidden: bool,
 }
 
 fn one() -> u32 {
@@ -730,6 +733,9 @@ pub async fn add_token(
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     allow(access.may("tokens"), "add tokens")?;
+    if body.hidden {
+        allow(access.runs(), "put tokens on the DM's layer")?;
+    }
     cell(body.x, body.y)?;
     let token = Token {
         id: format!("tok-{}", ids::id()),
@@ -740,7 +746,7 @@ pub async fn add_token(
         color: color(body.color.as_deref().unwrap_or(TOKEN_COLORS[1]))?,
         seat_id: None,
         image_id: body.image_id,
-        hidden: None,
+        hidden: body.hidden.then_some(true),
         locked: None,
         vision: None,
         light: None,

@@ -670,3 +670,40 @@ async fn a_co_dm_changes_anything_on_the_board() {
     assert_eq!(scene["drawings"], json!([]));
     assert_eq!(scene["walls"][0]["door"]["open"], true);
 }
+
+#[tokio::test]
+async fn only_whoever_runs_the_table_adds_hidden_tokens() {
+    let app = host();
+    let t = table(&app).await;
+    let (seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/seats/{seat}/permissions", t.id),
+        Some(json!({ "permissions": ["tokens"] })),
+    )
+    .await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    let spy = json!({ "name": "Spy", "x": 1, "y": 1, "hidden": true });
+    let (status, _) = call(&app, As::Seat(&tam), "POST", &path, Some(spy.clone())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&app, As::Dm, "POST", &path, Some(spy)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let theirs = view(&app, As::Seat(&tam), &t).await["scene"]["tokens"].clone();
+    assert!(
+        theirs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"] != "Spy")
+    );
+    let mine = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    assert!(
+        mine.as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "Spy" && t["hidden"] == true)
+    );
+}
