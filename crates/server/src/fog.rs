@@ -108,10 +108,11 @@ pub struct DoorChange {
 // Where a token's middle is, in pixels.
 pub(crate) fn middle_of(map: &TableMap, token: &maps::Token) -> (f64, f64) {
     let g = &map.grid;
-    let half = f64::from(token.size * g.size) / 2.0;
+    let cell = f64::from(g.size);
+    let half = token.size * cell / 2.0;
     (
-        f64::from(g.offset_x + token.x * g.size) + half,
-        f64::from(g.offset_y + token.y * g.size) + half,
+        f64::from(g.offset_x) + token.x * cell + half,
+        f64::from(g.offset_y) + token.y * cell + half,
     )
 }
 
@@ -140,7 +141,7 @@ pub async fn set_door(
                     .as_ref()
                     .is_some_and(|seat| access.seat_ids.contains(seat));
                 let (x, y) = middle_of(&map, token);
-                let reach = size * (1.5 + f64::from(token.size) / 2.0);
+                let reach = size * (1.5 + token.size / 2.0);
                 mine && (x - mx).hypot(y - my) <= reach
             });
             if !near {

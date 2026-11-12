@@ -915,3 +915,42 @@ async fn turns_and_mirrors_pictures() {
     let bat = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
     assert!(bat.get("rotation").is_none() && bat.get("flip").is_none());
 }
+
+#[tokio::test]
+async fn keeps_tokens_between_cells_and_tiny_ones() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    let rat = json!({ "name": "Rat", "x": 1.5, "y": 2.25, "size": 0.5 });
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(rat)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let odd = json!({ "name": "Odd", "x": 1, "y": 1, "size": 0.3 });
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(odd)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let token = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
+    assert_eq!(
+        (
+            token["x"].clone(),
+            token["y"].clone(),
+            token["size"].clone()
+        ),
+        (json!(1.5), json!(2.25), json!(0.5))
+    );
+    let at = format!("{path}/{}", token["id"].as_str().unwrap());
+    let moved = json!({ "x": 3.333, "y": 2 });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(moved)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let token = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
+    // Whole numbers stay whole, as the website sends them.
+    assert_eq!(
+        (token["x"].clone(), token["y"].clone()),
+        (json!(3.33), json!(2))
+    );
+}

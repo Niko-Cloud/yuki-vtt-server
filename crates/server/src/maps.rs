@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use yuki_vtt_rules::map::{self, Cell, MapGrid};
+use yuki_vtt_rules::map::{self, MapGrid};
 
 const MOST_SCENES: i64 = 30;
 const MOST_TOKENS: usize = 200;
@@ -34,11 +34,15 @@ pub struct Image {
 pub struct Token {
     pub id: String,
     pub name: String,
-    /// The cell of its top-left corner.
-    pub x: u32,
-    pub y: u32,
-    /// Cells across: 1 for Medium and smaller, 2 Large, 3 Huge, 4 Gargantuan.
-    pub size: u32,
+    /// Its top left corner, in cells: whole cells on the grid, anywhere between when placed
+    /// freely (to a hundredth of a cell).
+    #[serde(serialize_with = "whole")]
+    pub x: f64,
+    #[serde(serialize_with = "whole")]
+    pub y: f64,
+    /// Cells across, by halves: 0.5 for Tiny, 1 Small or Medium, 2 Large, 3 Huge, 4 Gargantuan.
+    #[serde(serialize_with = "whole")]
+    pub size: f64,
     pub color: String,
     /// A seated character's token; its player may move it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -431,18 +435,14 @@ impl TableMap {
     }
 
     // A token stays whole on the map, also after the map shrinks.
+    // A token kept on the map, where it was put (to a hundredth of a cell).
     fn keep_token(&self, mut token: Token) -> Token {
-        let cell = map::keep_inside(
-            self.width,
-            self.height,
-            &self.grid,
-            Cell {
-                x: token.x,
-                y: token.y,
-            },
-            token.size,
-        );
-        (token.x, token.y) = (cell.x, cell.y);
+        let (columns, rows) = self.cells();
+        let keep = |at: f64, most: u32| {
+            ((at * 100.0).round() / 100.0).clamp(0.0, (f64::from(most) - token.size).max(0.0))
+        };
+        token.x = keep(token.x, columns);
+        token.y = keep(token.y, rows);
         token
     }
 
@@ -499,19 +499,30 @@ fn token_name(value: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
-fn cell(x: u32, y: u32) -> Result<()> {
-    if x > 1000 || y > 1000 {
+fn cell(x: f64, y: f64) -> Result<()> {
+    if !(0.0..=1000.0).contains(&x) || !(0.0..=1000.0).contains(&y) {
         Err(AppError::bad("That's off the map"))
     } else {
         Ok(())
     }
 }
 
-fn size(size: u32) -> Result<u32> {
-    if (1..=4).contains(&size) {
+fn size(size: f64) -> Result<f64> {
+    if (0.5..=4.0).contains(&size) && (size * 2.0).fract() == 0.0 {
         Ok(size)
     } else {
-        Err(AppError::bad("A token is 1 to 4 cells across"))
+        Err(AppError::bad(
+            "A token is half a cell to 4 cells across, by halves",
+        ))
+    }
+}
+
+/// A number as JSON: whole ones without a ".0", as the website sends them.
+fn whole<S: serde::Serializer>(value: &f64, out: S) -> std::result::Result<S::Ok, S::Error> {
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        out.serialize_i64(*value as i64)
+    } else {
+        out.serialize_f64(*value)
     }
 }
 
@@ -781,10 +792,10 @@ pub fn set_picture(
 #[serde(rename_all = "camelCase")]
 pub struct NewToken {
     name: String,
-    x: u32,
-    y: u32,
+    x: f64,
+    y: f64,
     #[serde(default = "one")]
-    size: u32,
+    size: f64,
     color: Option<String>,
     image_id: Option<String>,
     /// On the DM's layer from the start, as a copy of a hidden monster is.
@@ -792,8 +803,8 @@ pub struct NewToken {
     hidden: bool,
 }
 
-fn one() -> u32 {
-    1
+fn one() -> f64 {
+    1.0
 }
 
 pub async fn add_token(
@@ -884,9 +895,9 @@ pub async fn place_party(
             let token = Token {
                 id: format!("tok-{}", ids::id()),
                 name,
-                x: i as u32,
-                y: 0,
-                size: 1,
+                x: i as f64,
+                y: 0.0,
+                size: 1.0,
                 color: TOKEN_COLORS[0].into(),
                 seat_id: Some(seat),
                 image_id: None,
@@ -913,10 +924,10 @@ pub async fn place_party(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenChange {
-    x: Option<u32>,
-    y: Option<u32>,
+    x: Option<f64>,
+    y: Option<f64>,
     name: Option<String>,
-    size: Option<u32>,
+    size: Option<f64>,
     color: Option<String>,
     /// A picture's id, or null to take the picture off.
     #[serde(default, deserialize_with = "present")]
@@ -1140,11 +1151,8 @@ pub async fn change_token(
             }
         }
         // What it carries moves with it, as many cells.
-        let (dx, dy) = (
-            i64::from(placed.x) - i64::from(before.x),
-            i64::from(placed.y) - i64::from(before.y),
-        );
-        let carried = if dx != 0 || dy != 0 {
+        let (dx, dy) = (placed.x - before.x, placed.y - before.y);
+        let carried = if dx != 0.0 || dy != 0.0 {
             carried_by(&map.tokens, &token_id)
         } else {
             Default::default()
@@ -1153,8 +1161,8 @@ pub async fn change_token(
         for i in 0..map.tokens.len() {
             if carried.contains(&map.tokens[i].id) {
                 let mut rider = map.tokens[i].clone();
-                rider.x = (i64::from(rider.x) + dx).max(0) as u32;
-                rider.y = (i64::from(rider.y) + dy).max(0) as u32;
+                rider.x = (rider.x + dx).max(0.0);
+                rider.y = (rider.y + dy).max(0.0);
                 map.tokens[i] = map.keep_token(rider);
             }
         }
@@ -1239,7 +1247,7 @@ pub async fn add_prop(
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     allow(access.may("tokens"), "place pictures")?;
-    cell(body.x, body.y)?;
+    cell(f64::from(body.x), f64::from(body.y))?;
     prop_size(body.w, body.h)?;
     picture_exists(&state.db(), &id, &body.asset_id)?;
     let locked = body.locked.filter(|l| *l && access.runs());
@@ -1299,7 +1307,7 @@ pub async fn change_prop(
         }
         (prop.x, prop.y) = (body.x.unwrap_or(prop.x), body.y.unwrap_or(prop.y));
         (prop.w, prop.h) = (body.w.unwrap_or(prop.w), body.h.unwrap_or(prop.h));
-        cell(prop.x, prop.y)?;
+        cell(f64::from(prop.x), f64::from(prop.y))?;
         prop_size(prop.w, prop.h)?;
         if let Some(rotation) = body.rotation {
             prop.rotation = turn(rotation)?;
