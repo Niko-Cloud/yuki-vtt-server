@@ -24,6 +24,8 @@ pub enum Kind {
     Join,
     /// Moves, rolls, chat.
     Write,
+    /// Rulers and pointer trails, many a second while someone measures or points.
+    Mark,
     /// Looking: the table, pictures, the live channel.
     Read,
 }
@@ -35,6 +37,7 @@ impl Kind {
             Kind::Upload => 30,
             Kind::Join => 20,
             Kind::Write => 300,
+            Kind::Mark => 1200,
             Kind::Read => 900,
         }
     }
@@ -48,6 +51,8 @@ impl Kind {
             && (path.starts_with("/api/join/") || path == "/api/tables")
         {
             Kind::Join
+        } else if method == Method::POST && path.ends_with("/mark") {
+            Kind::Mark
         } else if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
             Kind::Read
         } else {

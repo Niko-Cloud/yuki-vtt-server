@@ -1564,6 +1564,52 @@ pub async fn ping(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub struct Mark {
+    kind: String,
+    points: Vec<[f64; 2]>,
+    tab: String,
+}
+
+/// A ruler or pointer trail on the map shown: anyone measures, those who may draw point.
+pub async fn mark(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Mark>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    match body.kind.as_str() {
+        "ruler" => {}
+        "trail" => allow(access.may("draw"), "point")?,
+        _ => return Err(AppError::bad("A mark is a ruler or a trail")),
+    }
+    let fine = body.points.len() <= 50
+        && body.points.iter().flatten().all(|n| n.is_finite())
+        && !body.tab.is_empty()
+        && body.tab.len() <= 40;
+    if !fine {
+        return Err(AppError::bad("A mark has up to 50 points"));
+    }
+    let scene =
+        active_scene(&state.db(), &id)?.ok_or_else(|| AppError::bad("There is no map to mark"))?;
+    let color = if access.runs() {
+        TOKEN_COLORS[3]
+    } else {
+        TOKEN_COLORS[0]
+    };
+    let points: Vec<[f64; 2]> = body
+        .points
+        .iter()
+        .map(|[x, y]| [x.round(), y.round()])
+        .collect();
+    state.events.mark(
+        &id,
+        json!({ "sceneId": scene, "kind": body.kind, "points": points, "by": access.name, "color": color, "tab": body.tab }),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Takes a deleted picture off every map.
 pub fn forget_picture(db: &Connection, table_id: &str, asset_id: &str) -> Result<()> {
     let mut rows = db.prepare("SELECT id FROM scenes WHERE table_id = ?1")?;

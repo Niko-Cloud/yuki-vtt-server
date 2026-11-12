@@ -98,6 +98,7 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/drawings", post(maps::add_drawing).delete(maps::clear_drawings))
         .route("/tables/{id}/scenes/{scene}/drawings/{drawing}", axum::routing::delete(maps::remove_drawing).patch(maps::change_drawing))
         .route("/tables/{id}/ping", post(maps::ping))
+        .route("/tables/{id}/mark", post(maps::mark))
         // Spell areas, placed by those the DM lets.
         .route("/tables/{id}/scenes/{scene}/templates", post(areas::add).delete(areas::clear))
         .route("/tables/{id}/scenes/{scene}/templates/{area}", patch(areas::change).delete(areas::remove))

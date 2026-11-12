@@ -51,6 +51,13 @@ impl Events {
             .send(json!({ "type": "ping", "ping": ping }).to_string());
     }
 
+    /// A ruler or pointer trail on the map, as it goes, not kept.
+    pub fn mark(&self, table_id: &str, mark: Value) {
+        let _ = self
+            .channel(table_id)
+            .send(json!({ "type": "mark", "mark": mark }).to_string());
+    }
+
     /// How many screens have a table open right now, over all tables.
     pub fn listeners(&self) -> usize {
         let channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
