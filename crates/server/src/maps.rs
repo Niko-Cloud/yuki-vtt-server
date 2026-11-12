@@ -113,6 +113,9 @@ pub struct Fog {
     /// Walls, windows and closed doors stop players' tokens; on unless the DM turns it off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collide: Option<bool>,
+    /// Painted fog: the whole map starts hidden, and the DM reveals it area by area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<bool>,
 }
 
 fn no_fog() -> Fog {
@@ -121,6 +124,7 @@ fn no_fog() -> Fog {
         light: "bright".into(),
         remember: true,
         collide: None,
+        cover: None,
     }
 }
 
@@ -256,6 +260,46 @@ pub struct TableMap {
     pub notes: Vec<Note>,
     #[serde(default)]
     pub templates: Vec<Template>,
+    /// The DM's painted fog, area by area.
+    #[serde(default, rename = "fogAreas")]
+    pub fog_areas: Vec<FogArea>,
+}
+
+/// An area of fog the DM painted: hidden from players, or (reveal) cut out of the fog. Later
+/// areas go over earlier ones.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FogArea {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reveal: Option<bool>,
+    pub points: Vec<[f64; 2]>,
+}
+
+/// Whether a point is inside a shape of any form (even-odd: count the edges a ray crosses).
+pub fn inside_shape(points: &[[f64; 2]], (x, y): (f64, f64)) -> bool {
+    let mut inside = false;
+    let mut j = points.len().wrapping_sub(1);
+    for i in 0..points.len() {
+        let ([xi, yi], [xj, yj]) = (points[i], points[j]);
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+impl TableMap {
+    /// Whether the DM's painted fog hides a spot from players.
+    pub fn hand_fogged(&self, at: (f64, f64)) -> bool {
+        let mut hidden = self.fog.cover == Some(true);
+        for area in &self.fog_areas {
+            if inside_shape(&area.points, at) {
+                hidden = area.reveal != Some(true);
+            }
+        }
+        hidden
+    }
 }
 
 /// What the DM sets for a map: its size and grid.
@@ -306,6 +350,7 @@ fn blank() -> TableMap {
         lights: vec![],
         notes: vec![],
         templates: vec![],
+        fog_areas: vec![],
     }
 }
 

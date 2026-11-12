@@ -440,3 +440,65 @@ async fn stops_players_tokens_at_walls_unless_the_dm_lets_them_through() {
     );
     assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::NO_CONTENT);
 }
+
+#[tokio::test]
+async fn hides_monsters_under_painted_fog_from_players() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    for (name, x) in [("Rat", 1), ("Ogre", 10)] {
+        let token = json!({ "name": name, "x": x, "y": x });
+        call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(token)).await;
+    }
+    // The whole map covered, the top left corner revealed.
+    let lighting = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true, "cover": true },
+        "walls": [],
+        "lights": [],
+        "fogAreas": [{ "id": "f1", "reveal": true, "points": [[0, 0], [280, 0], [280, 280], [0, 280]] }],
+    });
+    let lit = format!("{at}/lighting");
+    let put = call(&app, As::Dm, "PUT", &lit, Some(lighting.clone())).await;
+    assert_eq!(put.0, StatusCode::NO_CONTENT);
+    let names = |who| {
+        let app = app.clone();
+        let t = &t;
+        async move {
+            view(&app, who, t).await["scene"]["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    let theirs = names(As::Seat(&tam)).await;
+    assert!(theirs.contains(&"Rat".to_string()) && theirs.contains(&"Tam".to_string()));
+    assert!(!theirs.contains(&"Ogre".to_string()));
+    assert!(names(As::Dm).await.contains(&"Ogre".to_string()));
+    // Lighting sent without the painted areas keeps them; odd areas are refused.
+    let mut without = lighting.clone();
+    without.as_object_mut().unwrap().remove("fogAreas");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(without)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = view(&app, As::Dm, &t).await["scene"]["fogAreas"].clone();
+    assert_eq!(kept.as_array().unwrap().len(), 1);
+    let mut odd = lighting;
+    odd["fogAreas"] = json!([{ "id": "f2", "points": [[0, 0], [10, 10]] }]);
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(odd)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}

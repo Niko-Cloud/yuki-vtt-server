@@ -21,14 +21,18 @@ use yuki_vtt_rules::map as grid;
 const MOST_WALLS: usize = 2000;
 const MOST_LIGHTS: usize = 100;
 const MOST_NOTES: usize = 200;
+const MOST_FOG_AREAS: usize = 200;
 const MOST_EXPLORED_TEXT: usize = 200_000;
 
 /// What the DM sets in one go: the fog, the walls and doors, the lights.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Lighting {
     fog: Fog,
     walls: Vec<Wall>,
     lights: Vec<Light>,
+    /// Painted fog; left as it is when not sent.
+    fog_areas: Option<Vec<maps::FogArea>>,
 }
 
 fn on_map(x: f64, y: f64) -> bool {
@@ -58,7 +62,15 @@ impl Lighting {
                     && l.angle
                         .is_none_or(|a| a.is_finite() && (-360.0..=360.0).contains(&a))
             });
-        if fog && walls && lights {
+        let painted = self.fog_areas.as_ref().is_none_or(|areas| {
+            areas.len() <= MOST_FOG_AREAS
+                && areas.iter().all(|a| {
+                    short_id(&a.id)
+                        && (3..=400).contains(&a.points.len())
+                        && a.points.iter().all(|p| on_map(p[0], p[1]))
+                })
+        });
+        if fog && walls && lights && painted {
             Ok(())
         } else {
             Err(AppError::bad(format!(
@@ -81,6 +93,9 @@ pub async fn set_lighting(
         map.fog = body.fog;
         map.walls = body.walls;
         map.lights = body.lights;
+        if let Some(areas) = body.fog_areas {
+            map.fog_areas = areas;
+        }
         Ok(map)
     })
 }
@@ -230,6 +245,20 @@ pub fn for_players(scene: &mut Value) {
     }
     if let Some(templates) = scene["templates"].as_array_mut() {
         templates.retain(|t| t["hidden"] != json!(true));
+    }
+    // Monsters under the DM's painted fog aren't sent either; party tokens always are.
+    if let Ok(map) = serde_json::from_value::<TableMap>(scene.clone())
+        && let Some(tokens) = scene["tokens"].as_array_mut()
+    {
+        tokens.retain(|t| {
+            if t.get("seatId").is_some_and(|s| !s.is_null()) {
+                return true;
+            }
+            let Ok(token) = serde_json::from_value::<maps::Token>(t.clone()) else {
+                return true;
+            };
+            !map.hand_fogged(middle_of(&map, &token))
+        });
     }
     scene["notes"] = json!([]);
     // A closed secret door is a wall to players; an open one an open door, its secret kept.
