@@ -320,6 +320,27 @@ async fn draws_and_erases_by_permission() {
         change(As::Dm, 0, json!({ "hidden": false })).await,
         StatusCode::NO_CONTENT
     );
+    // Words on the map are a drawing too; only text has them.
+    let words = json!({ "shape": "text", "color": "#f0f0f0", "points": [[70, 70], [70, 70]], "text": "Inn" });
+    let (status, _) = call(&app, As::Dm, "POST", &path, Some(words.clone())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let mut wordless = words.clone();
+    wordless.as_object_mut().unwrap().remove("text");
+    let (status, _) = call(&app, As::Dm, "POST", &path, Some(wordless)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut worded_line = words;
+    worded_line["shape"] = json!("line");
+    let (status, _) = call(&app, As::Dm, "POST", &path, Some(worded_line)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        change(As::Dm, 0, json!({ "text": "Nope" })).await,
+        StatusCode::BAD_REQUEST
+    );
+    let text = view(&app, As::Dm, &t).await["scene"]["drawings"][2]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&app, As::Dm, "DELETE", &format!("{path}/{text}"), None).await;
 
     // A player erases only their own line.
     let dms = drawings[1]["id"].as_str().unwrap();

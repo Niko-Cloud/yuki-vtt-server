@@ -235,6 +235,9 @@ pub struct Drawing {
     /// How heavy its line is: thin, normal or thick; normal when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<String>,
+    /// Words on the map: a text drawing's, at its first point (its weight is its size).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1164,6 +1167,8 @@ pub struct NewDrawing {
     hidden: bool,
     #[serde(default)]
     weight: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 fn pen() -> String {
@@ -1200,9 +1205,9 @@ pub async fn add_drawing(
     if body.hidden {
         allow(access.runs(), "draw on the DM's layer")?;
     }
-    if !["pen", "line", "rect", "circle"].contains(&body.shape.as_str()) {
+    if !["pen", "line", "rect", "circle", "text"].contains(&body.shape.as_str()) {
         return Err(AppError::bad(
-            "A drawing is a pen line, a line, a square or a circle",
+            "A drawing is a pen line, a line, a square, a circle or text",
         ));
     }
     points_ok(&body.points)?;
@@ -1215,6 +1220,7 @@ pub async fn add_drawing(
             .cloned()
             .unwrap_or_else(|| "guest".into())
     };
+    let text = words(body.text.as_deref(), &body.shape)?;
     let drawing = Drawing {
         id: format!("draw-{}", ids::id()),
         shape: body.shape,
@@ -1223,6 +1229,7 @@ pub async fn add_drawing(
         by,
         hidden: body.hidden.then_some(true),
         weight: weight(body.weight)?,
+        text,
     };
     edit(&state, &access, &id, &scene, |mut map| {
         map.drawings.push(drawing);
@@ -1260,6 +1267,18 @@ pub struct DrawingChange {
     color: Option<String>,
     weight: Option<String>,
     hidden: Option<bool>,
+    text: Option<String>,
+}
+
+// A text drawing's words: 1 to 200 letters; other drawings have none.
+fn words(text: Option<&str>, shape: &str) -> Result<Option<String>> {
+    match (text.map(str::trim), shape == "text") {
+        (None, false) => Ok(None),
+        (Some(t), true) if !t.is_empty() && t.chars().count() <= 200 => Ok(Some(t.to_string())),
+        _ => Err(AppError::bad(
+            "Text has 1 to 200 letters; other drawings have none",
+        )),
+    }
 }
 
 /// Whoever runs the table changes any drawing; a player only their own, never its layer.
@@ -1303,6 +1322,9 @@ pub async fn change_drawing(
         }
         if let Some(hidden) = body.hidden {
             found.hidden = hidden.then_some(true);
+        }
+        if body.text.is_some() {
+            found.text = words(body.text.as_deref(), &found.shape)?;
         }
         Ok(map)
     })
