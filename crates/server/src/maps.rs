@@ -1445,6 +1445,9 @@ pub async fn clear_drawings(
 pub struct Ping {
     x: f64,
     y: f64,
+    /// Whoever runs the table moves everyone's view to the spot too.
+    #[serde(default)]
+    bring: bool,
 }
 
 /// Points at a spot on the map the players see; every screen shows it for a moment.
@@ -1456,6 +1459,9 @@ pub async fn ping(
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     allow(access.may("draw"), "ping")?;
+    if at.bring {
+        allow(access.runs(), "move everyone's view")?;
+    }
     if !at.x.is_finite() || !at.y.is_finite() {
         return Err(AppError::bad("That's off the map"));
     }
@@ -1466,10 +1472,12 @@ pub async fn ping(
     } else {
         TOKEN_COLORS[0]
     };
-    state.events.ping(
-        &id,
-        json!({ "sceneId": scene, "x": at.x, "y": at.y, "by": access.name, "color": color }),
-    );
+    let mut ping =
+        json!({ "sceneId": scene, "x": at.x, "y": at.y, "by": access.name, "color": color });
+    if at.bring {
+        ping["bring"] = json!(true);
+    }
+    state.events.ping(&id, ping);
     Ok(StatusCode::NO_CONTENT)
 }
 

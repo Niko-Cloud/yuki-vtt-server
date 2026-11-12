@@ -583,6 +583,13 @@ async fn pings_need_a_map_and_the_right_to_draw() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // Bringing everyone's view to a spot is for whoever runs the table only.
+    let bring = json!({ "x": 10, "y": 10, "bring": true });
+    let path = format!("/tables/{}/ping", t.id);
+    let (status, _) = call(&app, As::Dm, "POST", &path, Some(bring.clone())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, As::Seat(&token), "POST", &path, Some(bring)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
