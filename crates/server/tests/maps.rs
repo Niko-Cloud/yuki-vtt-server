@@ -728,3 +728,81 @@ async fn only_whoever_runs_the_table_adds_hidden_tokens() {
             .any(|t| t["name"] == "Spy" && t["hidden"] == true)
     );
 }
+
+#[tokio::test]
+async fn carries_attached_tokens_and_stacks_them() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    for (name, x) in [("Horse", 5), ("Rider", 5), ("Owl", 6)] {
+        let token = json!({ "name": name, "x": x, "y": 5 });
+        call(&app, As::Dm, "POST", &path, Some(token)).await;
+    }
+    let tokens = || {
+        let app = app.clone();
+        let t = &t;
+        async move {
+            view(&app, As::Dm, t).await["scene"]["tokens"]
+                .as_array()
+                .unwrap()
+                .clone()
+        }
+    };
+    let id_of = |all: &[Value], name: &str| {
+        all.iter().find(|t| t["name"] == name).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let all = tokens().await;
+    let (horse, rider, owl) = (
+        id_of(&all, "Horse"),
+        id_of(&all, "Rider"),
+        id_of(&all, "Owl"),
+    );
+    let change = |id: &str, body: Value| {
+        let (app, at) = (app.clone(), format!("{path}/{id}"));
+        async move { call(&app, As::Dm, "PATCH", &at, Some(body)).await.0 }
+    };
+    assert_eq!(
+        change(&rider, json!({ "attachedTo": horse })).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        change(&owl, json!({ "attachedTo": rider })).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        change(&horse, json!({ "attachedTo": owl })).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        change(&horse, json!({ "attachedTo": horse })).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        change(&horse, json!({ "x": 7, "y": 5 })).await,
+        StatusCode::NO_CONTENT
+    );
+    let all = tokens().await;
+    let at = |name: &str| {
+        let t = all.iter().find(|t| t["name"] == name).unwrap();
+        (t["x"].as_u64().unwrap(), t["y"].as_u64().unwrap())
+    };
+    assert_eq!((at("Rider"), at("Owl")), ((7, 5), (8, 5)));
+    assert_eq!(
+        change(&horse, json!({ "layer": "back" })).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(tokens().await[0]["name"], "Horse");
+    assert_eq!(
+        change(&horse, json!({ "layer": "sideways" })).await,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, _) = call(&app, As::Dm, "DELETE", &format!("{path}/{horse}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let all = tokens().await;
+    let rider_now = all.iter().find(|t| t["name"] == "Rider").unwrap();
+    assert!(rider_now.get("attachedTo").is_none());
+}

@@ -63,6 +63,44 @@ pub struct Token {
     /// Which way it faces, in degrees, for cones of light and sight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facing: Option<f64>,
+    /// The token it rides on or is carried by: it moves when that one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_to: Option<String>,
+}
+
+/// The tokens carried along when one moves: those attached to it, and those attached to them.
+pub fn carried_by(tokens: &[Token], id: &str) -> std::collections::HashSet<String> {
+    let mut carried = std::collections::HashSet::new();
+    let mut holding = vec![id.to_string()];
+    while let Some(holder) = holding.pop() {
+        for t in tokens {
+            if t.attached_to.as_deref() == Some(holder.as_str())
+                && t.id != id
+                && carried.insert(t.id.clone())
+            {
+                holding.push(t.id.clone());
+            }
+        }
+    }
+    carried
+}
+
+/// A list with one thing moved to the end (drawn on top) or the start (drawn under).
+fn restack<T: Clone>(items: &mut Vec<T>, at: usize, layer: &str) {
+    let item = items.remove(at);
+    if layer == "front" {
+        items.push(item);
+    } else {
+        items.insert(0, item);
+    }
+}
+
+// A layer as sent: front or back.
+fn layer(value: Option<&str>) -> Result<Option<&str>> {
+    match value {
+        None | Some("front" | "back") => Ok(value),
+        Some(_) => Err(AppError::bad("A layer is front or back")),
+    }
 }
 
 /// How far a token sees in the dark: clear out to the range, fading over the falloff, in feet.
@@ -755,6 +793,7 @@ pub async fn add_token(
         light: None,
         shared_with: None,
         facing: None,
+        attached_to: None,
     };
     if let Some(image) = &token.image_id {
         picture_exists(&state.db(), &id, image)?;
@@ -823,6 +862,7 @@ pub async fn place_party(
                 light: None,
                 shared_with: None,
                 facing: None,
+                attached_to: None,
             };
             let token = map.keep_token(token);
             map.tokens.push(token);
@@ -853,6 +893,10 @@ pub struct TokenChange {
     light: Option<Value>,
     shared_with: Option<Vec<String>>,
     facing: Option<f64>,
+    /// The token it is attached to, or null to let go.
+    #[serde(default, deserialize_with = "present")]
+    attached_to: Option<Value>,
+    layer: Option<String>,
 }
 
 // A field that was sent, null included: Option alone reads null as not sent, so "take the
@@ -999,6 +1043,26 @@ pub async fn change_token(
         if let Some(locked) = body.locked {
             token.locked = locked.then_some(true);
         }
+        // Attaching it to another: one that is there, and never round in a loop.
+        if body.attached_to.is_some() || body.layer.is_some() {
+            allow(access.may("tokens"), "arrange tokens")?;
+        }
+        match &body.attached_to {
+            Some(Value::Null) => token.attached_to = None,
+            Some(Value::String(holder)) => {
+                let there = map.tokens.iter().any(|t| &t.id == holder);
+                if !there
+                    || holder == &token_id
+                    || carried_by(&map.tokens, &token_id).contains(holder)
+                {
+                    return Err(AppError::bad("It can't be attached to that"));
+                }
+                token.attached_to = Some(holder.clone());
+            }
+            Some(_) => return Err(AppError::bad("Attached to a token's id, or null")),
+            None => {}
+        }
+        let stack = layer(body.layer.as_deref())?.map(str::to_string);
         let placed = map.keep_token(token);
         let before = &map.tokens[at];
         // Walls stop players' tokens (whoever runs the table goes anywhere).
@@ -1009,7 +1073,28 @@ pub async fn change_token(
                 return Err(AppError::bad("A wall is in the way"));
             }
         }
+        // What it carries moves with it, as many cells.
+        let (dx, dy) = (
+            i64::from(placed.x) - i64::from(before.x),
+            i64::from(placed.y) - i64::from(before.y),
+        );
+        let carried = if dx != 0 || dy != 0 {
+            carried_by(&map.tokens, &token_id)
+        } else {
+            Default::default()
+        };
         map.tokens[at] = placed;
+        for i in 0..map.tokens.len() {
+            if carried.contains(&map.tokens[i].id) {
+                let mut rider = map.tokens[i].clone();
+                rider.x = (i64::from(rider.x) + dx).max(0) as u32;
+                rider.y = (i64::from(rider.y) + dy).max(0) as u32;
+                map.tokens[i] = map.keep_token(rider);
+            }
+        }
+        if let Some(stack) = stack {
+            restack(&mut map.tokens, at, &stack);
+        }
         Ok(map)
     })
 }
@@ -1046,8 +1131,17 @@ pub async fn remove_token(
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     allow(access.may("tokens"), "remove tokens")?;
     edit(&state, &access, &id, &scene, |mut map| {
+        let before = map.tokens.len();
         map.tokens
             .retain(|t| t.id != token_id || (!access.runs() && t.hidden == Some(true)));
+        // What it carried stays where it is, no longer attached.
+        if map.tokens.len() < before {
+            for t in &mut map.tokens {
+                if t.attached_to.as_deref() == Some(token_id.as_str()) {
+                    t.attached_to = None;
+                }
+            }
+        }
         Ok(map)
     })
 }
@@ -1108,6 +1202,7 @@ pub struct PropChange {
     w: Option<u32>,
     h: Option<u32>,
     locked: Option<bool>,
+    layer: Option<String>,
 }
 
 pub async fn change_prop(
@@ -1140,6 +1235,9 @@ pub async fn change_prop(
             prop.locked = locked.then_some(true);
         }
         map.props[at] = map.keep_prop(prop);
+        if let Some(stack) = layer(body.layer.as_deref())? {
+            restack(&mut map.props, at, stack);
+        }
         Ok(map)
     })
 }
