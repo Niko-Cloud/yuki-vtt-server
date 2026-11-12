@@ -572,3 +572,100 @@ async fn slows_down_someone_hammering_the_invite() {
     // Someone else still gets in.
     join(&app, &t.invite, "Tam", "user-1").await;
 }
+
+#[tokio::test]
+async fn keeps_monsters_numbers_for_the_dm_and_counts_effects_down() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let fight = format!("/tables/{}/encounter", t.id);
+    call(&app, As::Dm, "POST", &fight, None).await;
+    let ogre = json!({ "name": "Ogre", "bonus": -1, "initiative": 40, "hp": 30, "ac": 11 });
+    let added = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{fight}/combatants"),
+        Some(ogre),
+    )
+    .await;
+    assert_eq!(added.0, StatusCode::NO_CONTENT);
+    let ogre_of = |who| {
+        let app = app.clone();
+        let path = format!("/tables/{}", t.id);
+        async move {
+            let (_, view) = call(&app, who, "GET", &path, None).await;
+            view["encounter"]["combatants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == "Ogre")
+                .unwrap()
+                .clone()
+        }
+    };
+    let seen = ogre_of(As::Dm).await;
+    assert_eq!(seen["hp"], json!({ "current": 30, "max": 30 }));
+    assert_eq!(seen["ac"], 11);
+    let id = seen["id"].as_str().unwrap().to_string();
+    let theirs = ogre_of(As::Seat(&tam)).await;
+    assert_eq!(theirs["health"], "unhurt");
+    assert!(theirs.get("hp").is_none() && theirs.get("ac").is_none());
+
+    let at = format!("{fight}/combatants/{id}");
+    let refused = call(&app, As::Seat(&tam), "PATCH", &at, Some(json!({ "ac": 5 }))).await;
+    assert_eq!(refused.0, StatusCode::FORBIDDEN);
+    let hurt = json!({ "hp": { "current": 12, "max": 30 } });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(hurt)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(ogre_of(As::Seat(&tam)).await["health"], "bloodied");
+    let exact = json!({ "showHealth": "exact" });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &fight, Some(exact)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(ogre_of(As::Seat(&tam)).await["hp"]["current"], 12);
+    let no_ac = call(&app, As::Dm, "PATCH", &at, Some(json!({ "ac": null }))).await;
+    assert_eq!(no_ac.0, StatusCode::NO_CONTENT);
+    assert!(ogre_of(As::Dm).await.get("ac").is_none());
+
+    // One round of poison, and prone until taken off: the poison ends with the Ogre's turn.
+    let effects = json!({ "effects": [{ "name": "Poisoned", "rounds": 1 }, { "name": "Prone" }] });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(effects)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let odd = json!({ "effects": [{ "name": "Forever", "rounds": 0 }] });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(odd)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    // The Ogre joined first in line after the turn had begun: Tam, then the Ogre.
+    for _ in 0..2 {
+        call(&app, As::Dm, "POST", &format!("{fight}/next"), None).await;
+    }
+    let left = ogre_of(As::Dm).await["effects"].clone();
+    assert_eq!(left.as_array().unwrap().len(), 1);
+    assert_eq!(left[0]["name"], "Prone");
+    let again = json!({ "who": "monsters" });
+    let roll = call(&app, As::Dm, "POST", &format!("{fight}/roll"), Some(again)).await;
+    assert_eq!(roll.0, StatusCode::NO_CONTENT);
+    let (_, view) = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None).await;
+    let texts: Vec<String> = view["log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["data"]["text"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        texts.iter().any(|t| t == "Poisoned ends on Ogre."),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("Initiative rolled again: "))
+    );
+}

@@ -16,7 +16,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use yuki_vtt_rules::changes::{self, Change};
-use yuki_vtt_rules::encounter::{self, Combatant, Encounter};
+use yuki_vtt_rules::encounter::{self, Combatant, Effect, Encounter, Hp};
 use yuki_vtt_rules::{Advantage, parse_dice, roll_detail};
 
 // What each screen gets of the log; older entries are dropped from the table.
@@ -122,7 +122,11 @@ pub async fn view(
         "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "characters": characters },
         // Player characters' health is everyone's to see, as at a real table.
         "members": seated.iter().map(|seat| seat.snapshot.member(&seat.id, &seat.permissions)).collect::<Vec<_>>(),
-        "encounter": encounter.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // Players get the fight without the DM's numbers.
+        "encounter": encounter
+            .map(|text| serde_json::from_str::<Encounter>(&text))
+            .transpose()?
+            .map(|fight| if access.runs() { fight } else { encounter::for_players(&fight) }),
         "scene": shown,
         "scenes": if access.runs() { maps::list(&db, &id)? } else { vec![] },
         "activeSceneId": active_scene,
@@ -536,6 +540,10 @@ pub async fn start(
                 initiative: 0,
                 seat_id: Some(seat.id.clone()),
                 id: seat.id,
+                hp: None,
+                ac: None,
+                health: None,
+                effects: vec![],
             })
             .collect();
         let started = encounter::start(fighters, d20);
@@ -562,6 +570,26 @@ pub struct NewCombatant {
     #[serde(default)]
     bonus: i32,
     initiative: Option<i32>,
+    hp: Option<i32>,
+    ac: Option<i32>,
+}
+
+// Hit points and armour class as the website allows them.
+fn hp_ok(hp: Hp) -> Result<Hp> {
+    if (1..=99_999).contains(&hp.max) && (0..=99_999).contains(&hp.current) {
+        Ok(hp)
+    } else {
+        Err(AppError::bad(
+            "Hit points are 0 to 99,999, the most at least 1",
+        ))
+    }
+}
+fn ac_ok(ac: i32) -> Result<i32> {
+    if (0..=60).contains(&ac) {
+        Ok(ac)
+    } else {
+        Err(AppError::bad("Armour class is 0 to 60"))
+    }
 }
 
 pub async fn add(
@@ -580,12 +608,20 @@ pub async fn add(
             ));
         }
         let initiative = body.initiative.unwrap_or_else(|| d20() + body.bonus);
+        let hp = body
+            .hp
+            .map(|max| hp_ok(Hp { current: max, max }))
+            .transpose()?;
         let combatant = Combatant {
             id: format!("npc-{}", ids::id()),
             name: name.clone(),
             initiative,
             bonus: body.bonus,
             seat_id: None,
+            hp,
+            ac: body.ac.map(ac_ok).transpose()?,
+            health: None,
+            effects: vec![],
         };
         save(
             db,
@@ -603,29 +639,143 @@ pub async fn add(
     })
 }
 
+/// A new effect on someone has no id yet.
 #[derive(Deserialize)]
-pub struct SetInitiative {
-    initiative: i32,
+pub struct EffectSent {
+    id: Option<String>,
+    name: String,
+    rounds: Option<u32>,
 }
 
-pub async fn set_initiative(
+/// A change the DM makes to someone in the fight. A null takes hit points or armour class off.
+#[derive(Deserialize)]
+pub struct CombatantChange {
+    name: Option<String>,
+    initiative: Option<i32>,
+    #[serde(default, deserialize_with = "present")]
+    hp: Option<Option<Hp>>,
+    #[serde(default, deserialize_with = "present")]
+    ac: Option<Option<i32>>,
+    effects: Option<Vec<EffectSent>>,
+}
+
+// Something sent, even null: Some(None) for null, None when it was left out.
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    sent: D,
+) -> std::result::Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(sent).map(Some)
+}
+
+pub async fn change_combatant(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, combatant)): Path<(String, String)>,
-    Json(body): Json<SetInitiative>,
+    Json(body): Json<CombatantChange>,
 ) -> Result<StatusCode> {
     fight(&state, &headers, &id, |db| {
-        if !(-20..=60).contains(&body.initiative) {
+        let fight = running(db, &id)?;
+        if !fight.combatants.iter().any(|c| c.id == combatant) {
+            return Err(AppError::not_found("They are not in the fight"));
+        }
+        if body.initiative.is_some_and(|i| !(-20..=60).contains(&i)) {
             return Err(AppError::bad("Initiative is -20 to 60"));
         }
+        let effects = body
+            .effects
+            .map(|sent| {
+                if sent.len() > 20 {
+                    return Err(AppError::bad("Someone holds up to 20 effects"));
+                }
+                sent.into_iter()
+                    .map(|e| {
+                        if e.rounds.is_some_and(|r| !(1..=10_000).contains(&r)) {
+                            return Err(AppError::bad("An effect lasts 1 to 10,000 rounds"));
+                        }
+                        Ok(Effect {
+                            id: e.id.unwrap_or_else(|| format!("fx-{}", ids::id())),
+                            name: text(&e.name, 60, "An effect's name")?,
+                            rounds: e.rounds,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        let change = encounter::Change {
+            name: body
+                .name
+                .as_deref()
+                .map(|n| text(n, 100, "A name"))
+                .transpose()?,
+            initiative: body.initiative,
+            hp: body.hp.map(|hp| hp.map(hp_ok).transpose()).transpose()?,
+            ac: body.ac.map(|ac| ac.map(ac_ok).transpose()).transpose()?,
+            effects,
+        };
         save(
             db,
             &id,
-            Some(&encounter::set_initiative(
-                &running(db, &id)?,
-                &combatant,
-                body.initiative,
-            )),
+            Some(&encounter::change(&fight, &combatant, change)),
+        )
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncounterChange {
+    show_health: String,
+}
+
+/// What players see of monsters' hit points.
+pub async fn change_encounter(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<EncounterChange>,
+) -> Result<StatusCode> {
+    fight(&state, &headers, &id, |db| {
+        if !["hidden", "word", "exact"].contains(&body.show_health.as_str()) {
+            return Err(AppError::bad("Hit points show as hidden, a word or exact"));
+        }
+        let fight = Encounter {
+            show_health: Some(body.show_health),
+            ..running(db, &id)?
+        };
+        save(db, &id, Some(&fight))
+    })
+}
+
+#[derive(Deserialize)]
+pub struct Reroll {
+    who: String,
+}
+
+/// Rolls initiative again, for the DM's fighters or for everyone.
+pub async fn reroll(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Reroll>,
+) -> Result<StatusCode> {
+    fight(&state, &headers, &id, |db| {
+        let everyone = match body.who.as_str() {
+            "all" => true,
+            "monsters" => false,
+            _ => return Err(AppError::bad("Roll again for monsters or all")),
+        };
+        let after = encounter::reroll(&running(db, &id)?, everyone, d20);
+        save(db, &id, Some(&after))?;
+        let order: Vec<String> = after
+            .combatants
+            .iter()
+            .map(|c| format!("{} {}", c.name, c.initiative))
+            .collect();
+        log(
+            db,
+            &id,
+            "system",
+            "Table",
+            json!({ "text": format!("Initiative rolled again: {}", order.join(", ")) }),
+            &[],
         )
     })
 }
@@ -653,6 +803,20 @@ pub async fn next(
         let before = running(db, &id)?;
         let after = encounter::next_turn(&before);
         save(db, &id, Some(&after))?;
+        let ended: Vec<String> = encounter::effects_ending(&before)
+            .into_iter()
+            .map(|(who, effect)| format!("{effect} ends on {who}."))
+            .collect();
+        if !ended.is_empty() {
+            log(
+                db,
+                &id,
+                "system",
+                "Table",
+                json!({ "text": ended.join(" ") }),
+                &[],
+            )?;
+        }
         if after.round > before.round {
             log(
                 db,
