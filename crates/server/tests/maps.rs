@@ -806,3 +806,23 @@ async fn carries_attached_tokens_and_stacks_them() {
     let rider_now = all.iter().find(|t| t["name"] == "Rider").unwrap();
     assert!(rider_now.get("attachedTo").is_none());
 }
+
+#[tokio::test]
+async fn keeps_how_diagonals_count() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let grid = json!({ "size": 70, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true, "diagonals": "alternate" });
+    let setup = json!({ "setup": { "width": 1400, "height": 980, "grid": grid } });
+    let path = format!("/tables/{}/scenes/{cave}", t.id);
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(setup.clone())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["grid"]["diagonals"],
+        "alternate"
+    );
+    let mut odd = setup;
+    odd["setup"]["grid"]["diagonals"] = json!("sideways");
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(odd)).await;
+    assert!(status.is_client_error());
+}

@@ -381,6 +381,7 @@ fn blank() -> TableMap {
             offset_y: 0,
             feet_per_cell: 5,
             show: true,
+            diagonals: None,
         },
         image: None,
         tokens: vec![],

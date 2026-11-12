@@ -12,6 +12,18 @@ pub struct MapGrid {
     pub offset_y: u32,
     pub feet_per_cell: u32,
     pub show: bool,
+    /// How a diagonal step counts: every one a cell (the 5e rule, when unset), every other
+    /// one two cells (5-10-5), or the real distance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagonals: Option<Diagonals>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Diagonals {
+    Five,
+    Alternate,
+    Real,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +71,17 @@ pub fn keep_inside(width: u32, height: u32, grid: &MapGrid, cell: Cell, size: u3
 /// Feet between two cells. Both editions count every square the same, diagonals too, so it's
 /// the longer of the two directions.
 pub fn distance(grid: &MapGrid, from: Cell, to: Cell) -> u32 {
-    from.x.abs_diff(to.x).max(from.y.abs_diff(to.y)) * grid.feet_per_cell
+    let (dx, dy) = (from.x.abs_diff(to.x), from.y.abs_diff(to.y));
+    let (long, short) = (dx.max(dy), dx.min(dy));
+    match grid.diagonals {
+        // Every second diagonal step costs a cell more: 5, 10, 5, 10...
+        Some(Diagonals::Alternate) => (long + short / 2) * grid.feet_per_cell,
+        // As the crow flies, to the nearest foot.
+        Some(Diagonals::Real) => {
+            (f64::from(dx).hypot(f64::from(dy)) * f64::from(grid.feet_per_cell)).round() as u32
+        }
+        _ => long * grid.feet_per_cell,
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +94,7 @@ mod tests {
         offset_y: 0,
         feet_per_cell: 5,
         show: true,
+        diagonals: None,
     };
 
     #[test]
@@ -116,5 +139,21 @@ mod tests {
             distance(&GRID, Cell { x: 0, y: 0 }, Cell { x: 3, y: 2 }),
             15
         );
+    }
+
+    #[test]
+    fn counts_diagonals_each_way() {
+        let (from, to) = (Cell { x: 0, y: 0 }, Cell { x: 4, y: 3 });
+        assert_eq!(distance(&GRID, from, to), 20);
+        let alternate = MapGrid {
+            diagonals: Some(Diagonals::Alternate),
+            ..GRID
+        };
+        assert_eq!(distance(&alternate, from, to), 25);
+        let real = MapGrid {
+            diagonals: Some(Diagonals::Real),
+            ..GRID
+        };
+        assert_eq!(distance(&real, from, Cell { x: 1, y: 1 }), 7);
     }
 }
