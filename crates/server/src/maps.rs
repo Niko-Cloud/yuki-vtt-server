@@ -224,6 +224,9 @@ pub struct Note {
     pub x: f64,
     pub y: f64,
     pub text: String,
+    /// Players can read it too; otherwise it is the DM's alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 /// A spell's area: a cone or line from where it starts, a sphere around a point, a cube with

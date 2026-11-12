@@ -119,6 +119,13 @@ async fn runs_fog_of_war_like_the_website() {
     let player = view(&app, As::Seat(&tam), &t).await;
     assert_eq!(player["scene"]["notes"], json!([]));
     assert_eq!(player["scene"]["drawings"], json!([]));
+    // A note the DM lets players read reaches them; the others don't.
+    let sign = json!({ "x": 200, "y": 100, "text": "The Rusty Anchor", "shared": true });
+    let posted = call(&app, As::Dm, "POST", &format!("{at}/notes"), Some(sign)).await;
+    assert_eq!(posted.0, StatusCode::NO_CONTENT);
+    let theirs = view(&app, As::Seat(&tam), &t).await["scene"]["notes"].clone();
+    assert_eq!(theirs.as_array().unwrap().len(), 1);
+    assert_eq!(theirs[0]["text"], "The Rusty Anchor");
     assert!(player["members"][0].get("darkvision").is_some());
     let note_id = dm["scene"]["notes"][0]["id"].as_str().unwrap().to_string();
     let gone = call(

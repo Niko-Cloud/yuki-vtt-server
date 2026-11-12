@@ -166,6 +166,8 @@ pub struct NewNote {
     x: f64,
     y: f64,
     text: String,
+    #[serde(default)]
+    shared: bool,
 }
 
 pub async fn add_note(
@@ -184,6 +186,7 @@ pub async fn add_note(
         x: body.x,
         y: body.y,
         text,
+        shared: body.shared,
     };
     edit(&state, &access, &id, &scene, |mut map| {
         map.notes.push(note);
@@ -268,7 +271,10 @@ pub fn for_players(scene: &mut Value) {
             !map.hand_fogged(middle_of(&map, &token))
         });
     }
-    scene["notes"] = json!([]);
+    // Only notes the DM lets players read.
+    if let Some(notes) = scene["notes"].as_array_mut() {
+        notes.retain(|n| n["shared"] == json!(true));
+    }
     // A closed secret door is a wall to players; an open one an open door, its secret kept.
     if let Some(walls) = scene["walls"].as_array_mut() {
         for wall in walls {
