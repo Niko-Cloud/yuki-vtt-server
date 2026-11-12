@@ -1387,9 +1387,9 @@ pub async fn add_drawing(
     if body.hidden {
         allow(access.runs(), "draw on the DM's layer")?;
     }
-    if !["pen", "line", "rect", "circle", "text"].contains(&body.shape.as_str()) {
+    if !["pen", "line", "rect", "circle", "text", "fill"].contains(&body.shape.as_str()) {
         return Err(AppError::bad(
-            "A drawing is a pen line, a line, a square, a circle or text",
+            "A drawing is a pen line, a line, a square, a circle, text or a filled shape",
         ));
     }
     points_ok(&body.points)?;
@@ -1491,7 +1491,8 @@ pub async fn change_drawing(
         )?;
         if let Some(points) = body.points {
             // A shape stays its two points; a line by hand keeps however many it has.
-            if found.shape != "pen" && points.len() != 2 {
+            let two = ["line", "rect", "circle", "text"].contains(&found.shape.as_str());
+            if two && points.len() != 2 {
                 return Err(AppError::bad("A shape has two points"));
             }
             found.points = points;

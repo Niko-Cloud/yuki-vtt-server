@@ -320,6 +320,29 @@ async fn draws_and_erases_by_permission() {
         change(As::Dm, 0, json!({ "hidden": false })).await,
         StatusCode::NO_CONTENT
     );
+    // A filled shape keeps its whole outline.
+    let pond = json!({ "shape": "fill", "color": "#86d5ed", "points": [[0, 0], [70, 0], [70, 70], [0, 70]] });
+    let (status, _) = call(&app, As::Dm, "POST", &path, Some(pond)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let pond_id = view(&app, As::Dm, &t).await["scene"]["drawings"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let moved = json!({ "points": [[10, 0], [80, 0], [80, 70], [10, 70]] });
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{path}/{pond_id}"),
+        Some(moved),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    call(&app, As::Dm, "DELETE", &format!("{path}/{pond_id}"), None).await;
     // Words on the map are a drawing too; only text has them.
     let words = json!({ "shape": "text", "color": "#f0f0f0", "points": [[70, 70], [70, 70]], "text": "Inn" });
     let (status, _) = call(&app, As::Dm, "POST", &path, Some(words.clone())).await;
