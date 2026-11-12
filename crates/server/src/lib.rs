@@ -95,7 +95,7 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/props", post(maps::add_prop))
         .route("/tables/{id}/scenes/{scene}/props/{prop}", patch(maps::change_prop).delete(maps::remove_prop))
         .route("/tables/{id}/scenes/{scene}/drawings", post(maps::add_drawing).delete(maps::clear_drawings))
-        .route("/tables/{id}/scenes/{scene}/drawings/{drawing}", axum::routing::delete(maps::remove_drawing))
+        .route("/tables/{id}/scenes/{scene}/drawings/{drawing}", axum::routing::delete(maps::remove_drawing).patch(maps::change_drawing))
         .route("/tables/{id}/ping", post(maps::ping))
         // Spell areas, placed by those the DM lets.
         .route("/tables/{id}/scenes/{scene}/templates", post(areas::add).delete(areas::clear))

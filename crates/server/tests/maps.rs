@@ -288,6 +288,39 @@ async fn draws_and_erases_by_permission() {
     assert_eq!(drawings[0]["color"], "#ff9090");
     assert_eq!(drawings[1]["by"], "dm");
 
+    // A player changes only their own line, never its layer; the DM changes any.
+    let change = |who, n: usize, body: Value| {
+        let path = format!("{path}/{}", drawings[n]["id"].as_str().unwrap());
+        let app = app.clone();
+        async move { call(&app, who, "PATCH", &path, Some(body)).await.0 }
+    };
+    let seat_said = change(As::Seat(&token), 1, json!({ "color": "#000000" })).await;
+    assert_eq!(seat_said, StatusCode::NOT_FOUND);
+    let hide = change(As::Seat(&token), 0, json!({ "hidden": true })).await;
+    assert_eq!(hide, StatusCode::NOT_FOUND);
+    let recolour = json!({ "color": "#123456", "weight": "thick" });
+    assert_eq!(
+        change(As::Seat(&token), 0, recolour).await,
+        StatusCode::NO_CONTENT
+    );
+    let odd = change(As::Dm, 0, json!({ "weight": "huge" })).await;
+    assert_eq!(odd, StatusCode::BAD_REQUEST);
+    let three = json!({ "points": [[0, 0], [1, 1], [2, 2]] });
+    assert_eq!(change(As::Dm, 0, three).await, StatusCode::BAD_REQUEST);
+    let moved = json!({ "points": [[70, 0], [210, 70]], "hidden": true });
+    assert_eq!(change(As::Dm, 0, moved).await, StatusCode::NO_CONTENT);
+    let now = view(&app, As::Dm, &t).await["scene"]["drawings"][0].clone();
+    assert_eq!(now["color"], "#123456");
+    assert_eq!(now["weight"], "thick");
+    assert_eq!(now["hidden"], true);
+    assert_eq!(now["points"][0], json!([70.0, 0.0]));
+    let seen = view(&app, As::Seat(&token), &t).await["scene"]["drawings"].clone();
+    assert_eq!(seen.as_array().unwrap().len(), 1);
+    assert_eq!(
+        change(As::Dm, 0, json!({ "hidden": false })).await,
+        StatusCode::NO_CONTENT
+    );
+
     // A player erases only their own line.
     let dms = drawings[1]["id"].as_str().unwrap();
     let (status, _) = call(
@@ -560,4 +593,80 @@ async fn sends_a_map_saved_before_fog_with_fog_off() {
     assert_eq!(seen["scene"]["fog"]["mode"], "off");
     assert_eq!(seen["scene"]["walls"], json!([]));
     assert_eq!(seen["scene"]["notes"], json!([]));
+}
+
+#[tokio::test]
+async fn a_co_dm_changes_anything_on_the_board() {
+    let app = host();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (wren_seat, wren) = join(&app, &t.invite, "Wren", "user-2").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/seats/{wren_seat}/permissions", t.id),
+        Some(json!({ "permissions": ["draw"] })),
+    )
+    .await;
+    let made = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/seats/{tam_seat}/role", t.id),
+        Some(json!({ "role": "codm" })),
+    )
+    .await;
+    assert_eq!(made.0, StatusCode::NO_CONTENT);
+    let line = json!({ "shape": "line", "color": "#ff9090", "points": [[0, 0], [70, 70]] });
+    let drew = call(
+        &app,
+        As::Seat(&wren),
+        "POST",
+        &format!("{at}/drawings"),
+        Some(line),
+    )
+    .await;
+    assert_eq!(drew.0, StatusCode::NO_CONTENT);
+    let drawing = view(&app, As::Dm, &t).await["scene"]["drawings"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Wren's line: the co-DM recolours it, puts it on the DM's layer, then erases it.
+    let path = format!("{at}/drawings/{drawing}");
+    let change = json!({ "color": "#123456", "hidden": true });
+    let (status, _) = call(&app, As::Seat(&tam), "PATCH", &path, Some(change)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "dark", "remember": true },
+        "walls": [{ "id": "gate", "a": [700, 0], "b": [700, 70], "door": { "open": false } }],
+        "lights": [],
+    });
+    let lit = call(
+        &app,
+        As::Seat(&tam),
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting),
+    )
+    .await;
+    assert_eq!(lit.0, StatusCode::NO_CONTENT);
+    let open = json!({ "open": true });
+    let door = call(
+        &app,
+        As::Seat(&tam),
+        "POST",
+        &format!("{at}/doors/gate"),
+        Some(open),
+    )
+    .await;
+    assert_eq!(door.0, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, As::Seat(&tam), "DELETE", &path, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let scene = view(&app, As::Dm, &t).await["scene"].clone();
+    assert_eq!(scene["drawings"], json!([]));
+    assert_eq!(scene["walls"][0]["door"]["open"], true);
 }

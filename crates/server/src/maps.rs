@@ -224,6 +224,9 @@ pub struct Drawing {
     /// On the DM's layer: players never receive it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+    /// How heavy its line is: thin, normal or thick; normal when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1070,10 +1073,31 @@ pub struct NewDrawing {
     points: Vec<[f64; 2]>,
     #[serde(default)]
     hidden: bool,
+    #[serde(default)]
+    weight: Option<String>,
 }
 
 fn pen() -> String {
     "pen".into()
+}
+
+// A line's weight, as the website has them.
+fn weight(value: Option<String>) -> Result<Option<String>> {
+    match value.as_deref() {
+        None => Ok(None),
+        Some("thin" | "normal" | "thick") => Ok(value),
+        Some(_) => Err(AppError::bad("A line is thin, normal or thick")),
+    }
+}
+
+fn points_ok(points: &[[f64; 2]]) -> Result<()> {
+    if !(2..=MOST_POINTS).contains(&points.len()) || points.iter().flatten().any(|n| !n.is_finite())
+    {
+        return Err(AppError::bad(format!(
+            "A drawing has 2 to {MOST_POINTS} points"
+        )));
+    }
+    Ok(())
 }
 
 pub async fn add_drawing(
@@ -1092,13 +1116,7 @@ pub async fn add_drawing(
             "A drawing is a pen line, a line, a square or a circle",
         ));
     }
-    if !(2..=MOST_POINTS).contains(&body.points.len())
-        || body.points.iter().flatten().any(|n| !n.is_finite())
-    {
-        return Err(AppError::bad(format!(
-            "A drawing has 2 to {MOST_POINTS} points"
-        )));
-    }
+    points_ok(&body.points)?;
     let by = if access.runs() {
         "dm".to_string()
     } else {
@@ -1115,6 +1133,7 @@ pub async fn add_drawing(
         points: body.points,
         by,
         hidden: body.hidden.then_some(true),
+        weight: weight(body.weight)?,
     };
     edit(&state, &access, &id, &scene, |mut map| {
         map.drawings.push(drawing);
@@ -1140,6 +1159,62 @@ pub async fn remove_drawing(
             )?;
         }
         map.drawings.retain(|d| d.id != drawing);
+        Ok(map)
+    })
+}
+
+/// A drawing moved, reshaped, recoloured or hidden.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawingChange {
+    points: Option<Vec<[f64; 2]>>,
+    color: Option<String>,
+    weight: Option<String>,
+    hidden: Option<bool>,
+}
+
+/// Whoever runs the table changes any drawing; a player only their own, never its layer.
+pub async fn change_drawing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene, drawing)): Path<(String, String, String)>,
+    Json(body): Json<DrawingChange>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    if body.hidden.is_some() {
+        allow(access.runs(), "move drawings to or from the DM's layer")?;
+    }
+    let color = body.color.as_deref().map(color).transpose()?;
+    let weight = weight(body.weight)?;
+    if let Some(points) = &body.points {
+        points_ok(points)?;
+    }
+    edit(&state, &access, &id, &scene, |mut map| {
+        let found = map
+            .drawings
+            .iter_mut()
+            .find(|d| d.id == drawing)
+            .ok_or_else(|| AppError::not_found("That drawing is gone"))?;
+        allow(
+            access.runs() || access.seat_ids.contains(&found.by),
+            "change it",
+        )?;
+        if let Some(points) = body.points {
+            // A shape stays its two points; a line by hand keeps however many it has.
+            if found.shape != "pen" && points.len() != 2 {
+                return Err(AppError::bad("A shape has two points"));
+            }
+            found.points = points;
+        }
+        if let Some(color) = color {
+            found.color = color;
+        }
+        if weight.is_some() {
+            found.weight = weight;
+        }
+        if let Some(hidden) = body.hidden {
+            found.hidden = hidden.then_some(true);
+        }
         Ok(map)
     })
 }
