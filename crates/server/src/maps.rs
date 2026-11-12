@@ -110,6 +110,9 @@ pub struct Fog {
     pub mode: String,
     pub light: String,
     pub remember: bool,
+    /// Walls, windows and closed doors stop players' tokens; on unless the DM turns it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collide: Option<bool>,
 }
 
 fn no_fog() -> Fog {
@@ -117,6 +120,7 @@ fn no_fog() -> Fog {
         mode: "off".into(),
         light: "bright".into(),
         remember: true,
+        collide: None,
     }
 }
 
@@ -941,8 +945,42 @@ pub async fn change_token(
         if let Some(locked) = body.locked {
             token.locked = locked.then_some(true);
         }
-        map.tokens[at] = map.keep_token(token);
+        let placed = map.keep_token(token);
+        let before = &map.tokens[at];
+        // Walls stop players' tokens (whoever runs the table goes anywhere).
+        let walled = !access.runs() && map.fog.collide != Some(false) && !map.walls.is_empty();
+        if walled && (placed.x, placed.y) != (before.x, before.y) {
+            let from = crate::fog::middle_of(&map, before);
+            if wall_in_the_way(&map.walls, from, crate::fog::middle_of(&map, &placed)) {
+                return Err(AppError::bad("A wall is in the way"));
+            }
+        }
+        map.tokens[at] = placed;
         Ok(map)
+    })
+}
+
+/// Whether a wall is in the way of a token going straight from one spot to another: walls,
+/// windows and closed doors stop it, open doors don't. A wall it only touches at the start
+/// (one it stands against) doesn't count.
+pub fn wall_in_the_way(walls: &[Wall], from: (f64, f64), to: (f64, f64)) -> bool {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    if dx.hypot(dy) < 1.0 {
+        return false;
+    }
+    walls.iter().any(|wall| {
+        if wall.door.as_ref().is_some_and(|d| d.open) {
+            return false;
+        }
+        let (ex, ey) = (wall.b[0] - wall.a[0], wall.b[1] - wall.a[1]);
+        let across = dx * ey - dy * ex;
+        if across.abs() < 1e-12 {
+            return false;
+        }
+        let (px, py) = (wall.a[0] - from.0, wall.a[1] - from.1);
+        let t = (px * ey - py * ex) / across;
+        let u = (px * dy - py * dx) / across;
+        t > 1e-6 && t <= 1.0 && (0.0..=1.0).contains(&u)
     })
 }
 

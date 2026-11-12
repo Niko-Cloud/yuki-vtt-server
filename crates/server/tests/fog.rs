@@ -373,3 +373,70 @@ async fn keeps_locked_doors_shut_and_secret_doors_hidden() {
     let dm = view(&app, As::Dm, &t).await["scene"]["walls"].clone();
     assert_eq!(dm[1]["door"], json!({ "open": true, "secret": true }));
 }
+
+#[tokio::test]
+async fn stops_players_tokens_at_walls_unless_the_dm_lets_them_through() {
+    let app = host();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    let token = view(&app, As::Dm, &t).await["scene"]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["seatId"] == tam_seat.as_str())
+        .unwrap()
+        .clone();
+    let (x, y) = (token["x"].as_i64().unwrap(), token["y"].as_i64().unwrap());
+    let path = format!("{at}/tokens/{}", token["id"].as_str().unwrap());
+    let go = |who, to: i64| {
+        let (app, path) = (app.clone(), path.clone());
+        async move {
+            call(&app, who, "PATCH", &path, Some(json!({ "x": to, "y": y })))
+                .await
+                .0
+        }
+    };
+    let lit = format!("{at}/lighting");
+    let put = |walls: Value, collide: Option<bool>| {
+        let (app, lit) = (app.clone(), lit.clone());
+        let mut fog = json!({ "mode": "off", "light": "bright", "remember": true });
+        if let Some(collide) = collide {
+            fog["collide"] = json!(collide);
+        }
+        async move {
+            let body = json!({ "fog": fog, "walls": walls, "lights": [] });
+            call(&app, As::Dm, "PUT", &lit, Some(body)).await.0
+        }
+    };
+    // A wall on the far side of the next cell over, from top to bottom.
+    let edge = (x + 2) * 70;
+    let wall = json!({ "id": "w", "a": [edge, 0], "b": [edge, 700] });
+    assert_eq!(put(json!([wall]), None).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 1).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::BAD_REQUEST);
+    // An open door lets them through; the DM goes anywhere.
+    let mut door = wall.clone();
+    door["door"] = json!({ "open": true });
+    assert_eq!(put(json!([door]), None).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::NO_CONTENT);
+    door["door"] = json!({ "open": false });
+    assert_eq!(put(json!([door]), None).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 1).await, StatusCode::BAD_REQUEST);
+    assert_eq!(go(As::Dm, x + 1).await, StatusCode::NO_CONTENT);
+    // With walls not stopping tokens, players pass too.
+    assert_eq!(
+        put(json!([wall]), Some(false)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::NO_CONTENT);
+}

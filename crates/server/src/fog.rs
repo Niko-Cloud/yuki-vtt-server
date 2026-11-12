@@ -91,7 +91,7 @@ pub struct DoorChange {
 }
 
 // Where a token's middle is, in pixels.
-fn middle_of(map: &TableMap, token: &maps::Token) -> (f64, f64) {
+pub(crate) fn middle_of(map: &TableMap, token: &maps::Token) -> (f64, f64) {
     let g = &map.grid;
     let half = f64::from(token.size * g.size) / 2.0;
     (
