@@ -66,7 +66,15 @@ pub struct Token {
     /// The token it rides on or is carried by: it moves when that one does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<String>,
+    /// Its name not written under it on the map (players never get it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_hidden: Option<bool>,
+    /// Coloured dots on it, for whatever the table agrees they mean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marks: Option<Vec<String>>,
 }
+
+const MARKS: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
 
 /// The tokens carried along when one moves: those attached to it, and those attached to them.
 pub fn carried_by(tokens: &[Token], id: &str) -> std::collections::HashSet<String> {
@@ -795,6 +803,8 @@ pub async fn add_token(
         shared_with: None,
         facing: None,
         attached_to: None,
+        name_hidden: None,
+        marks: None,
     };
     if let Some(image) = &token.image_id {
         picture_exists(&state.db(), &id, image)?;
@@ -864,6 +874,8 @@ pub async fn place_party(
                 shared_with: None,
                 facing: None,
                 attached_to: None,
+                name_hidden: None,
+                marks: None,
             };
             let token = map.keep_token(token);
             map.tokens.push(token);
@@ -898,6 +910,8 @@ pub struct TokenChange {
     #[serde(default, deserialize_with = "present")]
     attached_to: Option<Value>,
     layer: Option<String>,
+    name_hidden: Option<bool>,
+    marks: Option<Vec<String>>,
 }
 
 // A field that was sent, null included: Option alone reads null as not sent, so "take the
@@ -987,8 +1001,12 @@ pub async fn change_token(
         let mut token = map.tokens[at].clone();
         // Turning a token is moving it, as far as who may.
         let moving = body.x.is_some() || body.y.is_some() || body.facing.is_some();
-        let restyling =
-            body.name.is_some() || body.size.is_some() || body.color.is_some() || picture.is_some();
+        let restyling = body.name.is_some()
+            || body.size.is_some()
+            || body.color.is_some()
+            || picture.is_some()
+            || body.name_hidden.is_some()
+            || body.marks.is_some();
         let mine = token
             .seat_id
             .as_ref()
@@ -1034,6 +1052,18 @@ pub async fn change_token(
         }
         if let Some(new_color) = &body.color {
             token.color = color(new_color)?;
+        }
+        if let Some(hidden) = body.name_hidden {
+            token.name_hidden = hidden.then_some(true);
+        }
+        if let Some(marks) = &body.marks {
+            let known = marks.iter().all(|m| MARKS.contains(&m.as_str()));
+            if !known || marks.len() > MARKS.len() {
+                return Err(AppError::bad(
+                    "Markers are red, orange, yellow, green, blue or purple",
+                ));
+            }
+            token.marks = (!marks.is_empty()).then(|| marks.clone());
         }
         if let Some(image) = picture {
             token.image_id = image;

@@ -246,6 +246,14 @@ pub fn for_players(scene: &mut Value) {
     if let Some(templates) = scene["templates"].as_array_mut() {
         templates.retain(|t| t["hidden"] != json!(true));
     }
+    // A name the DM keeps off the map isn't sent either.
+    if let Some(tokens) = scene["tokens"].as_array_mut() {
+        for t in tokens {
+            if t["nameHidden"] == json!(true) {
+                t["name"] = json!("Unknown");
+            }
+        }
+    }
     // Monsters under the DM's painted fog aren't sent either; party tokens always are.
     if let Ok(map) = serde_json::from_value::<TableMap>(scene.clone())
         && let Some(tokens) = scene["tokens"].as_array_mut()

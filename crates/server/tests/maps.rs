@@ -833,3 +833,42 @@ async fn keeps_how_diagonals_count() {
     let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(odd)).await;
     assert!(status.is_client_error());
 }
+
+#[tokio::test]
+async fn marks_tokens_and_keeps_a_hidden_name_from_players() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Vampire", "x": 4, "y": 4 })),
+    )
+    .await;
+    let id = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = format!("{path}/{id}");
+    let marked = json!({ "nameHidden": true, "marks": ["red", "blue"] });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(marked)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let odd = json!({ "marks": ["pink"] });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(odd)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let theirs = view(&app, As::Seat(&tam), &t).await["scene"]["tokens"][0].clone();
+    assert_eq!(theirs["name"], "Unknown");
+    assert_eq!(theirs["marks"], json!(["red", "blue"]));
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["name"],
+        "Vampire"
+    );
+}
