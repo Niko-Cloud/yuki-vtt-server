@@ -872,3 +872,46 @@ async fn marks_tokens_and_keeps_a_hidden_name_from_players() {
         "Vampire"
     );
 }
+
+#[tokio::test]
+async fn turns_and_mirrors_pictures() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Bat", "x": 2, "y": 2 })),
+    )
+    .await;
+    let id = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = format!("{path}/{id}");
+    let turned = json!({ "rotation": 90, "flip": true });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(turned)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let odd = json!({ "rotation": 45 });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(odd)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let bat = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
+    assert_eq!(
+        (bat["rotation"].clone(), bat["flip"].clone()),
+        (json!(90), json!(true))
+    );
+    let back = json!({ "rotation": 0, "flip": false });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(back)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let bat = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
+    assert!(bat.get("rotation").is_none() && bat.get("flip").is_none());
+}

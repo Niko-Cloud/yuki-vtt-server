@@ -72,6 +72,20 @@ pub struct Token {
     /// Coloured dots on it, for whatever the table agrees they mean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marks: Option<Vec<String>>,
+    /// Its picture turned (0, 90, 180 or 270 degrees) or mirrored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip: Option<bool>,
+}
+
+// A picture turned a quarter at a time.
+fn turn(value: u32) -> Result<Option<u32>> {
+    match value {
+        0 => Ok(None),
+        90 | 180 | 270 => Ok(Some(value)),
+        _ => Err(AppError::bad("A picture turns 0, 90, 180 or 270 degrees")),
+    }
 }
 
 const MARKS: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
@@ -267,6 +281,10 @@ pub struct Prop {
     pub h: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip: Option<bool>,
 }
 
 /// A line by hand, or a shape from its first point to its last, in the picture's pixels.
@@ -808,6 +826,8 @@ pub async fn add_token(
         attached_to: None,
         name_hidden: None,
         marks: None,
+        rotation: None,
+        flip: None,
     };
     if let Some(image) = &token.image_id {
         picture_exists(&state.db(), &id, image)?;
@@ -879,6 +899,8 @@ pub async fn place_party(
                 attached_to: None,
                 name_hidden: None,
                 marks: None,
+                rotation: None,
+                flip: None,
             };
             let token = map.keep_token(token);
             map.tokens.push(token);
@@ -915,6 +937,8 @@ pub struct TokenChange {
     layer: Option<String>,
     name_hidden: Option<bool>,
     marks: Option<Vec<String>>,
+    rotation: Option<u32>,
+    flip: Option<bool>,
 }
 
 // A field that was sent, null included: Option alone reads null as not sent, so "take the
@@ -1009,7 +1033,9 @@ pub async fn change_token(
             || body.color.is_some()
             || picture.is_some()
             || body.name_hidden.is_some()
-            || body.marks.is_some();
+            || body.marks.is_some()
+            || body.rotation.is_some()
+            || body.flip.is_some();
         let mine = token
             .seat_id
             .as_ref()
@@ -1058,6 +1084,12 @@ pub async fn change_token(
         }
         if let Some(hidden) = body.name_hidden {
             token.name_hidden = hidden.then_some(true);
+        }
+        if let Some(rotation) = body.rotation {
+            token.rotation = turn(rotation)?;
+        }
+        if let Some(flip) = body.flip {
+            token.flip = flip.then_some(true);
         }
         if let Some(marks) = &body.marks {
             let known = marks.iter().all(|m| MARKS.contains(&m.as_str()));
@@ -1223,6 +1255,8 @@ pub async fn add_prop(
             w: body.w,
             h: body.h,
             locked,
+            rotation: None,
+            flip: None,
         });
         map.props.push(prop);
         Ok(map)
@@ -1237,6 +1271,8 @@ pub struct PropChange {
     h: Option<u32>,
     locked: Option<bool>,
     layer: Option<String>,
+    rotation: Option<u32>,
+    flip: Option<bool>,
 }
 
 pub async fn change_prop(
@@ -1265,6 +1301,12 @@ pub async fn change_prop(
         (prop.w, prop.h) = (body.w.unwrap_or(prop.w), body.h.unwrap_or(prop.h));
         cell(prop.x, prop.y)?;
         prop_size(prop.w, prop.h)?;
+        if let Some(rotation) = body.rotation {
+            prop.rotation = turn(rotation)?;
+        }
+        if let Some(flip) = body.flip {
+            prop.flip = flip.then_some(true);
+        }
         if let Some(locked) = body.locked {
             prop.locked = locked.then_some(true);
         }
