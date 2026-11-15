@@ -13,7 +13,8 @@ pub struct MapGrid {
     pub feet_per_cell: u32,
     pub show: bool,
     /// How a diagonal step counts: every one a cell (the 5e rule, when unset), every other
-    /// one two cells (5-10-5), or the real distance.
+    /// one two cells (5-10-5), the real distance, or always two cells (only straight steps,
+    /// as on a city's streets).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagonals: Option<Diagonals>,
 }
@@ -24,6 +25,7 @@ pub enum Diagonals {
     Five,
     Alternate,
     Real,
+    Manhattan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +82,8 @@ pub fn distance(grid: &MapGrid, from: Cell, to: Cell) -> u32 {
         Some(Diagonals::Real) => {
             (f64::from(dx).hypot(f64::from(dy)) * f64::from(grid.feet_per_cell)).round() as u32
         }
+        // Across and then down: a diagonal step is two.
+        Some(Diagonals::Manhattan) => (dx + dy) * grid.feet_per_cell,
         _ => long * grid.feet_per_cell,
     }
 }
@@ -155,5 +159,10 @@ mod tests {
             ..GRID
         };
         assert_eq!(distance(&real, from, Cell { x: 1, y: 1 }), 7);
+        let streets = MapGrid {
+            diagonals: Some(Diagonals::Manhattan),
+            ..GRID
+        };
+        assert_eq!(distance(&streets, from, to), 35);
     }
 }

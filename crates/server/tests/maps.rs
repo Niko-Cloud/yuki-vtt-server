@@ -851,6 +851,10 @@ async fn keeps_how_diagonals_count() {
         view(&app, As::Dm, &t).await["scene"]["grid"]["diagonals"],
         "alternate"
     );
+    let mut streets = setup.clone();
+    streets["setup"]["grid"]["diagonals"] = json!("manhattan");
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(streets)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     let mut odd = setup;
     odd["setup"]["grid"]["diagonals"] = json!("sideways");
     let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(odd)).await;
