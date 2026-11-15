@@ -1032,3 +1032,52 @@ async fn shares_rulers_with_anyone_and_trails_with_those_who_draw() {
     let (status, _) = call(&app, As::Dm, "POST", &path, Some(long)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn pins_rulers_and_takes_them_off() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/rulers", t.id);
+    let points = json!([[35, 35], [245, 35]]);
+    let (status, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "points": points })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = made["id"].as_str().unwrap().to_string();
+    let short = json!({ "points": [[1, 1]] });
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(short)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let theirs = view(&app, As::Seat(&tam), &t).await["scene"]["rulers"].clone();
+    // Spots on the map are kept as they came, in pixels.
+    let kept = json!([[35.0, 35.0], [245.0, 35.0]]);
+    assert_eq!(theirs, json!([{ "id": id, "points": kept, "by": "dm" }]));
+    // A player who may not draw pins none, and takes none of the DM's off.
+    let again = json!({ "points": points });
+    assert!(
+        call(&app, As::Seat(&tam), "POST", &path, Some(again))
+            .await
+            .0
+            .is_client_error()
+    );
+    let one = format!("{path}/{id}");
+    assert!(
+        call(&app, As::Seat(&tam), "DELETE", &one, None)
+            .await
+            .0
+            .is_client_error()
+    );
+    assert_eq!(
+        call(&app, As::Dm, "DELETE", &one, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(view(&app, As::Dm, &t).await["scene"]["rulers"], json!([]));
+}

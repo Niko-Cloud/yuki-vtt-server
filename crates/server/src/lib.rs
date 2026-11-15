@@ -16,6 +16,7 @@ pub mod maps;
 pub mod pictures;
 pub mod play;
 pub mod requests;
+pub mod rulers;
 pub mod seats;
 pub mod secrets;
 pub mod snapshot;
@@ -102,6 +103,9 @@ pub fn app(state: AppState) -> Router {
         // Spell areas, placed by those the DM lets.
         .route("/tables/{id}/scenes/{scene}/templates", post(areas::add).delete(areas::clear))
         .route("/tables/{id}/scenes/{scene}/templates/{area}", patch(areas::change).delete(areas::remove))
+        // Rulers pinned to the map, by those who may draw.
+        .route("/tables/{id}/scenes/{scene}/rulers", post(rulers::pin))
+        .route("/tables/{id}/scenes/{scene}/rulers/{ruler}", axum::routing::delete(rulers::unpin))
         // Fog of war: the DM's walls, doors, lights and notes; doors players stand next to.
         .route("/tables/{id}/sight", patch(fog::set_sight))
         .route("/tables/{id}/scenes/{scene}/lighting", axum::routing::put(fog::set_lighting))

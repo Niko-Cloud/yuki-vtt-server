@@ -340,6 +340,19 @@ pub struct TableMap {
     /// The DM's painted fog, area by area.
     #[serde(default, rename = "fogAreas")]
     pub fog_areas: Vec<FogArea>,
+    /// Rulers pinned to the map for everyone.
+    #[serde(default)]
+    pub rulers: Vec<Ruler>,
+}
+
+/// A ruler someone pinned to the map, kept for everyone until they or the DM take it off: the
+/// middles of the cells it runs through, corner by corner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ruler {
+    pub id: String,
+    pub points: Vec<[f64; 2]>,
+    /// Who pinned it: a seat, or "dm".
+    pub by: String,
 }
 
 /// An area of fog the DM painted: hidden from players, or (reveal) cut out of the fog. Later
@@ -429,6 +442,7 @@ fn blank() -> TableMap {
         notes: vec![],
         templates: vec![],
         fog_areas: vec![],
+        rulers: vec![],
     }
 }
 
