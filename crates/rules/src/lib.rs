@@ -2,6 +2,7 @@
 //! grid. Nothing here knows about books or character sheets; the website works those out and
 //! hands the host the result.
 
+pub mod changes;
 pub mod dice;
 pub mod encounter;
 pub mod hit_points;

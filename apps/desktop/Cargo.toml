@@ -1,0 +1,27 @@
+[package]
+name = "yuki-vtt-desktop"
+description = "The window and tray for Yuki VTT Server: start and stop hosting, pair with the website."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "yuki-vtt-server-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+yuki-vtt-server = { path = "../../crates/server" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tokio = { version = "1", features = ["sync", "time", "signal"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

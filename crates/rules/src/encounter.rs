@@ -14,13 +14,43 @@ pub struct Combatant {
     /// A seated character; monsters and NPCs the DM adds have none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_id: Option<String>,
+    /// The DM's fighters: hit points and armour class. Players get a word or nothing instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hp: Option<Hp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ac: Option<i32>,
+    /// How hurt it looks, for players, when the DM shows a word instead of numbers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Effect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hp {
+    pub current: i32,
+    pub max: i32,
+}
+
+/// A condition or spell on someone in the fight, for so many rounds or until taken off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Effect {
+    pub id: String,
+    pub name: String,
+    /// Rounds left, counted down at the end of its bearer's turn; none lasts until taken off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Encounter {
     pub round: u32,
     pub turn: usize,
     pub combatants: Vec<Combatant>,
+    /// What players see of monsters' hit points: hidden, word or exact; a word when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_health: Option<String>,
 }
 
 // Highest first. Ties go to the higher bonus, then by name, so everyone sees the same order.
@@ -45,6 +75,7 @@ pub fn start(fighters: Vec<Combatant>, mut d20: impl FnMut() -> i32) -> Encounte
         round: 1,
         turn: 0,
         combatants,
+        show_health: None,
     }
 }
 
@@ -110,26 +141,165 @@ pub fn remove(encounter: &Encounter, id: &str) -> Encounter {
         round,
         turn,
         combatants,
+        ..encounter.clone()
     }
 }
 
-/// The next turn; after the last in line, a new round starts at the top.
+/// The next turn; after the last in line, a new round starts at the top. The effects on
+/// whoever just acted count down a round, and those that run out come off.
 pub fn next_turn(encounter: &Encounter) -> Encounter {
     if encounter.combatants.is_empty() {
         return encounter.clone();
     }
+    let mut combatants = encounter.combatants.clone();
+    if let Some(acting) = combatants.get_mut(encounter.turn) {
+        acting.effects = acting
+            .effects
+            .iter()
+            .filter_map(|e| match e.rounds {
+                None => Some(e.clone()),
+                Some(1) | Some(0) => None,
+                Some(n) => Some(Effect {
+                    rounds: Some(n - 1),
+                    ..e.clone()
+                }),
+            })
+            .collect();
+    }
     let turn = encounter.turn + 1;
-    if turn >= encounter.combatants.len() {
+    if turn >= combatants.len() {
         Encounter {
+            combatants,
             turn: 0,
             round: encounter.round + 1,
             ..encounter.clone()
         }
     } else {
         Encounter {
+            combatants,
             turn,
             ..encounter.clone()
         }
+    }
+}
+
+/// The effects that run out when the turn now going ends: (who, effect).
+pub fn effects_ending(encounter: &Encounter) -> Vec<(String, String)> {
+    encounter
+        .combatants
+        .get(encounter.turn)
+        .map(|c| {
+            c.effects
+                .iter()
+                .filter(|e| e.rounds == Some(1))
+                .map(|e| (c.name.clone(), e.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// How hurt someone looks from outside: unhurt, hurt, bloodied (half or less) or down.
+pub fn health_word(hp: Hp) -> &'static str {
+    if hp.current <= 0 {
+        "down"
+    } else if hp.current >= hp.max {
+        "unhurt"
+    } else if hp.current * 2 <= hp.max {
+        "bloodied"
+    } else {
+        "hurt"
+    }
+}
+
+/// Rolls initiative again: for the DM's fighters only, or for everyone.
+pub fn reroll(encounter: &Encounter, everyone: bool, mut d20: impl FnMut() -> i32) -> Encounter {
+    let combatants = encounter
+        .combatants
+        .iter()
+        .map(|c| {
+            if everyone || c.seat_id.is_none() {
+                Combatant {
+                    initiative: d20() + c.bonus,
+                    ..c.clone()
+                }
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
+    reordered(encounter, combatants)
+}
+
+/// A change to someone in the fight. `Some(None)` takes hit points or armour class off.
+#[derive(Debug, Default, Clone)]
+pub struct Change {
+    pub name: Option<String>,
+    pub initiative: Option<i32>,
+    pub hp: Option<Option<Hp>>,
+    pub ac: Option<Option<i32>>,
+    pub effects: Option<Vec<Effect>>,
+}
+
+pub fn change(encounter: &Encounter, id: &str, change: Change) -> Encounter {
+    let combatants = encounter
+        .combatants
+        .iter()
+        .map(|c| {
+            if c.id != id {
+                return c.clone();
+            }
+            let mut next = c.clone();
+            if let Some(name) = &change.name {
+                next.name = name.clone();
+            }
+            if let Some(initiative) = change.initiative {
+                next.initiative = initiative;
+            }
+            if let Some(hp) = change.hp {
+                next.hp = hp.map(|hp| Hp {
+                    current: hp.current.min(hp.max),
+                    ..hp
+                });
+            }
+            if let Some(ac) = change.ac {
+                next.ac = ac;
+            }
+            if let Some(effects) = &change.effects {
+                next.effects = effects.clone();
+            }
+            next
+        })
+        .collect();
+    reordered(encounter, combatants)
+}
+
+/// The fight as players see it: no armour class for the DM's fighters, and their hit points as
+/// the DM chose to show them (exact, a word like "bloodied", or not at all).
+pub fn for_players(encounter: &Encounter) -> Encounter {
+    let shown = encounter.show_health.as_deref().unwrap_or("word");
+    let combatants = encounter
+        .combatants
+        .iter()
+        .map(|c| {
+            if c.seat_id.is_some() {
+                return c.clone();
+            }
+            let mut seen = Combatant {
+                ac: None,
+                hp: None,
+                ..c.clone()
+            };
+            match (c.hp, shown) {
+                (Some(hp), "exact") => seen.hp = Some(hp),
+                (Some(hp), "word") => seen.health = Some(health_word(hp).into()),
+                _ => {}
+            }
+            seen
+        })
+        .collect();
+    Encounter {
+        combatants,
+        ..encounter.clone()
     }
 }
 
@@ -162,6 +332,10 @@ mod tests {
             initiative: 0,
             bonus,
             seat_id: None,
+            hp: None,
+            ac: None,
+            health: None,
+            effects: vec![],
         }
     }
 
@@ -224,5 +398,85 @@ mod tests {
         let fight = remove(&fight, "B");
         assert_eq!((fight.round, fight.turn), (2, 0));
         assert_eq!(remove(&fight, "nobody"), fight);
+    }
+
+    #[test]
+    fn counts_effects_down_at_the_end_of_their_bearers_turn() {
+        let fight = start(vec![fighter("A", 3), fighter("B", 1)], || 10);
+        let effect = |id: &str, rounds| Effect {
+            id: id.into(),
+            name: id.into(),
+            rounds,
+        };
+        let fight = change(
+            &fight,
+            "A",
+            Change {
+                effects: Some(vec![
+                    effect("Bless", Some(2)),
+                    effect("Poisoned", Some(1)),
+                    effect("Prone", None),
+                ]),
+                ..Change::default()
+            },
+        );
+        assert_eq!(
+            effects_ending(&fight),
+            [("A".to_string(), "Poisoned".to_string())]
+        );
+        let fight = next_turn(&fight);
+        assert_eq!(
+            fight.combatants[0].effects,
+            [effect("Bless", Some(1)), effect("Prone", None)]
+        );
+        // B's turn ending leaves A's effects alone.
+        let fight = next_turn(&fight);
+        assert_eq!(fight.combatants[0].effects.len(), 2);
+        let fight = next_turn(&fight);
+        assert_eq!(fight.combatants[0].effects, [effect("Prone", None)]);
+    }
+
+    #[test]
+    fn shows_players_a_word_numbers_or_nothing() {
+        let words: Vec<_> = [0, 3, 6, 7, 12]
+            .into_iter()
+            .map(|current| health_word(Hp { current, max: 12 }))
+            .collect();
+        assert_eq!(words, ["down", "bloodied", "bloodied", "hurt", "unhurt"]);
+        let fight = change(
+            &start(vec![fighter("Ogre", 0)], || 10),
+            "Ogre",
+            Change {
+                hp: Some(Some(Hp {
+                    current: 40,
+                    max: 12,
+                })),
+                ac: Some(Some(11)),
+                ..Change::default()
+            },
+        );
+        assert_eq!(
+            fight.combatants[0].hp,
+            Some(Hp {
+                current: 12,
+                max: 12
+            })
+        );
+        let seen = for_players(&fight);
+        assert_eq!((seen.combatants[0].hp, seen.combatants[0].ac), (None, None));
+        assert_eq!(seen.combatants[0].health.as_deref(), Some("unhurt"));
+        let exact = for_players(&Encounter {
+            show_health: Some("exact".into()),
+            ..fight.clone()
+        });
+        assert_eq!(
+            exact.combatants[0].hp,
+            Some(Hp {
+                current: 12,
+                max: 12
+            })
+        );
+        let rolled = reroll(&fight, false, || 20);
+        assert_eq!(rolled.combatants[0].initiative, 20);
     }
 }

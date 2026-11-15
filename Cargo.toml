@@ -1,13 +1,20 @@
 [workspace]
 resolver = "3"
-members = ["crates/rules"]
+members = ["crates/rules", "crates/server", "apps/desktop"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
-repository = "https://github.com/yuki/yuki-vtt-server"
+repository = "https://github.com/Niko-Cloud/yuki-vtt-server"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Release builds are made small without giving up speed: one pass over the whole program,
+# and no debug symbols in the file.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

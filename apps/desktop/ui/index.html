@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yuki VTT Server</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <header class="head">
+        <img src="icon.png" alt="" width="40" height="40" />
+        <div>
+          <h1>Yuki VTT Server</h1>
+          <p class="muted">Hosts your tables on this computer</p>
+        </div>
+      </header>
+
+      <section class="card card--main" aria-live="polite">
+        <div class="state">
+          <span id="dot" class="dot"></span>
+          <div>
+            <strong id="state-title">Checking...</strong>
+            <p id="state-note" class="muted"></p>
+          </div>
+        </div>
+        <button id="toggle" type="button" class="button button--main" disabled>Start hosting</button>
+        <p id="problem" class="problem" hidden></p>
+      </section>
+
+      <section id="waiting-card" class="card card--main" hidden aria-live="polite">
+        <h2>Waiting to join</h2>
+        <ul id="waiting" class="tables"></ul>
+      </section>
+
+      <section id="offer" class="card card--main" hidden>
+        <h2>Connect this computer?</h2>
+        <p><strong id="offer-website"></strong> asks to connect this computer to your account.</p>
+        <p class="muted">
+          Say yes only if you just clicked "Connect this computer" there. Your tables will be
+          reachable through that website.
+        </p>
+        <div class="row">
+          <button id="offer-yes" type="button" class="button button--main">Connect</button>
+          <button id="offer-no" type="button" class="button">Not now</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Your account</h2>
+        <div id="paired" hidden>
+          <p>Connected to <strong id="website"></strong></p>
+          <button id="unpair" type="button" class="link">Disconnect</button>
+        </div>
+        <div id="unpaired" hidden>
+          <p>
+            On the Yuki Char Maker website, open <strong>Settings &gt; My hosts</strong> and click
+            <strong>Connect this computer</strong>. This app opens and asks you to confirm.
+          </p>
+        </div>
+        <details id="by-code" hidden>
+          <summary>Connect with a code instead</summary>
+        <form id="pair-form">
+          <p class="muted">For a website that can't open this app: it gives you a code to type there.</p>
+          <label>
+            <span>Website</span>
+            <input id="pair-website" type="url" placeholder="https://your-yuki-site.example" required />
+          </label>
+          <label>
+            <span>Name for this computer</span>
+            <input id="pair-name" type="text" maxlength="60" placeholder="My laptop" />
+          </label>
+          <button type="submit" class="button">Get a code</button>
+        </form>
+        </details>
+        <div id="pairing" hidden>
+          <p>On the website, open <strong>Settings &gt; My hosts</strong> and type this code:</p>
+          <p id="code" class="code">....-....</p>
+          <p class="muted">Waiting for you to type it. The code works for 10 minutes.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Tables on this computer</h2>
+        <ul id="tables" class="tables"></ul>
+        <p id="no-tables" class="muted" hidden>
+          None yet. On the website, make a party and pick this computer under "Runs on".
+        </p>
+        <p id="notice" class="notice" role="status" hidden></p>
+        <button id="restore" type="button" class="link">Restore a table from a backup</button>
+      </section>
+
+      <footer class="foot">
+        <label class="check">
+          <input id="start-on-open" type="checkbox" />
+          <span>Start hosting when this app opens</span>
+        </label>
+        <button id="folder" type="button" class="link">Open the data folder</button>
+        <p class="muted">
+          Players reach this computer through a Cloudflare tunnel. The connection is encrypted,
+          but Cloudflare's servers open it on the way through and can see the table's traffic.
+        </p>
+        <p id="tray-note" class="muted"></p>
+        <p id="version" class="muted"></p>
+      </footer>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>
