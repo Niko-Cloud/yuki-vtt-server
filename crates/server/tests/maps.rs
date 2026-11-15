@@ -891,9 +891,36 @@ async fn marks_tokens_and_keeps_a_hidden_name_from_players() {
         call(&app, As::Dm, "PATCH", &at, Some(odd)).await.0,
         StatusCode::BAD_REQUEST
     );
+    // A number on it, which a player who may not change tokens can't touch.
+    let counted = json!({ "counter": 12 });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(counted)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    for odd in [json!({ "counter": 1.5 }), json!({ "counter": 5000 })] {
+        assert_eq!(
+            call(&app, As::Dm, "PATCH", &at, Some(odd)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let theirs_too = json!({ "counter": 3 });
+    assert!(
+        call(&app, As::Seat(&tam), "PATCH", &at, Some(theirs_too))
+            .await
+            .0
+            .is_client_error()
+    );
     let theirs = view(&app, As::Seat(&tam), &t).await["scene"]["tokens"][0].clone();
     assert_eq!(theirs["name"], "Unknown");
     assert_eq!(theirs["marks"], json!(["red", "blue"]));
+    assert_eq!(theirs["counter"], 12);
+    let cleared = json!({ "counter": null });
+    call(&app, As::Dm, "PATCH", &at, Some(cleared)).await;
+    assert!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]
+            .get("counter")
+            .is_none()
+    );
     assert_eq!(
         view(&app, As::Dm, &t).await["scene"]["tokens"][0]["name"],
         "Vampire"

@@ -81,6 +81,9 @@ pub struct Token {
     pub rotation: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip: Option<bool>,
+    /// A number shown on it, for whatever the table counts: arrows left, rounds, charges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter: Option<i32>,
 }
 
 // A picture turned a quarter at a time.
@@ -839,6 +842,7 @@ pub async fn add_token(
         marks: None,
         rotation: None,
         flip: None,
+        counter: None,
     };
     if let Some(image) = &token.image_id {
         picture_exists(&state.db(), &id, image)?;
@@ -912,6 +916,7 @@ pub async fn place_party(
                 marks: None,
                 rotation: None,
                 flip: None,
+                counter: None,
             };
             let token = map.keep_token(token);
             map.tokens.push(token);
@@ -950,6 +955,9 @@ pub struct TokenChange {
     marks: Option<Vec<String>>,
     rotation: Option<u32>,
     flip: Option<bool>,
+    /// A new number on it, or null to take it off.
+    #[serde(default, deserialize_with = "present")]
+    counter: Option<Value>,
 }
 
 // A field that was sent, null included: Option alone reads null as not sent, so "take the
@@ -1021,6 +1029,14 @@ pub async fn change_token(
     {
         return Err(AppError::bad("A token is shared with up to 20 seats"));
     }
+    let counter = match &body.counter {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(value) => match value.as_i64() {
+            Some(n) if (-99..=999).contains(&n) => Some(Some(n as i32)),
+            _ => return Err(AppError::bad("A token's number is a whole -99 to 999")),
+        },
+    };
     let picture = match &body.image_id {
         None => None,
         Some(Value::Null) => Some(None),
@@ -1046,7 +1062,8 @@ pub async fn change_token(
             || body.name_hidden.is_some()
             || body.marks.is_some()
             || body.rotation.is_some()
-            || body.flip.is_some();
+            || body.flip.is_some()
+            || counter.is_some();
         let mine = token
             .seat_id
             .as_ref()
@@ -1101,6 +1118,9 @@ pub async fn change_token(
         }
         if let Some(flip) = body.flip {
             token.flip = flip.then_some(true);
+        }
+        if let Some(number) = counter {
+            token.counter = number;
         }
         if let Some(marks) = &body.marks {
             let known = marks.iter().all(|m| MARKS.contains(&m.as_str()));
