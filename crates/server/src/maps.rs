@@ -353,7 +353,22 @@ pub struct Drawing {
     /// How much a many-point line bends through its points (0 straight to 100 fully curved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub curve: Option<f64>,
-    /// Words on the map: a text drawing's, at its first point (its weight is its size).
+    /// Words' size as a multiple of the normal height (0.25 to 6); overrides weight when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    /// The font words are written in: book, title, plain or hand; book when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    /// Words turned about their point, in degrees (-180 to 180).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f64>,
+    /// A line drawn under the words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    /// Which way words lean around their point: left, center or right; left when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+    /// Words on the map: a text drawing's, at its first point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
@@ -1717,6 +1732,16 @@ pub struct NewDrawing {
     #[serde(default)]
     curve: Option<f64>,
     #[serde(default)]
+    font_size: Option<f64>,
+    #[serde(default)]
+    font: Option<String>,
+    #[serde(default)]
+    rotation: Option<f64>,
+    #[serde(default)]
+    underline: Option<bool>,
+    #[serde(default)]
+    align: Option<String>,
+    #[serde(default)]
     text: Option<String>,
 }
 
@@ -1757,6 +1782,42 @@ fn curve_amount(value: Option<f64>) -> Result<Option<f64>> {
         None => Ok(None),
         Some(c) if c.is_finite() && (0.0..=100.0).contains(&c) => Ok(Some(c)),
         Some(_) => Err(AppError::bad("A line's curve is 0 to 100")),
+    }
+}
+
+// Words' size: a multiple of the normal height, from a quarter to six times.
+fn font_size(value: Option<f64>) -> Result<Option<f64>> {
+    match value {
+        None => Ok(None),
+        Some(s) if s.is_finite() && (0.25..=6.0).contains(&s) => Ok(Some(s)),
+        Some(_) => Err(AppError::bad("Words' size is 0.25 to 6 times normal")),
+    }
+}
+
+// The font words are written in, as the website has them.
+fn text_font(value: Option<String>) -> Result<Option<String>> {
+    match value.as_deref() {
+        None => Ok(None),
+        Some("book" | "title" | "plain" | "hand") => Ok(value),
+        Some(_) => Err(AppError::bad("Words are book, title, plain or hand")),
+    }
+}
+
+// Words turned about their point, in degrees (-180 to 180).
+fn text_rotation(value: Option<f64>) -> Result<Option<f64>> {
+    match value {
+        None => Ok(None),
+        Some(r) if r.is_finite() && (-180.0..=180.0).contains(&r) => Ok(Some(r)),
+        Some(_) => Err(AppError::bad("Words turn -180 to 180 degrees")),
+    }
+}
+
+// Which way words lean around their point, as the website has them.
+fn text_align(value: Option<String>) -> Result<Option<String>> {
+    match value.as_deref() {
+        None => Ok(None),
+        Some("left" | "center" | "right") => Ok(value),
+        Some(_) => Err(AppError::bad("Words lean left, center or right")),
     }
 }
 
@@ -1813,6 +1874,11 @@ pub async fn add_drawing(
         fill_opacity: fill_opacity(body.fill_opacity)?,
         dash: body.dash,
         curve: curve_amount(body.curve)?,
+        font_size: font_size(body.font_size)?,
+        font: text_font(body.font)?,
+        rotation: text_rotation(body.rotation)?,
+        underline: body.underline.filter(|&u| u),
+        align: text_align(body.align)?,
         text,
     };
     edit(&state, &access, &id, &scene, |mut map| {
@@ -1854,6 +1920,11 @@ pub struct DrawingChange {
     fill_opacity: Option<f64>,
     dash: Option<bool>,
     curve: Option<f64>,
+    font_size: Option<f64>,
+    font: Option<String>,
+    rotation: Option<f64>,
+    underline: Option<bool>,
+    align: Option<String>,
     hidden: Option<bool>,
     text: Option<String>,
 }
@@ -1885,6 +1956,10 @@ pub async fn change_drawing(
     let width = brush_width(body.width)?;
     let fill_opacity = fill_opacity(body.fill_opacity)?;
     let curve = curve_amount(body.curve)?;
+    let font_size = font_size(body.font_size)?;
+    let font = text_font(body.font)?;
+    let rotation = text_rotation(body.rotation)?;
+    let align = text_align(body.align)?;
     if let Some(points) = &body.points {
         points_ok(points)?;
     }
@@ -1924,6 +1999,21 @@ pub async fn change_drawing(
         }
         if curve.is_some() {
             found.curve = curve;
+        }
+        if font_size.is_some() {
+            found.font_size = font_size;
+        }
+        if font.is_some() {
+            found.font = font;
+        }
+        if rotation.is_some() {
+            found.rotation = rotation;
+        }
+        if let Some(underline) = body.underline {
+            found.underline = underline.then_some(true);
+        }
+        if align.is_some() {
+            found.align = align;
         }
         if let Some(hidden) = body.hidden {
             found.hidden = hidden.then_some(true);

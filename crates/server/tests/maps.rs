@@ -344,7 +344,7 @@ async fn draws_and_erases_by_permission() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     call(&app, As::Dm, "DELETE", &format!("{path}/{pond_id}"), None).await;
     // Words on the map are a drawing too; only text has them.
-    let words = json!({ "shape": "text", "color": "#f0f0f0", "points": [[70, 70], [70, 70]], "text": "Inn" });
+    let words = json!({ "shape": "text", "color": "#f0f0f0", "points": [[70, 70], [70, 70]], "text": "Inn", "fontSize": 2, "font": "title", "rotation": 45, "underline": true, "align": "center" });
     let (status, _) = call(&app, As::Dm, "POST", &path, Some(words.clone())).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let mut wordless = words.clone();
@@ -363,6 +363,42 @@ async fn draws_and_erases_by_permission() {
         .as_str()
         .unwrap()
         .to_string();
+    // Words keep their size, font, turn, underline and lean; bad values are refused, as on the website.
+    let inn = view(&app, As::Dm, &t).await["scene"]["drawings"][2].clone();
+    assert_eq!(inn["fontSize"], json!(2.0));
+    assert_eq!(inn["font"], json!("title"));
+    assert_eq!(inn["rotation"], json!(45.0));
+    assert_eq!(inn["underline"], json!(true));
+    assert_eq!(inn["align"], json!("center"));
+    let text_at = format!("{path}/{text}");
+    for bad in [
+        json!({ "fontSize": 9 }),
+        json!({ "font": "comic" }),
+        json!({ "rotation": 200 }),
+        json!({ "align": "top" }),
+    ] {
+        assert_eq!(
+            call(&app, As::Dm, "PATCH", &text_at, Some(bad)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &text_at,
+            Some(json!({ "fontSize": 3, "align": "right", "underline": false }))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let restyled = view(&app, As::Dm, &t).await["scene"]["drawings"][2].clone();
+    assert_eq!(restyled["fontSize"], json!(3.0));
+    assert_eq!(restyled["align"], json!("right"));
+    assert_eq!(restyled["font"], json!("title"));
+    assert_eq!(restyled["underline"], json!(null));
     call(&app, As::Dm, "DELETE", &format!("{path}/{text}"), None).await;
 
     // A player erases only their own line.
