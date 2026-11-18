@@ -223,6 +223,10 @@ fn no_fog() -> Fog {
     }
 }
 
+fn no_weather() -> String {
+    "none".into()
+}
+
 /// A wall that stops sight, in the picture's pixels. A door is a wall that can be open.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wall {
@@ -402,6 +406,9 @@ pub struct TableMap {
     /// Rulers pinned to the map for everyone.
     #[serde(default)]
     pub rulers: Vec<Ruler>,
+    /// The weather drawn over the map for everyone: none, rain or snow.
+    #[serde(default = "no_weather")]
+    pub weather: String,
 }
 
 /// A ruler someone pinned to the map, kept for everyone until they or the DM take it off: the
@@ -483,6 +490,8 @@ pub struct Setup {
     pub width: u32,
     pub height: u32,
     pub grid: MapGrid,
+    #[serde(default)]
+    pub weather: Option<String>,
 }
 
 impl Setup {
@@ -508,6 +517,11 @@ impl Setup {
                     "Grid lines take a #rrggbb colour, width 0.5 to 6, opacity 0.05 to 1",
                 ));
             }
+        }
+        if let Some(weather) = &self.weather
+            && !matches!(weather.as_str(), "none" | "rain" | "snow")
+        {
+            return Err(AppError::bad("Weather is clear, rain or snow"));
         }
         Ok(())
     }
@@ -538,6 +552,7 @@ fn blank() -> TableMap {
         templates: vec![],
         fog_areas: vec![],
         rulers: vec![],
+        weather: no_weather(),
     }
 }
 
@@ -947,6 +962,7 @@ pub async fn update(
             width: setup.width,
             height: setup.height,
             grid: setup.grid,
+            weather: setup.weather.unwrap_or_else(|| map.weather.clone()),
             ..map
         }
         .keep_all())

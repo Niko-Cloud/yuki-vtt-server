@@ -90,6 +90,58 @@ async fn shows_players_only_the_map_the_dm_shows() {
 }
 
 #[tokio::test]
+async fn the_dm_sets_weather_everyone_sees_on_the_map() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    let setup = |weather: &str| {
+        json!({ "setup": {
+            "width": 1400, "height": 980,
+            "grid": { "size": 70, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true },
+            "weather": weather
+        } })
+    };
+
+    // A fresh map is clear, and the player reads the weather the DM sets.
+    assert_eq!(
+        view(&app, As::Seat(&token), &t).await["scene"]["weather"],
+        "none"
+    );
+    call(&app, As::Dm, "PATCH", &at, Some(setup("rain"))).await;
+    assert_eq!(
+        view(&app, As::Seat(&token), &t).await["scene"]["weather"],
+        "rain"
+    );
+
+    // Only clear, rain or snow; and only the DM changes it.
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(setup("hail")))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&app, As::Seat(&token), "PATCH", &at, Some(setup("snow")))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    call(&app, As::Dm, "PATCH", &at, Some(setup("snow"))).await;
+    assert_eq!(
+        view(&app, As::Seat(&token), &t).await["scene"]["weather"],
+        "snow"
+    );
+    call(&app, As::Dm, "PATCH", &at, Some(setup("none"))).await;
+    assert_eq!(
+        view(&app, As::Seat(&token), &t).await["scene"]["weather"],
+        "none"
+    );
+}
+
+#[tokio::test]
 async fn moves_tokens_as_far_as_the_dm_lets_players() {
     let app = host();
     let t = table(&app).await;
