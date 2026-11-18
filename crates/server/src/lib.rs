@@ -105,6 +105,8 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/view", post(maps::view))
         .route("/tables/{id}/xcard", post(play::xcard))
         .route("/tables/{id}/timer", axum::routing::put(play::set_timer).delete(play::clear_timer))
+        .route("/tables/{id}/loot", axum::routing::put(play::set_loot))
+        .route("/tables/{id}/journal", axum::routing::put(play::set_journal))
         // Spell areas, placed by those the DM lets.
         .route("/tables/{id}/scenes/{scene}/templates", post(areas::add).delete(areas::clear))
         .route("/tables/{id}/scenes/{scene}/templates/{area}", patch(areas::change).delete(areas::remove))

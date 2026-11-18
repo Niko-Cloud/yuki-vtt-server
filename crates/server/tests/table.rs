@@ -318,6 +318,109 @@ async fn the_dm_speaks_a_framed_line_as_a_character() {
 }
 
 #[tokio::test]
+async fn the_party_keeps_a_loot_list_and_a_session_journal() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+
+    // Both lists start empty for everyone.
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(view["loot"], json!([]));
+    assert_eq!(view["journal"], json!([]));
+
+    // The DM writes a loot list and a journal entry; the player reads both.
+    let now = yuki_vtt_server::ids::now();
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/loot", t.id),
+        Some(json!({ "items": [{ "id": "i1", "name": "Potion of Healing", "quantity": 2, "note": "From the crypt" }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/journal", t.id),
+        Some(json!({ "entries": [{ "id": "j1", "title": "Session 4", "text": "The party found the idol.", "at": now }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(view["loot"][0]["name"], "Potion of Healing");
+    assert_eq!(view["loot"][0]["quantity"], 2);
+    assert_eq!(view["loot"][0]["note"], "From the crypt");
+    assert_eq!(view["journal"][0]["title"], "Session 4");
+    assert_eq!(view["journal"][0]["text"], "The party found the idol.");
+    assert_eq!(view["journal"][0]["at"], now);
+
+    // A player cannot write either list.
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PUT",
+        &format!("/tables/{}/loot", t.id),
+        Some(json!({ "items": [] })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PUT",
+        &format!("/tables/{}/journal", t.id),
+        Some(json!({ "entries": [] })),
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    // A loot item needs a name and a count from 1 to 999; a journal entry needs a title.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/loot", t.id),
+        Some(json!({ "items": [{ "id": "i2", "name": "  ", "quantity": 1 }] })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/loot", t.id),
+        Some(json!({ "items": [{ "id": "i3", "name": "Gold", "quantity": 0 }] })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/journal", t.id),
+        Some(json!({ "entries": [{ "id": "j2", "title": "", "text": "x", "at": now }] })),
+    )
+    .await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
 async fn keeps_hidden_rolls_to_the_dm_and_a_private_roll_to_its_player() {
     let app = host();
     let t = table(&app).await;

@@ -102,6 +102,11 @@ pub async fn view(
         db.query_row("SELECT timer FROM tables WHERE id = ?1", [&id], |row| {
             row.get(0)
         })?;
+    let (loot, journal): (Option<String>, Option<String>) = db.query_row(
+        "SELECT loot, journal FROM tables WHERE id = ?1",
+        [&id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     let seated = seats(&db, &id)?;
     let looking = if access.runs() {
         query.scene.or(active_scene.clone())
@@ -154,6 +159,9 @@ pub async fn view(
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         // The countdown the DM started, for everyone to watch.
         "timer": timer.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // The party's shared loot list and session journal; everyone at the table reads them.
+        "loot": loot.map(|text| serde_json::from_str::<Value>(&text)).transpose()?.unwrap_or_else(|| json!([])),
+        "journal": journal.map(|text| serde_json::from_str::<Value>(&text)).transpose()?.unwrap_or_else(|| json!([])),
         // Saved groups are the DM's alone; players never receive them.
         "prefabs": if access.runs() { maps::parse_prefabs(prefabs) } else { vec![] },
         // The TV screens watching this table; the DM's alone.
@@ -502,6 +510,103 @@ pub async fn clear_timer(
     state
         .db()
         .execute("UPDATE tables SET timer = NULL WHERE id = ?1", [&id])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The party's loot list, checked and tidied: a name, a count from 1 to 999, an optional note.
+fn loot_items(value: &Value) -> Result<Vec<Value>> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| AppError::bad("Loot is a list of items"))?;
+    if items.len() > 200 {
+        return Err(AppError::bad("That is too much loot for one list"));
+    }
+    items
+        .iter()
+        .map(|item| {
+            let id = item["id"].as_str().unwrap_or("");
+            let name = item["name"].as_str().unwrap_or("").trim();
+            let quantity = item["quantity"].as_i64().unwrap_or(1);
+            let note = item["note"].as_str().unwrap_or("").trim();
+            if id.is_empty()
+                || id.len() > 40
+                || name.is_empty()
+                || name.chars().count() > 80
+                || !(1..=999).contains(&quantity)
+                || note.chars().count() > 200
+            {
+                return Err(AppError::bad(
+                    "A loot item needs a name and a count from 1 to 999",
+                ));
+            }
+            Ok(json!({ "id": id, "name": name, "quantity": quantity, "note": note }))
+        })
+        .collect()
+}
+
+/// The session journal, checked and tidied: a title, optional text, and the moment it was written.
+fn journal_entries(value: &Value) -> Result<Vec<Value>> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| AppError::bad("The journal is a list of entries"))?;
+    if entries.len() > 200 {
+        return Err(AppError::bad(
+            "That is too many journal entries for one table",
+        ));
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let id = entry["id"].as_str().unwrap_or("");
+            let title = entry["title"].as_str().unwrap_or("").trim();
+            let text = entry["text"].as_str().unwrap_or("").trim();
+            let at = entry["at"]
+                .as_i64()
+                .ok_or_else(|| AppError::bad("A journal entry needs a time"))?;
+            if id.is_empty()
+                || id.len() > 40
+                || title.is_empty()
+                || title.chars().count() > 100
+                || text.chars().count() > 2000
+            {
+                return Err(AppError::bad("A journal entry needs a title"));
+            }
+            Ok(json!({ "id": id, "title": title, "text": text, "at": at }))
+        })
+        .collect()
+}
+
+/// `PUT /api/tables/{id}/loot`: the party's whole shared loot list; only the DM writes it.
+pub async fn set_loot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    let items = loot_items(&body["items"])?;
+    let text = serde_json::to_string(&items)?;
+    state
+        .db()
+        .execute("UPDATE tables SET loot = ?2 WHERE id = ?1", [&id, &text])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /api/tables/{id}/journal`: the whole session journal, newest first; only the DM writes it.
+pub async fn set_journal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    let entries = journal_entries(&body["entries"])?;
+    let text = serde_json::to_string(&entries)?;
+    state
+        .db()
+        .execute("UPDATE tables SET journal = ?2 WHERE id = ?1", [&id, &text])?;
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }

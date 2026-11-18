@@ -39,6 +39,8 @@ const PARTS: [(&str, &[&str]); 6] = [
             "shared_sight",
             "prefabs",
             "timer",
+            "loot",
+            "journal",
         ],
     ),
     (
@@ -140,6 +142,7 @@ fn fits(column: &str, value: &Value) -> bool {
         "encounter" => value.is_null() || holds::<yuki_vtt_rules::encounter::Encounter>(value),
         "handout" => value.is_null() || holds::<Value>(value),
         "timer" => value.is_null() || holds::<Value>(value),
+        "loot" | "journal" => value.is_null() || value.is_array(),
         "prefabs" => value.is_null() || holds::<Vec<crate::maps::Prefab>>(value),
         "active_scene_id" | "player_id" => value.is_null() || value.is_string(),
         _ => value.is_string(),
