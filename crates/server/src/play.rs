@@ -39,7 +39,7 @@ struct Seat {
 
 fn seats(db: &Connection, table_id: &str) -> Result<Vec<Seat>> {
     let mut rows = db.prepare(
-        "SELECT id, permissions, snapshot FROM seats WHERE table_id = ?1 ORDER BY created_at",
+        "SELECT id, permissions, snapshot FROM seats WHERE table_id = ?1 AND kind != 'screen' ORDER BY created_at",
     )?;
     let found = rows
         .query_map([table_id], |row| {
@@ -119,9 +119,23 @@ pub async fn view(
         .filter(|seat| access.seat_ids.contains(&seat.id))
         .map(|seat| json!({ "seatId": seat.id, "characterId": seat.snapshot.character_id }))
         .collect();
+    // The screens watching this table, for the DM to see and remove.
+    let screens: Vec<Value> = if access.runs() {
+        let mut rows = db.prepare(
+            "SELECT id FROM seats WHERE table_id = ?1 AND kind = 'screen' ORDER BY created_at",
+        )?;
+        let ids = rows
+            .query_map([&id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|seat_id| json!({ "seatId": seat_id, "name": "Screen" }))
+            .collect()
+    } else {
+        vec![]
+    };
     Ok(Json(json!({
         "party": { "id": id, "name": name, "edition": edition, "sharedSight": crate::fog::shared_sight(&db, &id)? },
-        "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "characters": characters },
+        "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "screen": access.screen, "characters": characters },
         // Player characters' health is everyone's to see, as at a real table.
         "members": seated.iter().map(|seat| seat.snapshot.member(&seat.id, &seat.permissions)).collect::<Vec<_>>(),
         // Players get the fight without the DM's numbers.
@@ -136,6 +150,8 @@ pub async fn view(
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         // Saved groups are the DM's alone; players never receive them.
         "prefabs": if access.runs() { maps::parse_prefabs(prefabs) } else { vec![] },
+        // The TV screens watching this table; the DM's alone.
+        "screens": screens,
         "log": log_for(&db, &id, &access)?,
         // Waiting to join: for whoever runs the table, to let in from the map room.
         "requests": if access.runs() { crate::requests::waiting(&db, &id)? } else { vec![] },

@@ -147,6 +147,45 @@ pub async fn join(
     ))
 }
 
+/// `POST /api/join/{invite}/screen`: a TV screen sits down with no character, a tool-less map
+/// that follows the DM. Only this browser gets the seat token, to leave again.
+pub async fn join_screen(
+    State(state): State<AppState>,
+    Path(invite): Path<String>,
+) -> Result<(StatusCode, Json<Value>)> {
+    let (table_id, seat_id, token) = {
+        let db = state.db();
+        let table = invited(&db, &invite)?;
+        if table.locked {
+            return Err(AppError::forbidden(
+                "The DM locked this table: ask them to open it",
+            ));
+        }
+        let seats: i64 = db.query_row(
+            "SELECT COUNT(*) FROM seats WHERE table_id = ?1",
+            [&table.id],
+            |row| row.get(0),
+        )?;
+        if seats >= MOST_SEATS {
+            return Err(AppError::forbidden(format!(
+                "The party is full ({MOST_SEATS} seats)"
+            )));
+        }
+        let (seat_id, token, now) = (ids::id(), ids::secret(), ids::now());
+        // A screen keeps no sheet: just a name for the DM's list, and no rights on the map.
+        db.execute(
+            "INSERT INTO seats (id, table_id, token_hash, player_id, snapshot, kind, permissions, created_at, updated_at) VALUES (?1, ?2, ?3, NULL, ?4, 'screen', '[]', ?5, ?5)",
+            params![seat_id, table.id, ids::hash(&token), r#"{"summary":{"name":"Screen"}}"#, now],
+        )?;
+        (table.id, seat_id, token)
+    };
+    state.events.changed(&table_id);
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "partyId": table_id, "seatId": seat_id, "seatToken": token })),
+    ))
+}
+
 // A signed copy for joining sits down once. The ones kept are only as old as a copy can be
 // and still be fresh.
 fn once(db: &Connection, signature: &str) -> Result<()> {

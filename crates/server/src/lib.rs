@@ -124,6 +124,7 @@ pub fn app(state: AppState) -> Router {
         // The seat token comes in the x-seat-token header, never in the address.
         .route("/seat/status", get(requests::status))
         .route("/join/{invite}", get(seats::invite).post(seats::join))
+        .route("/join/{invite}/screen", post(seats::join_screen))
         .route("/seat", get(seats::pull).put(seats::push).delete(seats::leave));
 
     Router::new()

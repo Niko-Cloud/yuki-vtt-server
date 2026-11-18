@@ -186,8 +186,14 @@ fn read_rows(
 ) -> rusqlite::Result<Vec<Value>> {
     let key = if part == "tables" { "id" } else { "table_id" };
     let order = if part == "log" { " ORDER BY seq" } else { "" };
+    // Screens are transient displays with no character: a restored table opens them again.
+    let only = if part == "seats" {
+        " AND kind != 'screen'"
+    } else {
+        ""
+    };
     let sql = format!(
-        "SELECT {} FROM {part} WHERE {key} = ?1{order}",
+        "SELECT {} FROM {part} WHERE {key} = ?1{only}{order}",
         columns.join(", ")
     );
     let mut statement = db.prepare(&sql)?;

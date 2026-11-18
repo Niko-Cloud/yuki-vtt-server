@@ -80,6 +80,70 @@ async fn seats_a_signed_character_and_shows_the_table() {
 }
 
 #[tokio::test]
+async fn a_tv_screen_sits_down_with_no_character() {
+    let app = host();
+    let t = table(&app).await;
+    let (status, screen) = call(
+        &app,
+        As::Nobody,
+        "POST",
+        &format!("/join/{}/screen", t.invite),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{screen}");
+    let token = screen["seatToken"].as_str().unwrap();
+    assert_eq!(screen["partyId"], t.id.as_str());
+
+    // The screen sees the table as a player with no rights, and is told it is a screen.
+    let (status, view) = call(
+        &app,
+        As::Seat(token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(view["you"]["screen"], true);
+    assert_eq!(view["you"]["role"], "player");
+    assert_eq!(view["you"]["permissions"], json!([]));
+    // A screen keeps no sheet, so it is not among the members the table reads.
+    assert!(view["members"].as_array().unwrap().is_empty());
+    // A player never receives the DM's list of screens.
+    assert!(view["screens"].as_array().unwrap().is_empty());
+
+    // The DM sees the screen in its own list, to remove it.
+    let (_, dm) = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None).await;
+    assert_eq!(dm["screens"][0]["seatId"], screen["seatId"]);
+    assert_eq!(dm["screens"][0]["name"], "Screen");
+
+    // The DM removes the screen; its seat is gone.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!(
+            "/tables/{}/seats/{}",
+            t.id,
+            screen["seatId"].as_str().unwrap()
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        As::Seat(token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
 async fn keeps_hidden_rolls_to_the_dm_and_a_private_roll_to_its_player() {
     let app = host();
     let t = table(&app).await;

@@ -31,6 +31,8 @@ pub struct Access {
     pub seat_ids: Vec<String>,
     /// What this viewer may do on the map; whoever runs the table may do it all.
     pub permissions: Vec<String>,
+    /// A screen the table watches: a tool-less map that follows the DM, with no character.
+    pub screen: bool,
 }
 
 impl Access {
@@ -149,6 +151,7 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
             name: dm_name,
             seat_ids: vec![],
             permissions: all(),
+            screen: false,
         });
     }
     // A seat by its token, or by its pass; a seat the DM removed takes its passes with it.
@@ -157,14 +160,15 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
         (None, Some(seat_id)) => ("id", seat_id),
         (None, None) => return Err(missing()),
     };
-    let seat: Option<(String, String, String, String)> = db
+    let seat: Option<(String, String, String, String, String)> = db
         .query_row(
-            &format!("SELECT id, role, permissions, snapshot FROM seats WHERE table_id = ?1 AND {column} = ?2"),
+            &format!("SELECT id, role, permissions, snapshot, kind FROM seats WHERE table_id = ?1 AND {column} = ?2"),
             [table_id, &value],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()?;
-    let (seat_id, role, permissions, snapshot) = seat.ok_or_else(missing)?;
+    let (seat_id, role, permissions, snapshot, kind) = seat.ok_or_else(missing)?;
+    let screen = kind == "screen";
     let name = serde_json::from_str::<serde_json::Value>(&snapshot)?["summary"]["name"]
         .as_str()
         .unwrap_or("Guest")
@@ -175,13 +179,20 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
             name,
             seat_ids: vec![],
             permissions: all(),
+            screen: false,
         });
     }
     Ok(Access {
         role: Role::Player,
         name,
         seat_ids: vec![seat_id],
-        permissions: serde_json::from_str(&permissions)?,
+        // A screen has no rights on the map: it only watches.
+        permissions: if screen {
+            vec![]
+        } else {
+            serde_json::from_str(&permissions)?
+        },
+        screen,
     })
 }
 

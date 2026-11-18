@@ -103,6 +103,9 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE tables ADD COLUMN prefabs TEXT;
 "#,
+    r#"
+    ALTER TABLE seats ADD COLUMN kind TEXT NOT NULL DEFAULT 'character';
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
