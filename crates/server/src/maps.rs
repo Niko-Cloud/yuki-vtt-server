@@ -340,6 +340,9 @@ pub struct Drawing {
     /// How heavy its line is: thin, normal or thick; normal when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<String>,
+    /// Brush width as a multiple of a normal line (0.25 to 4); overrides weight when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
     /// Words on the map: a text drawing's, at its first point (its weight is its size).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -1695,6 +1698,8 @@ pub struct NewDrawing {
     #[serde(default)]
     weight: Option<String>,
     #[serde(default)]
+    width: Option<f64>,
+    #[serde(default)]
     text: Option<String>,
 }
 
@@ -1708,6 +1713,15 @@ fn weight(value: Option<String>) -> Result<Option<String>> {
         None => Ok(None),
         Some("thin" | "normal" | "thick") => Ok(value),
         Some(_) => Err(AppError::bad("A line is thin, normal or thick")),
+    }
+}
+
+// A brush width: a multiple of a normal line, from a quarter to four times.
+fn brush_width(value: Option<f64>) -> Result<Option<f64>> {
+    match value {
+        None => Ok(None),
+        Some(w) if w.is_finite() && (0.25..=4.0).contains(&w) => Ok(Some(w)),
+        Some(_) => Err(AppError::bad("A line's width is 0.25 to 4 times normal")),
     }
 }
 
@@ -1760,6 +1774,7 @@ pub async fn add_drawing(
         by,
         hidden: body.hidden.then_some(true),
         weight: weight(body.weight)?,
+        width: brush_width(body.width)?,
         text,
     };
     edit(&state, &access, &id, &scene, |mut map| {
@@ -1797,6 +1812,7 @@ pub struct DrawingChange {
     points: Option<Vec<[f64; 2]>>,
     color: Option<String>,
     weight: Option<String>,
+    width: Option<f64>,
     hidden: Option<bool>,
     text: Option<String>,
 }
@@ -1825,6 +1841,7 @@ pub async fn change_drawing(
     }
     let color = body.color.as_deref().map(color).transpose()?;
     let weight = weight(body.weight)?;
+    let width = brush_width(body.width)?;
     if let Some(points) = &body.points {
         points_ok(points)?;
     }
@@ -1852,6 +1869,9 @@ pub async fn change_drawing(
         }
         if weight.is_some() {
             found.weight = weight;
+        }
+        if width.is_some() {
+            found.width = width;
         }
         if let Some(hidden) = body.hidden {
             found.hidden = hidden.then_some(true);

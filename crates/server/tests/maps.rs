@@ -459,6 +459,43 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
         call(&app, As::Dm, "PATCH", &at(2), Some(moved)).await.0,
         StatusCode::NO_CONTENT
     );
+
+    // The brush width is kept and changed; outside 0.25 to 4 it is refused, as on the website.
+    let wide =
+        json!({ "shape": "pen", "color": "#ff9090", "points": [[0, 0], [9, 9]], "width": 2.5 });
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(wide)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let drawings = view(&app, As::Dm, &t).await["scene"]["drawings"].clone();
+    let pen = drawings
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["shape"] == "pen")
+        .unwrap();
+    assert_eq!(pen["width"], json!(2.5));
+    let pen_at = format!("{path}/{}", pen["id"].as_str().unwrap());
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &pen_at, Some(json!({ "width": 3 })))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &pen_at, Some(json!({ "width": 9 })))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let after = view(&app, As::Dm, &t).await["scene"]["drawings"].clone();
+    let pen = after
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["shape"] == "pen")
+        .unwrap();
+    assert_eq!(pen["width"], json!(3.0));
 }
 
 #[tokio::test]
