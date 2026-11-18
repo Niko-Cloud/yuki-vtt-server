@@ -862,6 +862,30 @@ async fn keeps_how_diagonals_count() {
 }
 
 #[tokio::test]
+async fn keeps_the_grid_style() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let grid = json!({ "size": 70, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true,
+        "style": { "color": "#1a2b3c", "width": 2, "opacity": 0.6, "dash": true } });
+    let setup = json!({ "setup": { "width": 1400, "height": 980, "grid": grid } });
+    let path = format!("/tables/{}/scenes/{cave}", t.id);
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(setup.clone())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let view = view(&app, As::Dm, &t).await;
+    assert_eq!(view["scene"]["grid"]["style"]["color"], "#1a2b3c");
+    assert_eq!(view["scene"]["grid"]["style"]["dash"], true);
+    let mut odd = setup.clone();
+    odd["setup"]["grid"]["style"]["color"] = json!("blue");
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(odd)).await;
+    assert!(status.is_client_error());
+    let mut wide = setup;
+    wide["setup"]["grid"]["style"]["width"] = json!(9);
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(wide)).await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
 async fn marks_tokens_and_keeps_a_hidden_name_from_players() {
     let app = host();
     let t = table(&app).await;

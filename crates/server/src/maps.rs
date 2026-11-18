@@ -393,7 +393,7 @@ impl TableMap {
 }
 
 /// What the DM sets for a map: its size and grid.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Setup {
     pub width: u32,
     pub height: u32,
@@ -409,13 +409,22 @@ impl Setup {
             && g.offset_x <= 399
             && g.offset_y <= 399
             && (1..=100).contains(&g.feet_per_cell);
-        if ok {
-            Ok(())
-        } else {
-            Err(AppError::bad(
+        if !ok {
+            return Err(AppError::bad(
                 "A map is 100 to 16384 pixels, with cells of 8 to 400",
-            ))
+            ));
         }
+        if let Some(s) = &g.style {
+            let colour = s.color.len() == 7
+                && s.color.starts_with('#')
+                && s.color[1..].chars().all(|c| c.is_ascii_hexdigit());
+            if !colour || !(0.5..=6.0).contains(&s.width) || !(0.05..=1.0).contains(&s.opacity) {
+                return Err(AppError::bad(
+                    "Grid lines take a #rrggbb colour, width 0.5 to 6, opacity 0.05 to 1",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -431,6 +440,7 @@ fn blank() -> TableMap {
             feet_per_cell: 5,
             show: true,
             diagonals: None,
+            style: None,
         },
         image: None,
         tokens: vec![],
