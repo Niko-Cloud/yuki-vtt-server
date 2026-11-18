@@ -98,6 +98,10 @@ pub async fn view(
             ))
         },
     )?;
+    let timer: Option<String> =
+        db.query_row("SELECT timer FROM tables WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })?;
     let seated = seats(&db, &id)?;
     let looking = if access.runs() {
         query.scene.or(active_scene.clone())
@@ -148,6 +152,8 @@ pub async fn view(
         "activeSceneId": active_scene,
         "assets": pictures::list(&db, &id, access.runs())?,
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // The countdown the DM started, for everyone to watch.
+        "timer": timer.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         // Saved groups are the DM's alone; players never receive them.
         "prefabs": if access.runs() { maps::parse_prefabs(prefabs) } else { vec![] },
         // The TV screens watching this table; the DM's alone.
@@ -426,6 +432,47 @@ pub async fn xcard(
         log(&db, &id, "xcard", "", json!({ "text": "X-card" }), &[])?;
     }
     state.events.xcard(&id);
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimerRequest {
+    seconds: i64,
+}
+
+/// `PUT /api/tables/{id}/timer`: a countdown everyone watches, ending this many seconds from now.
+pub async fn set_timer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<TimerRequest>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    if !(1..=3600).contains(&body.seconds) {
+        return Err(AppError::bad(
+            "A countdown runs from one second to one hour",
+        ));
+    }
+    let timer = json!({ "endsAt": ids::now() + body.seconds * 1000 }).to_string();
+    state
+        .db()
+        .execute("UPDATE tables SET timer = ?2 WHERE id = ?1", [&id, &timer])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/timer`: stops the countdown and takes it off everyone's screen.
+pub async fn clear_timer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    state
+        .db()
+        .execute("UPDATE tables SET timer = NULL WHERE id = ?1", [&id])?;
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }

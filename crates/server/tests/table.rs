@@ -178,6 +178,80 @@ async fn anyone_presses_the_x_card_and_no_name_is_shown() {
 }
 
 #[tokio::test]
+async fn the_dm_starts_a_countdown_everyone_watches() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+
+    // No countdown to start with.
+    let (_, view) = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None).await;
+    assert!(view["timer"].is_null());
+
+    // The DM starts five minutes; it ends about now plus five minutes, and the player sees it.
+    let before = yuki_vtt_server::ids::now();
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/timer", t.id),
+        Some(json!({ "seconds": 300 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    let ends_at = view["timer"]["endsAt"].as_i64().unwrap();
+    assert!(ends_at >= before + 300_000);
+    assert!(ends_at <= before + 300_000 + 5_000);
+
+    // A player cannot start one, and an hour is the longest.
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PUT",
+        &format!("/tables/{}/timer", t.id),
+        Some(json!({ "seconds": 60 })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/timer", t.id),
+        Some(json!({ "seconds": 4000 })),
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    // The DM stops it; everyone sees it gone.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!("/tables/{}/timer", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert!(view["timer"].is_null());
+}
+
+#[tokio::test]
 async fn keeps_hidden_rolls_to_the_dm_and_a_private_roll_to_its_player() {
     let app = host();
     let t = table(&app).await;
