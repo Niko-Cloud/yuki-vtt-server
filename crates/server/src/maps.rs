@@ -2123,6 +2123,38 @@ pub async fn mark(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub struct View {
+    on: bool,
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+    #[serde(default)]
+    k: f64,
+}
+
+/// The DM shares their view while "Follow me" is on; players' maps follow it.
+pub async fn view(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(at): Json<View>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    allow(access.runs(), "share your view")?;
+    if at.on && (!at.x.is_finite() || !at.y.is_finite() || !at.k.is_finite()) {
+        return Err(AppError::bad("That's off the map"));
+    }
+    let scene =
+        active_scene(&state.db(), &id)?.ok_or_else(|| AppError::bad("There is no map to share"))?;
+    state.events.view(
+        &id,
+        json!({ "sceneId": scene, "on": at.on, "x": at.x, "y": at.y, "k": at.k }),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Takes a deleted picture off every map.
 pub fn forget_picture(db: &Connection, table_id: &str, asset_id: &str) -> Result<()> {
     let mut rows = db.prepare("SELECT id FROM scenes WHERE table_id = ?1")?;

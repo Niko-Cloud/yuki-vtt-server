@@ -1827,3 +1827,32 @@ async fn pins_rulers_and_takes_them_off() {
     );
     assert_eq!(view(&app, As::Dm, &t).await["scene"]["rulers"], json!([]));
 }
+
+#[tokio::test]
+async fn shares_the_dms_view_only_for_those_who_run_the_table() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/view", t.id);
+    let body = json!({ "on": true, "x": 350.0, "y": 245.0, "k": 1.5 });
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(body.clone()))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(
+        call(&app, As::Seat(&tam), "POST", &path, Some(body))
+            .await
+            .0
+            .is_client_error()
+    );
+    // Turning follow off needs no spot, and is allowed for the DM alone too.
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(json!({ "on": false })))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+}

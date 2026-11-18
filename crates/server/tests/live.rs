@@ -116,6 +116,48 @@ async fn refuses_other_websites_and_strangers() {
     assert!(tokio_tungstenite::connect_async(keyed).await.is_err());
 }
 
+#[tokio::test]
+async fn shares_the_dms_view_while_follow_me_is_on() {
+    let host = serve().await;
+    let client = reqwest_like::Client::new(KEY);
+    let table = new_table(&client, &host).await;
+    client
+        .post(
+            &format!("http://{host}/api/tables/{table}/scenes"),
+            json!({ "name": "Cave" }),
+        )
+        .await;
+    let pass = media_pass(&client, &host, &table).await;
+
+    let mut request = format!("ws://{host}/api/tables/{table}/events?pass={pass}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", SITE.parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    client
+        .post(
+            &format!("http://{host}/api/tables/{table}/view"),
+            json!({ "on": true, "x": 350.0, "y": 245.0, "k": 1.5 }),
+        )
+        .await;
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("an event in time")
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(message.into_text().unwrap().as_str()).unwrap();
+    assert_eq!(value["type"], "view");
+    assert_eq!(value["view"]["on"], true);
+    assert_eq!(value["view"]["x"], 350.0);
+    assert_eq!(value["view"]["y"], 245.0);
+    assert_eq!(value["view"]["k"], 1.5);
+    assert!(value["view"]["sceneId"].as_str().is_some());
+}
+
 // Just enough of an HTTP client for these tests, on the same stack as the server.
 mod reqwest_like {
     use serde_json::Value;

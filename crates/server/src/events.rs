@@ -58,6 +58,13 @@ impl Events {
             .send(json!({ "type": "mark", "mark": mark }).to_string());
     }
 
+    /// The DM's view while "Follow me" is on, for players' maps to follow, not kept.
+    pub fn view(&self, table_id: &str, view: Value) {
+        let _ = self
+            .channel(table_id)
+            .send(json!({ "type": "view", "view": view }).to_string());
+    }
+
     /// How many screens have a table open right now, over all tables.
     pub fn listeners(&self) -> usize {
         let channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
