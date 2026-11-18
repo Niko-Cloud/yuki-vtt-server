@@ -461,7 +461,7 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
     );
 
     // The brush width is kept and changed; outside 0.25 to 4 it is refused, as on the website.
-    let wide = json!({ "shape": "pen", "color": "#ff9090", "points": [[0, 0], [9, 9]], "width": 2.5, "fillOpacity": 0.4, "dash": true });
+    let wide = json!({ "shape": "pen", "color": "#ff9090", "points": [[0, 0], [9, 9]], "width": 2.5, "fillOpacity": 0.4, "dash": true, "curve": 60 });
     assert_eq!(
         call(&app, As::Dm, "POST", &path, Some(wide)).await.0,
         StatusCode::NO_CONTENT
@@ -476,6 +476,7 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
     assert_eq!(pen["width"], json!(2.5));
     assert_eq!(pen["fillOpacity"], json!(0.4));
     assert_eq!(pen["dash"], json!(true));
+    assert_eq!(pen["curve"], json!(60.0));
     let pen_at = format!("{path}/{}", pen["id"].as_str().unwrap());
     assert_eq!(
         call(&app, As::Dm, "PATCH", &pen_at, Some(json!({ "width": 3 })))
@@ -514,6 +515,31 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
         .0,
         StatusCode::NO_CONTENT
     );
+    // A curve outside 0 to 100 is refused; a hand-drawn line keeps however many points it gains.
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &pen_at,
+            Some(json!({ "curve": 150 }))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &pen_at,
+            Some(json!({ "points": [[0, 0], [5, 5], [9, 9]] }))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
     let after = view(&app, As::Dm, &t).await["scene"]["drawings"].clone();
     let pen = after
         .as_array()
@@ -524,6 +550,8 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
     assert_eq!(pen["width"], json!(3.0));
     assert_eq!(pen["fillOpacity"], json!(0.4));
     assert_eq!(pen["dash"], json!(null));
+    assert_eq!(pen["curve"], json!(60.0));
+    assert_eq!(pen["points"], json!([[0.0, 0.0], [5.0, 5.0], [9.0, 9.0]]));
 }
 
 #[tokio::test]

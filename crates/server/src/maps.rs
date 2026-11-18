@@ -350,6 +350,9 @@ pub struct Drawing {
     /// A dashed outline instead of a solid one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dash: Option<bool>,
+    /// How much a many-point line bends through its points (0 straight to 100 fully curved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<f64>,
     /// Words on the map: a text drawing's, at its first point (its weight is its size).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -1712,6 +1715,8 @@ pub struct NewDrawing {
     #[serde(default)]
     dash: Option<bool>,
     #[serde(default)]
+    curve: Option<f64>,
+    #[serde(default)]
     text: Option<String>,
 }
 
@@ -1743,6 +1748,15 @@ fn fill_opacity(value: Option<f64>) -> Result<Option<f64>> {
         None => Ok(None),
         Some(o) if o.is_finite() && (0.0..=1.0).contains(&o) => Ok(Some(o)),
         Some(_) => Err(AppError::bad("A fill's opacity is 0 to 1")),
+    }
+}
+
+// A line's curve: from straight (0) to fully bent through its points (100).
+fn curve_amount(value: Option<f64>) -> Result<Option<f64>> {
+    match value {
+        None => Ok(None),
+        Some(c) if c.is_finite() && (0.0..=100.0).contains(&c) => Ok(Some(c)),
+        Some(_) => Err(AppError::bad("A line's curve is 0 to 100")),
     }
 }
 
@@ -1798,6 +1812,7 @@ pub async fn add_drawing(
         width: brush_width(body.width)?,
         fill_opacity: fill_opacity(body.fill_opacity)?,
         dash: body.dash,
+        curve: curve_amount(body.curve)?,
         text,
     };
     edit(&state, &access, &id, &scene, |mut map| {
@@ -1838,6 +1853,7 @@ pub struct DrawingChange {
     width: Option<f64>,
     fill_opacity: Option<f64>,
     dash: Option<bool>,
+    curve: Option<f64>,
     hidden: Option<bool>,
     text: Option<String>,
 }
@@ -1868,6 +1884,7 @@ pub async fn change_drawing(
     let weight = weight(body.weight)?;
     let width = brush_width(body.width)?;
     let fill_opacity = fill_opacity(body.fill_opacity)?;
+    let curve = curve_amount(body.curve)?;
     if let Some(points) = &body.points {
         points_ok(points)?;
     }
@@ -1904,6 +1921,9 @@ pub async fn change_drawing(
         }
         if let Some(dash) = body.dash {
             found.dash = dash.then_some(true);
+        }
+        if curve.is_some() {
+            found.curve = curve;
         }
         if let Some(hidden) = body.hidden {
             found.hidden = hidden.then_some(true);
