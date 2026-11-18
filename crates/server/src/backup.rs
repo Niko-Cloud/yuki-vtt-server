@@ -42,6 +42,7 @@ const PARTS: [(&str, &[&str]); 6] = [
             "loot",
             "journal",
             "music",
+            "background",
         ],
     ),
     (
@@ -143,6 +144,7 @@ fn fits(column: &str, value: &Value) -> bool {
         "encounter" => value.is_null() || holds::<yuki_vtt_rules::encounter::Encounter>(value),
         "handout" => value.is_null() || holds::<Value>(value),
         "music" => value.is_null() || holds::<Value>(value),
+        "background" => value.is_null() || holds::<Value>(value),
         "timer" => value.is_null() || holds::<Value>(value),
         "loot" | "journal" => value.is_null() || value.is_array(),
         "prefabs" => value.is_null() || holds::<Vec<crate::maps::Prefab>>(value),

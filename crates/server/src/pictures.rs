@@ -334,7 +334,7 @@ pub async fn picture(
     send(library_file(&state, &id, &asset)?, &mime)
 }
 
-/// Deletes a picture, and takes it off every map and the handout.
+/// Deletes a picture, and takes it off every map, the handout, the music and the background.
 pub async fn remove(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -353,6 +353,7 @@ pub async fn remove(
         maps::forget_picture(&db, &id, &asset)?;
         db.execute("UPDATE tables SET handout = NULL WHERE id = ?1 AND json_extract(handout, '$.assetId') = ?2", [&id, &asset])?;
         db.execute("UPDATE tables SET music = NULL WHERE id = ?1 AND json_extract(music, '$.assetId') = ?2", [&id, &asset])?;
+        db.execute("UPDATE tables SET background = NULL WHERE id = ?1 AND json_extract(background, '$.assetId') = ?2", [&id, &asset])?;
     }
     let _ = std::fs::remove_file(library_file(&state, &id, &asset)?);
     state.events.changed(&id);
@@ -456,6 +457,58 @@ pub async fn stop_music(
     state
         .db()
         .execute("UPDATE tables SET music = NULL WHERE id = ?1", [&id])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Background {
+    asset_id: String,
+}
+
+/// `PUT /api/tables/{id}/background`: puts a picture behind the map for everyone.
+pub async fn set_background(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(background): Json<Background>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
+    {
+        let db = state.db();
+        let kind: Option<String> = db
+            .query_row(
+                "SELECT kind FROM assets WHERE table_id = ?1 AND id = ?2",
+                [&id, &background.asset_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match kind.as_deref() {
+            None => return Err(AppError::not_found("That picture is gone")),
+            Some("audio") => return Err(AppError::bad("A background is a picture, not a track")),
+            _ => {}
+        }
+        let shown = json!({ "assetId": background.asset_id }).to_string();
+        db.execute(
+            "UPDATE tables SET background = ?2 WHERE id = ?1",
+            [&id, &shown],
+        )?;
+    }
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/background`: takes the picture away from everyone.
+pub async fn clear_background(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
+    state
+        .db()
+        .execute("UPDATE tables SET background = NULL WHERE id = ?1", [&id])?;
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }

@@ -539,6 +539,150 @@ async fn the_dm_plays_a_looping_track_to_everyone() {
 }
 
 #[tokio::test]
+async fn the_dm_puts_a_picture_behind_the_map_for_everyone() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+
+    // The table starts with no background.
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert!(view["background"].is_null());
+
+    // The DM uploads a picture and a track.
+    let (status, picture) = upload(
+        &app,
+        As::Dm,
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=prop&name=Backdrop&width=300&height=200",
+            t.id
+        ),
+        b"\x89PNG\r\n\x1a\nrest",
+    )
+    .await;
+    assert!(status.is_success(), "{picture}");
+    let picture_id = picture["id"].as_str().unwrap();
+    let (status, track) = upload(
+        &app,
+        As::Dm,
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=audio&name=Loop&width=0&height=0",
+            t.id
+        ),
+        b"ID3\x03\x00\x00\x00\x00\x00\x00rest",
+    )
+    .await;
+    assert!(status.is_success(), "{track}");
+    let track_id = track["id"].as_str().unwrap();
+
+    // The DM puts the picture behind the map; the player reads it.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/background", t.id),
+        Some(json!({ "assetId": picture_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(view["background"]["assetId"], picture_id);
+
+    // A player cannot change it; a track is not a picture; a ghost picture is refused.
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PUT",
+        &format!("/tables/{}/background", t.id),
+        Some(json!({ "assetId": picture_id })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/background", t.id),
+        Some(json!({ "assetId": track_id })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/background", t.id),
+        Some(json!({ "assetId": "no-such-picture" })),
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    // The DM takes it away again, then puts it back.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!("/tables/{}/background", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert!(view["background"].is_null());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/background", t.id),
+        Some(json!({ "assetId": picture_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Deleting the picture takes the background away from everyone.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!("/tables/{}/assets/{}", t.id, picture_id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert!(view["background"].is_null());
+}
+
+#[tokio::test]
 async fn keeps_hidden_rolls_to_the_dm_and_a_private_roll_to_its_player() {
     let app = host();
     let t = table(&app).await;

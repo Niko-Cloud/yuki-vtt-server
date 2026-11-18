@@ -116,6 +116,9 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE tables ADD COLUMN music TEXT;
 "#,
+    r#"
+    ALTER TABLE tables ADD COLUMN background TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
