@@ -676,3 +676,70 @@ async fn keeps_a_fog_layer_mode_like_the_website() {
     let plain = view(&app, As::Dm, &t).await["scene"]["fog"].clone();
     assert!(plain.get("layer").is_none());
 }
+
+#[tokio::test]
+async fn keeps_trimmed_and_joined_fog_shapes_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    for (name, x, y) in [("Rat", 0, 1), ("Ogre", 10, 10)] {
+        let token = json!({ "name": name, "x": x, "y": y });
+        call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(token)).await;
+    }
+    // A join can leave an L-shaped outline; a trim a smaller piece. Both are plain polygons.
+    let joined = json!([
+        [0, 0],
+        [200, 0],
+        [200, 100],
+        [100, 100],
+        [100, 200],
+        [0, 200]
+    ]);
+    let trimmed = json!([[300, 300], [400, 300], [400, 400], [300, 400]]);
+    let lighting = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true },
+        "walls": [],
+        "lights": [],
+        "fogAreas": [
+            { "id": "joined", "points": joined },
+            { "id": "trimmed", "points": trimmed },
+        ],
+    });
+    let lit = format!("{at}/lighting");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(lighting)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = view(&app, As::Dm, &t).await["scene"]["fogAreas"].clone();
+    let areas = kept.as_array().unwrap();
+    assert_eq!(areas.len(), 2);
+    assert_eq!(areas[0]["points"].as_array().unwrap().len(), 6);
+    assert_eq!(areas[1]["points"].as_array().unwrap().len(), 4);
+    let names = |who| {
+        let app = app.clone();
+        let t = &t;
+        async move {
+            view(&app, who, t).await["scene"]["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    // Rat stands in the L (35, 105); Ogre far outside both shapes.
+    let theirs = names(As::Seat(&tam)).await;
+    assert!(theirs.contains(&"Tam".to_string()) && theirs.contains(&"Ogre".to_string()));
+    assert!(!theirs.contains(&"Rat".to_string()));
+    assert!(names(As::Dm).await.contains(&"Rat".to_string()));
+}
