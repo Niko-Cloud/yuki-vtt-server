@@ -1293,6 +1293,12 @@ pub async fn change_token(
                 if follows(&rider, "size") && after.size != before.size {
                     rider.size = after.size;
                 }
+                if follows(&rider, "visibility") && after.hidden != before.hidden {
+                    rider.hidden = after.hidden;
+                }
+                if follows(&rider, "lock") && after.locked != before.locked {
+                    rider.locked = after.locked;
+                }
                 map.tokens[i] = map.keep_token(rider);
             }
         }
@@ -1335,17 +1341,11 @@ pub async fn remove_token(
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     allow(access.may("tokens"), "remove tokens")?;
     edit(&state, &access, &id, &scene, |mut map| {
-        let before = map.tokens.len();
+        // What it carried goes with it.
+        let mut gone = carried_by(&map.tokens, &token_id);
+        gone.insert(token_id.clone());
         map.tokens
-            .retain(|t| t.id != token_id || (!access.runs() && t.hidden == Some(true)));
-        // What it carried stays where it is, no longer attached.
-        if map.tokens.len() < before {
-            for t in &mut map.tokens {
-                if t.attached_to.as_deref() == Some(token_id.as_str()) {
-                    t.attached_to = None;
-                }
-            }
-        }
+            .retain(|t| !gone.contains(&t.id) || (!access.runs() && t.hidden == Some(true)));
         Ok(map)
     })
 }

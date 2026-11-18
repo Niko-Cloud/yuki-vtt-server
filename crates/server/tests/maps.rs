@@ -832,9 +832,12 @@ async fn carries_attached_tokens_and_stacks_them() {
     );
     let (status, _) = call(&app, As::Dm, "DELETE", &format!("{path}/{horse}"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    // The horse taken away takes the rider and the owl on it with it.
     let all = tokens().await;
-    let rider_now = all.iter().find(|t| t["name"] == "Rider").unwrap();
-    assert!(rider_now.get("attachedTo").is_none());
+    assert!(
+        all.iter()
+            .all(|t| t["name"] != "Rider" && t["name"] != "Owl")
+    );
 }
 
 #[tokio::test]
@@ -932,6 +935,18 @@ async fn attachments_follow_what_they_choose() {
     );
     assert!(owl_now.get("facing").is_none() && owl_now.get("rotation").is_none());
     assert_eq!(owl_now["size"], json!(1));
+    // Hide and lock follow too, for a rider that chooses them.
+    change(&rider, json!({ "follow": ["visibility", "lock"] })).await;
+    assert_eq!(
+        change(&horse, json!({ "hidden": true, "locked": true })).await,
+        StatusCode::NO_CONTENT
+    );
+    let all = tokens().await;
+    let of = |name: &str| all.iter().find(|t| t["name"] == name).unwrap().clone();
+    let rider_now = of("Rider");
+    assert_eq!(rider_now["hidden"], json!(true));
+    assert_eq!(rider_now["locked"], json!(true));
+    assert!(of("Owl").get("hidden").is_none());
 }
 
 #[tokio::test]
