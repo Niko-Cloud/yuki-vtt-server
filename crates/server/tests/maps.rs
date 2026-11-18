@@ -1329,6 +1329,68 @@ async fn keeps_freely_resized_tokens_and_pictures() {
 }
 
 #[tokio::test]
+async fn replaces_a_pictures_image() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let add = |name: &str| {
+        format!(
+            "/tables/{}/assets?kind=prop&name={name}&width=64&height=64",
+            t.id
+        )
+    };
+    let (_, chest) = upload(&app, As::Dm, "POST", &add("Chest"), PNG).await;
+    let (_, cart) = upload(&app, As::Dm, "POST", &add("Cart"), PNG).await;
+    let chest = chest["id"].as_str().unwrap();
+    let cart = cart["id"].as_str().unwrap();
+    let props = format!("/tables/{}/scenes/{cave}/props", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &props,
+        Some(json!({ "assetId": chest, "x": 4, "y": 4, "w": 2, "h": 1 })),
+    )
+    .await;
+    let prop = view(&app, As::Dm, &t).await["scene"]["props"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = format!("{props}/{prop}");
+    call(&app, As::Dm, "PATCH", &at, Some(json!({ "rotation": 45 }))).await;
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(json!({ "assetId": cart })))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let shown = view(&app, As::Dm, &t).await["scene"]["props"][0].clone();
+    assert_eq!(shown["assetId"], json!(cart));
+    assert_eq!(
+        (
+            shown["x"].clone(),
+            shown["y"].clone(),
+            shown["w"].clone(),
+            shown["h"].clone()
+        ),
+        (json!(4), json!(4), json!(2), json!(1))
+    );
+    assert_eq!(shown["rotation"], json!(45));
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &at,
+            Some(json!({ "assetId": "gone" }))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn shares_rulers_with_anyone_and_trails_with_those_who_draw() {
     let app = host();
     let t = table(&app).await;

@@ -1404,7 +1404,9 @@ pub async fn add_prop(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PropChange {
+    asset_id: Option<String>,
     x: Option<u32>,
     y: Option<u32>,
     w: Option<f64>,
@@ -1425,6 +1427,9 @@ pub async fn change_prop(
     allow(access.may("tokens"), "move pictures")?;
     if body.locked.is_some() {
         allow(access.runs(), "lock pictures")?;
+    }
+    if let Some(asset) = &body.asset_id {
+        picture_exists(&state.db(), &id, asset)?;
     }
     edit(&state, &access, &id, &scene, |mut map| {
         let at = map
@@ -1449,6 +1454,9 @@ pub async fn change_prop(
         }
         if let Some(locked) = body.locked {
             prop.locked = locked.then_some(true);
+        }
+        if let Some(asset) = &body.asset_id {
+            prop.asset_id = asset.clone();
         }
         map.props[at] = map.keep_prop(prop);
         if let Some(stack) = layer(body.layer.as_deref())? {
