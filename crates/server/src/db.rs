@@ -97,6 +97,9 @@ const STEPS: &[&str] = &[
     );
     CREATE INDEX explored_by_table ON explored(table_id);
 "#,
+    r#"
+    ALTER TABLE scenes ADD COLUMN folder TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

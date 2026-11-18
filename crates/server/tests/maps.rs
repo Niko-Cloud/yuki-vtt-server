@@ -886,6 +886,78 @@ async fn keeps_the_grid_style() {
 }
 
 #[tokio::test]
+async fn gathers_maps_under_folders() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let (status, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Keep", "folder": "Dungeon" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["folder"], "Dungeon");
+    let keep = made["id"].as_str().unwrap().to_string();
+    let listed = |view: &Value, id: &str| {
+        view["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == json!(id))
+            .unwrap()
+            .clone()
+    };
+    let looking = view(&app, As::Dm, &t).await;
+    assert_eq!(listed(&looking, &keep)["folder"], "Dungeon");
+    assert!(listed(&looking, &cave)["folder"].is_null());
+    // The map itself carries its folder; null moves it back out.
+    let path = format!("/tables/{}/scenes/{keep}", t.id);
+    let seen = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={keep}", t.id),
+        None,
+    )
+    .await
+    .1;
+    assert_eq!(seen["scene"]["folder"], "Dungeon");
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &path,
+        Some(json!({ "folder": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let looking = view(&app, As::Dm, &t).await;
+    assert!(listed(&looking, &keep)["folder"].is_null());
+    let cave_path = format!("/tables/{}/scenes/{cave}", t.id);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &cave_path,
+        Some(json!({ "folder": "  " })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &cave_path,
+        Some(json!({ "folder": "x".repeat(41) })),
+    )
+    .await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
 async fn marks_tokens_and_keeps_a_hidden_name_from_players() {
     let app = host();
     let t = table(&app).await;

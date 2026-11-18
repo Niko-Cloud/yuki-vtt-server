@@ -576,30 +576,39 @@ fn store(db: &Connection, scene_id: &str, map: &TableMap) -> Result<()> {
 
 /// The scene with its id and name, as the table view sends it.
 pub fn scene(db: &Connection, table_id: &str, scene_id: &str) -> Result<Option<Value>> {
-    let row: Option<(String, String)> = db
+    let row: Option<(String, String, Option<String>)> = db
         .query_row(
-            "SELECT name, data FROM scenes WHERE table_id = ?1 AND id = ?2",
+            "SELECT name, data, folder FROM scenes WHERE table_id = ?1 AND id = ?2",
             [table_id, scene_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((name, data)) = row else {
+    let Some((name, data, folder)) = row else {
         return Ok(None);
     };
     // Read as a map, so one saved before newer parts (fog, walls) gets them as defaults.
     let mut scene = serde_json::to_value(serde_json::from_str::<TableMap>(&data)?)?;
     scene["id"] = json!(scene_id);
     scene["name"] = json!(name);
+    if let Some(folder) = folder {
+        scene["folder"] = json!(folder);
+    }
     Ok(Some(scene))
 }
 
 /// Every scene, by name, in order; for whoever runs the table.
 pub fn list(db: &Connection, table_id: &str) -> Result<Vec<Value>> {
-    let mut rows = db
-        .prepare("SELECT id, name FROM scenes WHERE table_id = ?1 ORDER BY position, created_at")?;
+    let mut rows = db.prepare(
+        "SELECT id, name, folder FROM scenes WHERE table_id = ?1 ORDER BY position, created_at",
+    )?;
     let scenes = rows
         .query_map([table_id], |row| {
-            Ok(json!({ "id": row.get::<_, String>(0)?, "name": row.get::<_, String>(1)? }))
+            let mut scene =
+                json!({ "id": row.get::<_, String>(0)?, "name": row.get::<_, String>(1)? });
+            if let Some(folder) = row.get::<_, Option<String>>(2)? {
+                scene["folder"] = json!(folder);
+            }
+            Ok(scene)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(scenes)
@@ -650,12 +659,21 @@ fn picture_exists(db: &Connection, table_id: &str, asset_id: &str) -> Result<()>
 pub struct NewScene {
     name: String,
     setup: Option<Setup>,
+    folder: Option<String>,
 }
 
 fn scene_name(value: &str) -> Result<String> {
     let name = value.trim();
     if name.is_empty() || name.chars().count() > 60 {
         return Err(AppError::bad("A map's name is 1 to 60 letters"));
+    }
+    Ok(name.to_string())
+}
+
+fn scene_folder(value: &str) -> Result<String> {
+    let name = value.trim();
+    if name.is_empty() || name.chars().count() > 40 {
+        return Err(AppError::bad("A folder's name is 1 to 40 letters"));
     }
     Ok(name.to_string())
 }
@@ -669,6 +687,7 @@ pub async fn create(
 ) -> Result<Json<Value>> {
     access::runner(&state, &id, &credentials(&headers))?;
     let name = scene_name(&body.name)?;
+    let folder = body.folder.as_deref().map(scene_folder).transpose()?;
     let mut new_map = blank();
     if let Some(setup) = body.setup {
         setup.check()?;
@@ -686,8 +705,8 @@ pub async fn create(
             return Err(AppError::bad(format!("A table keeps {MOST_SCENES} maps")));
         }
         db.execute(
-            "INSERT INTO scenes (id, table_id, name, position, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![scene_id, id, name, count, serde_json::to_string(&new_map)?, ids::now()],
+            "INSERT INTO scenes (id, table_id, name, folder, position, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![scene_id, id, name, folder, count, serde_json::to_string(&new_map)?, ids::now()],
         )?;
         db.execute(
             "UPDATE tables SET active_scene_id = ?2 WHERE id = ?1 AND active_scene_id IS NULL",
@@ -695,16 +714,23 @@ pub async fn create(
         )?;
     }
     state.events.changed(&id);
-    Ok(Json(json!({ "id": scene_id, "name": name })))
+    let mut made = json!({ "id": scene_id, "name": name });
+    if let Some(folder) = folder {
+        made["folder"] = json!(folder);
+    }
+    Ok(Json(made))
 }
 
 #[derive(Deserialize)]
 pub struct SceneChange {
     name: Option<String>,
     setup: Option<Setup>,
+    /// A folder's name, or null to move the map out of its folder.
+    #[serde(default, deserialize_with = "present")]
+    folder: Option<Value>,
 }
 
-/// Renames a map, or changes its size and grid; tokens stay whole on it.
+/// Renames a map, moves it to a folder, or changes its size and grid; tokens stay whole on it.
 pub async fn update(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -717,6 +743,20 @@ pub async fn update(
         let changed = state.db().execute(
             "UPDATE scenes SET name = ?3 WHERE table_id = ?1 AND id = ?2",
             [&id, &scene, &name],
+        )?;
+        if changed == 0 {
+            return Err(AppError::not_found("That map is gone"));
+        }
+    }
+    if let Some(folder) = &body.folder {
+        let folder = match folder {
+            Value::Null => None,
+            Value::String(name) => Some(scene_folder(name)?),
+            _ => return Err(AppError::bad("A folder is a name, or null")),
+        };
+        let changed = state.db().execute(
+            "UPDATE scenes SET folder = ?3 WHERE table_id = ?1 AND id = ?2",
+            params![id, scene, folder],
         )?;
         if changed == 0 {
             return Err(AppError::not_found("That map is gone"));
