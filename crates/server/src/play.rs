@@ -413,6 +413,23 @@ pub async fn post(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/tables/{id}/xcard`: anyone presses the X-card; everyone sees it at once, and no
+/// name is shown. The live event raises the banner on every screen; the log keeps an anonymous line.
+pub async fn xcard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    access::at_table(&state, &id, &credentials(&headers))?;
+    {
+        let db = state.db();
+        log(&db, &id, "xcard", "", json!({ "text": "X-card" }), &[])?;
+    }
+    state.events.xcard(&id);
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RollRequest {

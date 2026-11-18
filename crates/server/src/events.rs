@@ -65,6 +65,13 @@ impl Events {
             .send(json!({ "type": "view", "view": view }).to_string());
     }
 
+    /// Someone pressed the X-card: every screen shows it at once, with no name.
+    pub fn xcard(&self, table_id: &str) {
+        let _ = self
+            .channel(table_id)
+            .send(json!({ "type": "xcard" }).to_string());
+    }
+
     /// How many screens have a table open right now, over all tables.
     pub fn listeners(&self) -> usize {
         let channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());

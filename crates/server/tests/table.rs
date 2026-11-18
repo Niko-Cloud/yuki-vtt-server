@@ -144,6 +144,40 @@ async fn a_tv_screen_sits_down_with_no_character() {
 }
 
 #[tokio::test]
+async fn anyone_presses_the_x_card_and_no_name_is_shown() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "POST",
+        &format!("/tables/{}/xcard", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Everyone at the table sees an anonymous X-card line in the log.
+    let (_, view) = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None).await;
+    let last = view["log"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["kind"], "xcard");
+    assert_eq!(last["author"], "");
+    assert_eq!(last["data"]["text"], "X-card");
+
+    // A stranger cannot press it.
+    let (status, _) = call(
+        &app,
+        As::Nobody,
+        "POST",
+        &format!("/tables/{}/xcard", t.id),
+        None,
+    )
+    .await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
 async fn keeps_hidden_rolls_to_the_dm_and_a_private_roll_to_its_player() {
     let app = host();
     let t = table(&app).await;
