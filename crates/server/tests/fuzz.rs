@@ -174,7 +174,7 @@ fn pictures_never_panic() {
         if rng.random_bool(0.3) {
             data.splice(0..0, png.iter().copied());
         }
-        let _ = pictures::picture_type(&data, rng.random_range(0..64));
+        let _ = pictures::picture_type(&data, rng.random_range(0..64), rng.random_range(0..64));
     }
 }
 

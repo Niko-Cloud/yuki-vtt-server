@@ -19,30 +19,40 @@ use std::path::PathBuf;
 // Map pictures are big; token portraits and props are small.
 pub const MAP_LIMIT: usize = 8 * 1024 * 1024;
 pub const LIBRARY_LIMIT: usize = 4 * 1024 * 1024;
+// Animated pictures (GIF and WebM video) may be larger: a short looping clip weighs more.
+pub const VIDEO_MAP_LIMIT: usize = 25 * 1024 * 1024;
+pub const VIDEO_LIBRARY_LIMIT: usize = 10 * 1024 * 1024;
 // A table's library stays a library, not a photo album.
 const MOST_PICTURES: i64 = 200;
 const KINDS: [&str; 3] = ["token", "prop", "handout"];
 
 /// The picture's type, told by its first bytes, not by what the upload claims to be.
-pub fn picture_type(data: &[u8], limit: usize) -> Result<&'static str> {
+pub fn picture_type(data: &[u8], limit: usize, animated_limit: usize) -> Result<&'static str> {
     if data.is_empty() {
         return Err(AppError::bad("No picture came with the upload"));
     }
-    if data.len() > limit {
+    let mime = if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        "image/png"
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        "image/webp"
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if data.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        "video/webm"
+    } else {
+        return Err(AppError::bad("Use a PNG, JPEG, WebP, GIF or WebM picture"));
+    };
+    let animated = mime == "image/gif" || mime.starts_with("video/");
+    let cap = if animated { animated_limit } else { limit };
+    if data.len() > cap {
         return Err(AppError::bad(format!(
             "The picture is over {} MB",
-            limit / (1024 * 1024)
+            cap / (1024 * 1024)
         )));
     }
-    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        Ok("image/png")
-    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
-        Ok("image/jpeg")
-    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
-        Ok("image/webp")
-    } else {
-        Err(AppError::bad("Use a PNG, JPEG or WebP picture"))
-    }
+    Ok(mime)
 }
 
 fn folder(state: &AppState, table_id: &str) -> PathBuf {
@@ -131,7 +141,7 @@ pub async fn set_map(
     data: Bytes,
 ) -> Result<StatusCode> {
     access::runner(&state, &id, &Credentials::from(&headers, None))?;
-    let mime = picture_type(&data, MAP_LIMIT)?;
+    let mime = picture_type(&data, MAP_LIMIT, VIDEO_MAP_LIMIT)?;
     if !(100..=16_384).contains(&size.width) || !(100..=16_384).contains(&size.height) {
         return Err(AppError::bad("The picture must be 100 to 16384 pixels"));
     }
@@ -188,7 +198,7 @@ pub async fn add(
     if !(access.runs() || (upload.kind == "token" && access.may("tokens"))) {
         return Err(AppError::not_found("The DM hasn't let you add pictures"));
     }
-    let mime = picture_type(&data, LIBRARY_LIMIT)?;
+    let mime = picture_type(&data, LIBRARY_LIMIT, VIDEO_LIBRARY_LIMIT)?;
     let fits = |n: f64| n.is_finite() && n > 0.0 && n <= 16_384.0;
     if !fits(upload.width) || !fits(upload.height) {
         return Err(AppError::bad("The picture must be 1 to 16384 pixels"));
@@ -236,7 +246,7 @@ pub async fn add(
 /// map; handouts reach them when shown.
 pub fn list(db: &rusqlite::Connection, table_id: &str, runs: bool) -> Result<Vec<Value>> {
     let mut rows = db.prepare(
-        "SELECT id, kind, name, width, height FROM assets WHERE table_id = ?1 ORDER BY created_at",
+        "SELECT id, kind, name, width, height, mime FROM assets WHERE table_id = ?1 ORDER BY created_at",
     )?;
     let all = rows
         .query_map([table_id], |row| {
@@ -246,6 +256,7 @@ pub fn list(db: &rusqlite::Connection, table_id: &str, runs: bool) -> Result<Vec
                 "name": row.get::<_, String>(2)?,
                 "width": row.get::<_, i64>(3)?,
                 "height": row.get::<_, i64>(4)?,
+                "mime": row.get::<_, String>(5)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -356,19 +367,27 @@ mod tests {
     #[test]
     fn tells_a_picture_by_its_first_bytes() {
         assert_eq!(
-            picture_type(b"\x89PNG\r\n\x1a\nrest", 100).unwrap(),
+            picture_type(b"\x89PNG\r\n\x1a\nrest", 100, 100).unwrap(),
             "image/png"
         );
         assert_eq!(
-            picture_type(b"\xff\xd8\xffrest", 100).unwrap(),
+            picture_type(b"\xff\xd8\xffrest", 100, 100).unwrap(),
             "image/jpeg"
         );
         assert_eq!(
-            picture_type(b"RIFF\0\0\0\0WEBPrest", 100).unwrap(),
+            picture_type(b"RIFF\0\0\0\0WEBPrest", 100, 100).unwrap(),
             "image/webp"
         );
-        assert!(picture_type(b"<svg onload=alert(1)>", 100).is_err());
-        assert!(picture_type(&[0xff, 0xd8, 0xff, 0, 0], 3).is_err());
+        assert_eq!(picture_type(b"GIF89arest", 100, 100).unwrap(), "image/gif");
+        assert_eq!(
+            picture_type(b"\x1a\x45\xdf\xa3rest", 100, 100).unwrap(),
+            "video/webm"
+        );
+        assert!(picture_type(b"<svg onload=alert(1)>", 100, 100).is_err());
+        assert!(picture_type(&[0xff, 0xd8, 0xff, 0, 0], 3, 3).is_err());
+        // An animated picture takes the larger cap, a still one the smaller.
+        assert!(picture_type(b"GIF89arest", 3, 100).is_ok());
+        assert!(picture_type(b"\x89PNG\r\n\x1a\nrest", 3, 100).is_err());
     }
 
     #[test]

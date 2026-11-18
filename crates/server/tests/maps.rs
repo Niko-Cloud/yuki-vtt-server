@@ -435,7 +435,7 @@ async fn keeps_map_pictures_for_those_at_the_table() {
         (status, refused["message"].as_str()),
         (
             StatusCode::BAD_REQUEST,
-            Some("Use a PNG, JPEG or WebP picture")
+            Some("Use a PNG, JPEG, WebP, GIF or WebM picture")
         )
     );
     let (status, _) = upload(
