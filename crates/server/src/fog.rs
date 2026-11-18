@@ -54,7 +54,12 @@ impl Lighting {
     fn check(&self) -> Result<()> {
         let fog = ["off", "dynamic"].contains(&self.fog.mode.as_str())
             && ["bright", "dark"].contains(&self.fog.light.as_str())
-            && fog_color_ok(&self.fog.color);
+            && fog_color_ok(&self.fog.color)
+            && self
+                .fog
+                .layer
+                .as_deref()
+                .is_none_or(|l| l == "single" || l == "stacked");
         let walls = self.walls.len() <= MOST_WALLS
             && self
                 .walls

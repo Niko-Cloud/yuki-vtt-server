@@ -630,3 +630,49 @@ async fn keeps_circle_and_brush_fog_shapes_like_the_website() {
     let dms = names(As::Dm).await;
     assert!(dms.contains(&"Rat".to_string()) && dms.contains(&"Bat".to_string()));
 }
+
+#[tokio::test]
+async fn keeps_a_fog_layer_mode_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    let lit = format!("{at}/lighting");
+    let base = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true },
+        "walls": [],
+        "lights": [],
+    });
+    for layer in ["single", "stacked"] {
+        let mut set = base.clone();
+        set["fog"]["layer"] = json!(layer);
+        assert_eq!(
+            call(&app, As::Dm, "PUT", &lit, Some(set)).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            view(&app, As::Dm, &t).await["scene"]["fog"]["layer"],
+            json!(layer)
+        );
+    }
+    // A mode the map does not know is refused; none means stacked, the field absent.
+    let mut odd = base.clone();
+    odd["fog"]["layer"] = json!("many");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(odd)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(base)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let plain = view(&app, As::Dm, &t).await["scene"]["fog"].clone();
+    assert!(plain.get("layer").is_none());
+}

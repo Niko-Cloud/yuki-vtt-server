@@ -186,6 +186,10 @@ pub struct Fog {
     /// The fog's colour; none means the default dark.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// How painted areas combine: stacked in order, or single-layer where a new shape cuts
+    /// the ones under it. Stacked unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
 }
 
 fn no_fog() -> Fog {
@@ -196,6 +200,7 @@ fn no_fog() -> Fog {
         collide: None,
         cover: None,
         color: None,
+        layer: None,
     }
 }
 
