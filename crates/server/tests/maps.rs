@@ -407,6 +407,61 @@ async fn draws_and_erases_by_permission() {
 }
 
 #[tokio::test]
+async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/drawings", t.id);
+    let shape =
+        |name: &str, points: Value| json!({ "shape": name, "color": "#ff9090", "points": points });
+    let two = json!([[0, 0], [60, 80]]);
+    for name in ["triangle", "hexagon"] {
+        let (status, _) = call(&app, As::Dm, "POST", &path, Some(shape(name, two.clone()))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let corners = json!([[0, 0], [40, 0], [40, 40], [0, 40]]);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(shape("polygon", corners.clone())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(shape("blob", two.clone())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let drawings = view(&app, As::Dm, &t).await["scene"]["drawings"].clone();
+    assert_eq!(drawings[0]["shape"], "triangle");
+    assert_eq!(drawings[1]["shape"], "hexagon");
+    assert_eq!(drawings[2]["shape"], "polygon");
+    assert_eq!(
+        drawings[2]["points"],
+        json!([[0.0, 0.0], [40.0, 0.0], [40.0, 40.0], [0.0, 40.0]])
+    );
+    // A two-point shape refuses a third corner when reshaped; a polygon keeps its corners.
+    let at = |n: usize| format!("{path}/{}", drawings[n]["id"].as_str().unwrap());
+    let three = json!({ "points": [[0, 0], [1, 1], [2, 2]] });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at(0), Some(three)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let moved = json!({ "points": [[10, 0], [50, 0], [50, 40], [10, 40]] });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at(2), Some(moved)).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
 async fn keeps_map_pictures_for_those_at_the_table() {
     let app = host();
     let t = table(&app).await;
