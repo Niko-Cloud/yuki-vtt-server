@@ -183,6 +183,9 @@ pub struct Fog {
     /// Painted fog: the whole map starts hidden, and the DM reveals it area by area.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<bool>,
+    /// The fog's colour; none means the default dark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 fn no_fog() -> Fog {
@@ -192,6 +195,7 @@ fn no_fog() -> Fog {
         remember: true,
         collide: None,
         cover: None,
+        color: None,
     }
 }
 

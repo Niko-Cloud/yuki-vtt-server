@@ -43,10 +43,18 @@ fn short_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 40
 }
 
+/// A fog colour is `#rrggbb`, like the website's; none means the default dark.
+fn fog_color_ok(color: &Option<String>) -> bool {
+    color.as_ref().is_none_or(|c| {
+        c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+    })
+}
+
 impl Lighting {
     fn check(&self) -> Result<()> {
         let fog = ["off", "dynamic"].contains(&self.fog.mode.as_str())
-            && ["bright", "dark"].contains(&self.fog.light.as_str());
+            && ["bright", "dark"].contains(&self.fog.light.as_str())
+            && fog_color_ok(&self.fog.color);
         let walls = self.walls.len() <= MOST_WALLS
             && self
                 .walls

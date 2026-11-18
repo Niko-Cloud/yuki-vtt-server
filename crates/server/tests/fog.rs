@@ -509,3 +509,48 @@ async fn hides_monsters_under_painted_fog_from_players() {
         StatusCode::BAD_REQUEST
     );
 }
+
+#[tokio::test]
+async fn keeps_a_fog_colour_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    let lit = format!("{at}/lighting");
+    let base = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true },
+        "walls": [],
+        "lights": [],
+    });
+    let mut coloured = base.clone();
+    coloured["fog"]["color"] = json!("#203040");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(coloured)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = view(&app, As::Dm, &t).await["scene"]["fog"]["color"].clone();
+    assert_eq!(kept, json!("#203040"));
+    // A colour that is not #rrggbb is refused, as on the website.
+    for bad in ["red", "#12345", "#1234567", "203040"] {
+        let mut odd = base.clone();
+        odd["fog"]["color"] = json!(bad);
+        assert_eq!(
+            call(&app, As::Dm, "PUT", &lit, Some(odd)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // No colour means the default dark: the field is simply absent.
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(base)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let plain = view(&app, As::Dm, &t).await["scene"]["fog"].clone();
+    assert!(plain.get("color").is_none());
+}
