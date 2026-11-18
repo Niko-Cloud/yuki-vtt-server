@@ -361,9 +361,19 @@ pub enum Post {
         #[serde(rename = "seatId")]
         seat_id: Option<String>,
     },
+    /// A framed line the DM speaks as a character: a name, an optional portrait, shown big to all.
+    Speech {
+        name: String,
+        text: String,
+        #[serde(rename = "assetId")]
+        asset_id: Option<String>,
+        #[serde(rename = "seatId")]
+        seat_id: Option<String>,
+    },
 }
 
-/// `POST /api/tables/{id}/log`: a chat line, or a roll made on the device.
+/// `POST /api/tables/{id}/log`: a chat line, a roll made on the device, or a framed line the DM
+/// speaks as a character.
 pub async fn post(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -412,6 +422,25 @@ pub async fn post(
                 let author = author(&db, &access, &id, seat_id.as_deref())?;
                 let data = json!({ "label": text(&label, 120, "A roll's name")?, "expression": expression, "total": total, "detail": detail, "advantage": advantage, "critical": critical, "by": "device" });
                 log(&db, &id, "roll", &author, data, &[])?;
+            }
+            Post::Speech {
+                name,
+                text: line,
+                asset_id,
+                seat_id,
+            } => {
+                if !access.runs() {
+                    return Err(AppError::forbidden("Only the DM speaks as a character"));
+                }
+                let author = author(&db, &access, &id, seat_id.as_deref())?;
+                let mut data = json!({ "name": text(&name, 60, "A name")?, "text": text(&line, 500, "A message")? });
+                if let Some(asset) = asset_id {
+                    if asset.is_empty() || asset.len() > 40 {
+                        return Err(AppError::bad("A portrait is a picture from the table"));
+                    }
+                    data["assetId"] = json!(asset);
+                }
+                log(&db, &id, "speech", &author, data, &[])?;
             }
         }
     }

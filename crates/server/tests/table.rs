@@ -252,6 +252,72 @@ async fn the_dm_starts_a_countdown_everyone_watches() {
 }
 
 #[tokio::test]
+async fn the_dm_speaks_a_framed_line_as_a_character() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+
+    // The DM speaks as a character with a portrait; the player sees the framed line.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/log", t.id),
+        Some(json!({ "kind": "speech", "name": "The hooded stranger", "text": "Well met, travellers.", "assetId": "a1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    let last = view["log"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["kind"], "speech");
+    assert_eq!(last["author"], "Yuki");
+    assert_eq!(last["data"]["name"], "The hooded stranger");
+    assert_eq!(last["data"]["text"], "Well met, travellers.");
+    assert_eq!(last["data"]["assetId"], "a1");
+
+    // A line with no portrait keeps no assetId.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/log", t.id),
+        Some(json!({ "kind": "speech", "name": "Narrator", "text": "The road forks." })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None).await;
+    let last = view["log"].as_array().unwrap().last().unwrap();
+    assert!(last["data"]["assetId"].is_null());
+
+    // A player cannot speak as a character, and a name is needed.
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "POST",
+        &format!("/tables/{}/log", t.id),
+        Some(json!({ "kind": "speech", "name": "Tam", "text": "Hello." })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/log", t.id),
+        Some(json!({ "kind": "speech", "name": "  ", "text": "Hello." })),
+    )
+    .await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
 async fn keeps_hidden_rolls_to_the_dm_and_a_private_roll_to_its_player() {
     let app = host();
     let t = table(&app).await;
