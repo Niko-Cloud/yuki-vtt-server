@@ -461,8 +461,7 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
     );
 
     // The brush width is kept and changed; outside 0.25 to 4 it is refused, as on the website.
-    let wide =
-        json!({ "shape": "pen", "color": "#ff9090", "points": [[0, 0], [9, 9]], "width": 2.5 });
+    let wide = json!({ "shape": "pen", "color": "#ff9090", "points": [[0, 0], [9, 9]], "width": 2.5, "fillOpacity": 0.4, "dash": true });
     assert_eq!(
         call(&app, As::Dm, "POST", &path, Some(wide)).await.0,
         StatusCode::NO_CONTENT
@@ -475,6 +474,8 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
         .find(|d| d["shape"] == "pen")
         .unwrap();
     assert_eq!(pen["width"], json!(2.5));
+    assert_eq!(pen["fillOpacity"], json!(0.4));
+    assert_eq!(pen["dash"], json!(true));
     let pen_at = format!("{path}/{}", pen["id"].as_str().unwrap());
     assert_eq!(
         call(&app, As::Dm, "PATCH", &pen_at, Some(json!({ "width": 3 })))
@@ -488,6 +489,31 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
             .0,
         StatusCode::BAD_REQUEST
     );
+    // A fill opacity outside 0 to 1 is refused; the dash can be turned off again.
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &pen_at,
+            Some(json!({ "fillOpacity": 2 }))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &pen_at,
+            Some(json!({ "dash": false }))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
     let after = view(&app, As::Dm, &t).await["scene"]["drawings"].clone();
     let pen = after
         .as_array()
@@ -496,6 +522,8 @@ async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
         .find(|d| d["shape"] == "pen")
         .unwrap();
     assert_eq!(pen["width"], json!(3.0));
+    assert_eq!(pen["fillOpacity"], json!(0.4));
+    assert_eq!(pen["dash"], json!(null));
 }
 
 #[tokio::test]

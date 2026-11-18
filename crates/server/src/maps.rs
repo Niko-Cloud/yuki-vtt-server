@@ -327,6 +327,7 @@ pub struct Prop {
 
 /// A line by hand, or a shape from its first point to its last, in the picture's pixels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Drawing {
     pub id: String,
     pub shape: String,
@@ -343,6 +344,12 @@ pub struct Drawing {
     /// Brush width as a multiple of a normal line (0.25 to 4); overrides weight when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f64>,
+    /// How solid a filled shape's colour is (0 to 1); each shape has its own default when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_opacity: Option<f64>,
+    /// A dashed outline instead of a solid one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dash: Option<bool>,
     /// Words on the map: a text drawing's, at its first point (its weight is its size).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -1688,6 +1695,7 @@ pub async fn remove_prop(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NewDrawing {
     #[serde(default = "pen")]
     shape: String,
@@ -1699,6 +1707,10 @@ pub struct NewDrawing {
     weight: Option<String>,
     #[serde(default)]
     width: Option<f64>,
+    #[serde(default)]
+    fill_opacity: Option<f64>,
+    #[serde(default)]
+    dash: Option<bool>,
     #[serde(default)]
     text: Option<String>,
 }
@@ -1722,6 +1734,15 @@ fn brush_width(value: Option<f64>) -> Result<Option<f64>> {
         None => Ok(None),
         Some(w) if w.is_finite() && (0.25..=4.0).contains(&w) => Ok(Some(w)),
         Some(_) => Err(AppError::bad("A line's width is 0.25 to 4 times normal")),
+    }
+}
+
+// A fill's opacity: from clear (0) to solid (1).
+fn fill_opacity(value: Option<f64>) -> Result<Option<f64>> {
+    match value {
+        None => Ok(None),
+        Some(o) if o.is_finite() && (0.0..=1.0).contains(&o) => Ok(Some(o)),
+        Some(_) => Err(AppError::bad("A fill's opacity is 0 to 1")),
     }
 }
 
@@ -1775,6 +1796,8 @@ pub async fn add_drawing(
         hidden: body.hidden.then_some(true),
         weight: weight(body.weight)?,
         width: brush_width(body.width)?,
+        fill_opacity: fill_opacity(body.fill_opacity)?,
+        dash: body.dash,
         text,
     };
     edit(&state, &access, &id, &scene, |mut map| {
@@ -1813,6 +1836,8 @@ pub struct DrawingChange {
     color: Option<String>,
     weight: Option<String>,
     width: Option<f64>,
+    fill_opacity: Option<f64>,
+    dash: Option<bool>,
     hidden: Option<bool>,
     text: Option<String>,
 }
@@ -1842,6 +1867,7 @@ pub async fn change_drawing(
     let color = body.color.as_deref().map(color).transpose()?;
     let weight = weight(body.weight)?;
     let width = brush_width(body.width)?;
+    let fill_opacity = fill_opacity(body.fill_opacity)?;
     if let Some(points) = &body.points {
         points_ok(points)?;
     }
@@ -1872,6 +1898,12 @@ pub async fn change_drawing(
         }
         if width.is_some() {
             found.width = width;
+        }
+        if fill_opacity.is_some() {
+            found.fill_opacity = fill_opacity;
+        }
+        if let Some(dash) = body.dash {
+            found.dash = dash.then_some(true);
         }
         if let Some(hidden) = body.hidden {
             found.hidden = hidden.then_some(true);
