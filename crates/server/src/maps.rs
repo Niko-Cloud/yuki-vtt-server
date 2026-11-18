@@ -70,6 +70,9 @@ pub struct Token {
     /// The token it rides on or is carried by: it moves when that one does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<String>,
+    /// What it follows from that holder: position by default, plus any of these it chooses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<Vec<String>>,
     /// Its name not written under it on the map (players never get it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hidden: Option<bool>,
@@ -96,6 +99,16 @@ fn turn(value: u32) -> Result<Option<u32>> {
 }
 
 const MARKS: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
+
+const FOLLOW: [&str; 5] = ["position", "rotation", "size", "visibility", "lock"];
+
+/// What an attachment follows from its holder: position only unless it chooses more.
+fn follows(rider: &Token, what: &str) -> bool {
+    match &rider.follow {
+        None => what == "position",
+        Some(list) => list.iter().any(|f| f == what),
+    }
+}
 
 /// The tokens carried along when one moves: those attached to it, and those attached to them.
 pub fn carried_by(tokens: &[Token], id: &str) -> std::collections::HashSet<String> {
@@ -913,6 +926,7 @@ pub async fn add_token(
         shared_with: None,
         facing: None,
         attached_to: None,
+        follow: None,
         name_hidden: None,
         marks: None,
         rotation: None,
@@ -987,6 +1001,7 @@ pub async fn place_party(
                 shared_with: None,
                 facing: None,
                 attached_to: None,
+                follow: None,
                 name_hidden: None,
                 marks: None,
                 rotation: None,
@@ -1025,6 +1040,7 @@ pub struct TokenChange {
     /// The token it is attached to, or null to let go.
     #[serde(default, deserialize_with = "present")]
     attached_to: Option<Value>,
+    follow: Option<Vec<String>>,
     layer: Option<String>,
     name_hidden: Option<bool>,
     marks: Option<Vec<String>>,
@@ -1216,7 +1232,7 @@ pub async fn change_token(
             token.locked = locked.then_some(true);
         }
         // Attaching it to another: one that is there, and never round in a loop.
-        if body.attached_to.is_some() || body.layer.is_some() {
+        if body.attached_to.is_some() || body.follow.is_some() || body.layer.is_some() {
             allow(access.may("tokens"), "arrange tokens")?;
         }
         match &body.attached_to {
@@ -1234,30 +1250,49 @@ pub async fn change_token(
             Some(_) => return Err(AppError::bad("Attached to a token's id, or null")),
             None => {}
         }
+        if let Some(follow) = &body.follow {
+            let known = follow.iter().all(|f| FOLLOW.contains(&f.as_str()));
+            if !known || follow.len() > FOLLOW.len() {
+                return Err(AppError::bad(
+                    "It follows position, rotation, size, visibility or lock",
+                ));
+            }
+            token.follow = Some(follow.clone());
+        }
         let stack = layer(body.layer.as_deref())?.map(str::to_string);
         let placed = map.keep_token(token);
-        let before = &map.tokens[at];
+        let before = map.tokens[at].clone();
         // Walls stop players' tokens (whoever runs the table goes anywhere).
         let walled = !access.runs() && map.fog.collide != Some(false) && !map.walls.is_empty();
         if walled && (placed.x, placed.y) != (before.x, before.y) {
-            let from = crate::fog::middle_of(&map, before);
+            let from = crate::fog::middle_of(&map, &before);
             if wall_in_the_way(&map.walls, from, crate::fog::middle_of(&map, &placed)) {
                 return Err(AppError::bad("A wall is in the way"));
             }
         }
-        // What it carries moves with it, as many cells.
+        // What it carries takes from it what each rider chooses to follow.
         let (dx, dy) = (placed.x - before.x, placed.y - before.y);
-        let carried = if dx != 0.0 || dy != 0.0 {
-            carried_by(&map.tokens, &token_id)
-        } else {
-            Default::default()
-        };
+        let carried = carried_by(&map.tokens, &token_id);
+        let after = placed.clone();
         map.tokens[at] = placed;
         for i in 0..map.tokens.len() {
             if carried.contains(&map.tokens[i].id) {
                 let mut rider = map.tokens[i].clone();
-                rider.x = (rider.x + dx).max(0.0);
-                rider.y = (rider.y + dy).max(0.0);
+                if follows(&rider, "position") {
+                    rider.x = (rider.x + dx).max(0.0);
+                    rider.y = (rider.y + dy).max(0.0);
+                }
+                if follows(&rider, "rotation") {
+                    if after.facing != before.facing {
+                        rider.facing = after.facing;
+                    }
+                    if after.rotation != before.rotation {
+                        rider.rotation = after.rotation;
+                    }
+                }
+                if follows(&rider, "size") && after.size != before.size {
+                    rider.size = after.size;
+                }
                 map.tokens[i] = map.keep_token(rider);
             }
         }

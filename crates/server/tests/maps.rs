@@ -838,6 +838,103 @@ async fn carries_attached_tokens_and_stacks_them() {
 }
 
 #[tokio::test]
+async fn attachments_follow_what_they_choose() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Horse", "x": 5, "y": 2 })),
+    )
+    .await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Rider", "x": 1, "y": 1 })),
+    )
+    .await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Owl", "x": 6, "y": 2 })),
+    )
+    .await;
+    let tokens = || {
+        let app = app.clone();
+        let t = &t;
+        async move {
+            view(&app, As::Dm, t).await["scene"]["tokens"]
+                .as_array()
+                .unwrap()
+                .clone()
+        }
+    };
+    let id_of = |all: &[Value], name: &str| {
+        all.iter().find(|t| t["name"] == name).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let all = tokens().await;
+    let (horse, rider, owl) = (
+        id_of(&all, "Horse"),
+        id_of(&all, "Rider"),
+        id_of(&all, "Owl"),
+    );
+    let change = |id: &str, body: Value| {
+        let (app, at) = (app.clone(), format!("{path}/{id}"));
+        async move { call(&app, As::Dm, "PATCH", &at, Some(body)).await.0 }
+    };
+    // The rider follows turn and size but not place; the owl follows place only (the default).
+    change(
+        &rider,
+        json!({ "attachedTo": horse, "follow": ["rotation", "size"] }),
+    )
+    .await;
+    change(&owl, json!({ "attachedTo": horse })).await;
+    assert_eq!(
+        change(&rider, json!({ "follow": ["sideways"] })).await,
+        StatusCode::BAD_REQUEST
+    );
+    // The horse moves, turns and grows.
+    assert_eq!(
+        change(
+            &horse,
+            json!({ "x": 7, "y": 2, "facing": 90, "rotation": 45, "size": 2 })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    let all = tokens().await;
+    let of = |name: &str| all.iter().find(|t| t["name"] == name).unwrap().clone();
+    let rider_now = of("Rider");
+    // Stays put, but takes the turn and the size.
+    assert_eq!(
+        (rider_now["x"].clone(), rider_now["y"].clone()),
+        (json!(1), json!(1))
+    );
+    assert_eq!(rider_now["facing"].as_f64(), Some(90.0));
+    assert_eq!(rider_now["rotation"], json!(45));
+    assert_eq!(rider_now["size"], json!(2));
+    // The owl rides along, but keeps its own turn and size.
+    let owl_now = of("Owl");
+    assert_eq!(
+        (owl_now["x"].clone(), owl_now["y"].clone()),
+        (json!(8), json!(2))
+    );
+    assert!(owl_now.get("facing").is_none() && owl_now.get("rotation").is_none());
+    assert_eq!(owl_now["size"], json!(1));
+}
+
+#[tokio::test]
 async fn keeps_how_diagonals_count() {
     let app = host();
     let t = table(&app).await;
