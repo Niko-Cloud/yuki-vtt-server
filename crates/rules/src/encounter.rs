@@ -24,6 +24,9 @@ pub struct Combatant {
     pub health: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// Feet it has moved since its turn began: the map counts them up, its next turn clears them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,11 +149,13 @@ pub fn remove(encounter: &Encounter, id: &str) -> Encounter {
 }
 
 /// The next turn; after the last in line, a new round starts at the top. The effects on
-/// whoever just acted count down a round, and those that run out come off.
+/// whoever just acted count down a round, and those that run out come off. Whoever's turn now
+/// begins starts with no feet moved yet.
 pub fn next_turn(encounter: &Encounter) -> Encounter {
     if encounter.combatants.is_empty() {
         return encounter.clone();
     }
+    let turn = (encounter.turn + 1) % encounter.combatants.len();
     let mut combatants = encounter.combatants.clone();
     if let Some(acting) = combatants.get_mut(encounter.turn) {
         acting.effects = acting
@@ -166,20 +171,65 @@ pub fn next_turn(encounter: &Encounter) -> Encounter {
             })
             .collect();
     }
-    let turn = encounter.turn + 1;
-    if turn >= combatants.len() {
-        Encounter {
-            combatants,
-            turn: 0,
-            round: encounter.round + 1,
-            ..encounter.clone()
-        }
+    if let Some(now) = combatants.get_mut(turn) {
+        now.moved = None;
+    }
+    let round = if turn == 0 {
+        encounter.round + 1
     } else {
-        Encounter {
-            combatants,
-            turn,
-            ..encounter.clone()
-        }
+        encounter.round
+    };
+    Encounter {
+        combatants,
+        turn,
+        round,
+        ..encounter.clone()
+    }
+}
+
+/// The fighter a token stands for: a seated character by its seat, a monster by its name.
+pub fn combatant_for_token<'a>(
+    encounter: &'a Encounter,
+    seat_id: Option<&str>,
+    name: &str,
+) -> Option<&'a Combatant> {
+    encounter.combatants.iter().find(|c| match seat_id {
+        Some(seat) => c.seat_id.as_deref() == Some(seat),
+        None => c.seat_id.is_none() && c.name == name,
+    })
+}
+
+/// Adds feet a token moved to its fighter's tally for the turn; no fighter, no change.
+pub fn record_move(
+    encounter: &Encounter,
+    seat_id: Option<&str>,
+    name: &str,
+    feet: u32,
+) -> Encounter {
+    if feet == 0 {
+        return encounter.clone();
+    }
+    let Some(who) = combatant_for_token(encounter, seat_id, name) else {
+        return encounter.clone();
+    };
+    let id = who.id.clone();
+    let combatants = encounter
+        .combatants
+        .iter()
+        .map(|c| {
+            if c.id == id {
+                Combatant {
+                    moved: Some(c.moved.unwrap_or(0) + feet),
+                    ..c.clone()
+                }
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
+    Encounter {
+        combatants,
+        ..encounter.clone()
     }
 }
 
@@ -336,6 +386,7 @@ mod tests {
             ac: None,
             health: None,
             effects: vec![],
+            moved: None,
         }
     }
 

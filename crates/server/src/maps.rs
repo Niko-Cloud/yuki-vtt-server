@@ -12,6 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use yuki_vtt_rules::encounter::{self, Encounter};
 use yuki_vtt_rules::map::{self, MapGrid};
 
 const MOST_SCENES: i64 = 30;
@@ -1278,7 +1279,9 @@ pub async fn change_token(
         }
         Some(_) => return Err(AppError::bad("A token's description is text, or null")),
     };
-    edit(&state, &access, &id, &scene, |mut map| {
+    let mut moved_feet: u32 = 0;
+    let mut mover: Option<(Option<String>, String)> = None;
+    let status = edit(&state, &access, &id, &scene, |mut map| {
         let at = map
             .tokens
             .iter()
@@ -1417,6 +1420,19 @@ pub async fn change_token(
                 return Err(AppError::bad("A wall is in the way"));
             }
         }
+        // Feet it moved this turn, counted up against its fighter when a fight is going.
+        if (placed.x, placed.y) != (before.x, before.y) {
+            let cell = |x: f64, y: f64| map::Cell {
+                x: x.round().max(0.0) as u32,
+                y: y.round().max(0.0) as u32,
+            };
+            moved_feet = map::distance(
+                &map.grid,
+                cell(before.x, before.y),
+                cell(placed.x, placed.y),
+            );
+            mover = Some((placed.seat_id.clone(), placed.name.clone()));
+        }
         // What it carries takes from it what each rider chooses to follow.
         let (dx, dy) = (placed.x - before.x, placed.y - before.y);
         let carried = carried_by(&map.tokens, &token_id);
@@ -1453,7 +1469,49 @@ pub async fn change_token(
             restack(&mut map.tokens, at, &stack);
         }
         Ok(map)
-    })
+    })?;
+    if moved_feet > 0
+        && let Some((seat, name)) = mover
+    {
+        record_movement(&state, &id, seat.as_deref(), &name, moved_feet)?;
+    }
+    Ok(status)
+}
+
+// A token moved during a fight: add the feet to its fighter's tally for the turn.
+fn record_movement(
+    state: &AppState,
+    table_id: &str,
+    seat_id: Option<&str>,
+    name: &str,
+    feet: u32,
+) -> Result<()> {
+    let db = state.db();
+    let stored: Option<String> = db
+        .query_row(
+            "SELECT encounter FROM tables WHERE id = ?1",
+            [table_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(text) = stored else {
+        return Ok(());
+    };
+    let Ok(before) = serde_json::from_str::<Encounter>(&text) else {
+        return Ok(());
+    };
+    let next = encounter::record_move(&before, seat_id, name, feet);
+    if next == before {
+        return Ok(());
+    }
+    let text = serde_json::to_string(&next)?;
+    db.execute(
+        "UPDATE tables SET encounter = ?2, updated_at = ?3 WHERE id = ?1",
+        params![table_id, text, ids::now()],
+    )?;
+    state.events.changed(table_id);
+    Ok(())
 }
 
 /// Whether a wall is in the way of a token going straight from one spot to another: walls,

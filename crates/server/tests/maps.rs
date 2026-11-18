@@ -1252,6 +1252,71 @@ async fn saves_a_group_as_a_prefab_for_the_dm_alone() {
 }
 
 #[tokio::test]
+async fn counts_feet_moved_this_turn_and_clears_them_at_the_next_turn() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    let fight = format!("/tables/{}/encounter", t.id);
+    let goblin = |v: &Value| -> Value {
+        v["encounter"]["combatants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Goblin")
+            .unwrap()
+            .clone()
+    };
+    // Without a fight, moving a token counts nothing.
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &at,
+        Some(json!({ "name": "Goblin", "x": 2, "y": 2 })),
+    )
+    .await;
+    let token = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let one = format!("{at}/{token}");
+    call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 4, "y": 2 }))).await;
+    assert_eq!(view(&app, As::Dm, &t).await["encounter"], Value::Null);
+    // A monster in the fight, going first, with the token of the same name on the map.
+    call(&app, As::Dm, "POST", &fight, None).await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{fight}/combatants"),
+        Some(json!({ "name": "Goblin", "bonus": 0, "initiative": 60 })),
+    )
+    .await;
+    call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 7, "y": 2 }))).await;
+    let v = view(&app, As::Dm, &t).await;
+    assert_eq!(goblin(&v)["moved"], 15);
+    // Players see the tally too; moving again adds to it.
+    assert_eq!(goblin(&view(&app, As::Seat(&tam), &t).await)["moved"], 15);
+    call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 7, "y": 4 }))).await;
+    assert_eq!(goblin(&view(&app, As::Dm, &t).await)["moved"], 25);
+    // Round the order back to the Goblin: its turn begins with no feet moved.
+    let mut v = view(&app, As::Dm, &t).await;
+    for _ in 0..10 {
+        call(&app, As::Dm, "POST", &format!("{fight}/next"), None).await;
+        v = view(&app, As::Dm, &t).await;
+        let turn = v["encounter"]["turn"].as_u64().unwrap() as usize;
+        if v["encounter"]["combatants"][turn]["name"] == "Goblin" {
+            break;
+        }
+    }
+    let turn = v["encounter"]["turn"].as_u64().unwrap() as usize;
+    assert_eq!(v["encounter"]["combatants"][turn]["name"], "Goblin");
+    assert_eq!(goblin(&v)["moved"], Value::Null);
+}
+
+#[tokio::test]
 async fn turns_and_mirrors_pictures() {
     let app = host();
     let t = table(&app).await;

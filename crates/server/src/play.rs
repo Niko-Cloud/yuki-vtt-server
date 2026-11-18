@@ -548,6 +548,7 @@ pub async fn start(
                 ac: None,
                 health: None,
                 effects: vec![],
+                moved: None,
             })
             .collect();
         let started = encounter::start(fighters, d20);
@@ -626,6 +627,7 @@ pub async fn add(
             ac: body.ac.map(ac_ok).transpose()?,
             health: None,
             effects: vec![],
+            moved: None,
         };
         save(
             db,
