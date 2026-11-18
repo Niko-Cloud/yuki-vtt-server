@@ -1190,6 +1190,68 @@ async fn keeps_a_screen_reader_description_for_the_dm_alone() {
 }
 
 #[tokio::test]
+async fn saves_a_group_as_a_prefab_for_the_dm_alone() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Goblin", "x": 2, "y": 2 })),
+    )
+    .await;
+    let token = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
+    let prefab = json!({
+        "name": "Ambush",
+        "anchor": { "x": 140, "y": 140 },
+        "tokens": [token],
+        "props": [],
+        "drawings": [
+            { "id": "d1", "shape": "line", "color": "#ff0000", "points": [[140, 140], [210, 210]], "by": "dm" }
+        ],
+        "lights": [],
+    });
+    let at = format!("/tables/{}/prefabs", t.id);
+    let (status, made) = call(&app, As::Dm, "POST", &at, Some(prefab.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    let prefab_id = made["id"].as_str().unwrap().to_string();
+    // The DM sees the saved group; a player never does.
+    let as_dm = view(&app, As::Dm, &t).await;
+    assert_eq!(as_dm["prefabs"].as_array().unwrap().len(), 1);
+    assert_eq!(as_dm["prefabs"][0]["name"], "Ambush");
+    assert_eq!(view(&app, As::Seat(&tam), &t).await["prefabs"], json!([]));
+    // A player may not save or remove one.
+    assert_eq!(
+        call(&app, As::Seat(&tam), "POST", &at, Some(prefab.clone()))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let one = format!("{at}/{prefab_id}");
+    assert_eq!(
+        call(&app, As::Seat(&tam), "DELETE", &one, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    // A nameless group is refused.
+    let mut nameless = prefab.clone();
+    nameless["name"] = json!("   ");
+    assert_eq!(
+        call(&app, As::Dm, "POST", &at, Some(nameless)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    // Removing it takes it away.
+    assert_eq!(
+        call(&app, As::Dm, "DELETE", &one, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(view(&app, As::Dm, &t).await["prefabs"], json!([]));
+}
+
+#[tokio::test]
 async fn turns_and_mirrors_pictures() {
     let app = host();
     let t = table(&app).await;

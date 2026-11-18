@@ -77,14 +77,15 @@ pub async fn view(
 ) -> Result<Json<Value>> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     let db = state.db();
-    let (name, edition, encounter, handout, active_scene): (
+    let (name, edition, encounter, handout, active_scene, prefabs): (
         String,
         String,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
     ) = db.query_row(
-        "SELECT name, edition, encounter, handout, active_scene_id FROM tables WHERE id = ?1",
+        "SELECT name, edition, encounter, handout, active_scene_id, prefabs FROM tables WHERE id = ?1",
         [&id],
         |row| {
             Ok((
@@ -93,6 +94,7 @@ pub async fn view(
                 row.get(2)?,
                 row.get(3)?,
                 row.get(4)?,
+                row.get(5)?,
             ))
         },
     )?;
@@ -132,6 +134,8 @@ pub async fn view(
         "activeSceneId": active_scene,
         "assets": pictures::list(&db, &id, access.runs())?,
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // Saved groups are the DM's alone; players never receive them.
+        "prefabs": if access.runs() { maps::parse_prefabs(prefabs) } else { vec![] },
         "log": log_for(&db, &id, &access)?,
         // Waiting to join: for whoever runs the table, to let in from the map room.
         "requests": if access.runs() { crate::requests::waiting(&db, &id)? } else { vec![] },

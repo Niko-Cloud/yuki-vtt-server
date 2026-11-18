@@ -19,6 +19,8 @@ const MOST_TOKENS: usize = 200;
 const MOST_PROPS: usize = 200;
 const MOST_DRAWINGS: usize = 300;
 const MOST_POINTS: usize = 2000;
+const MOST_LIGHTS: usize = 100;
+const MOST_PREFABS: usize = 50;
 const TOKEN_COLORS: [&str; 6] = [
     "#86d5ed", "#ff9090", "#9be39b", "#f2d27a", "#c9a0f0", "#f0f0f0",
 ];
@@ -393,6 +395,32 @@ pub struct FogArea {
     pub points: Vec<[f64; 2]>,
 }
 
+/// A group saved to drop again: things picked together, kept just as they were. The anchor is
+/// the group's top-left corner in the picture's pixels, so dropping shifts everything by the
+/// same amount. Kept per table, for the DM alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Prefab {
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    pub anchor: Anchor,
+    #[serde(default)]
+    pub tokens: Vec<Token>,
+    #[serde(default)]
+    pub props: Vec<Prop>,
+    #[serde(default)]
+    pub drawings: Vec<Drawing>,
+    #[serde(default)]
+    pub lights: Vec<Light>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Anchor {
+    pub x: f64,
+    pub y: f64,
+}
+
 /// Whether a point is inside a shape of any form (even-odd: count the edges a ray crosses).
 pub fn inside_shape(points: &[[f64; 2]], (x, y): (f64, f64)) -> bool {
     let mut inside = false;
@@ -647,6 +675,97 @@ pub(crate) fn active_scene(db: &Connection, table_id: &str) -> Result<Option<Str
         [table_id],
         |row| row.get(0),
     )?)
+}
+
+/// The saved groups a table keeps; anything malformed is left out.
+pub fn prefabs_of(db: &Connection, table_id: &str) -> Result<Vec<Prefab>> {
+    let stored: Option<String> = db.query_row(
+        "SELECT prefabs FROM tables WHERE id = ?1",
+        [table_id],
+        |row| row.get(0),
+    )?;
+    Ok(parse_prefabs(stored))
+}
+
+/// Saved groups from the stored JSON text; anything malformed is left out.
+pub fn parse_prefabs(stored: Option<String>) -> Vec<Prefab> {
+    let Some(text) = stored else { return vec![] };
+    let Ok(list) = serde_json::from_str::<Vec<Value>>(&text) else {
+        return vec![];
+    };
+    list.into_iter()
+        .filter_map(|entry| serde_json::from_value::<Prefab>(entry).ok())
+        .collect()
+}
+
+fn check_prefab(prefab: &Prefab) -> Result<()> {
+    let name = prefab.name.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err(AppError::bad("A saved group's name is 1 to 60 letters"));
+    }
+    if prefab.tokens.len() > MOST_TOKENS
+        || prefab.props.len() > MOST_PROPS
+        || prefab.drawings.len() > MOST_DRAWINGS
+        || prefab.lights.len() > MOST_LIGHTS
+    {
+        return Err(AppError::bad("A saved group holds too many things"));
+    }
+    for token in &prefab.tokens {
+        token_name(&token.name)?;
+        color(&token.color)?;
+    }
+    for drawing in &prefab.drawings {
+        color(&drawing.color)?;
+    }
+    Ok(())
+}
+
+/// `POST /api/tables/{id}/prefabs`: saves the picked group, to drop again on any map.
+pub async fn add_prefab(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(mut body): Json<Prefab>,
+) -> Result<Json<Value>> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    check_prefab(&body)?;
+    let mut kept = prefabs_of(&state.db(), &id)?;
+    if kept.len() >= MOST_PREFABS {
+        return Err(AppError::bad(format!(
+            "A table keeps up to {MOST_PREFABS} saved groups: remove one first"
+        )));
+    }
+    body.id = format!("prefab-{}", ids::id());
+    body.name = body.name.trim().to_string();
+    kept.push(body.clone());
+    state.db().execute(
+        "UPDATE tables SET prefabs = ?2 WHERE id = ?1",
+        params![id, serde_json::to_string(&kept)?],
+    )?;
+    state.events.changed(&id);
+    Ok(Json(json!({ "id": body.id })))
+}
+
+/// `DELETE /api/tables/{id}/prefabs/{prefab}`: takes a saved group away.
+pub async fn remove_prefab(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, prefab)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    let kept = prefabs_of(&state.db(), &id)?;
+    let next: Vec<Prefab> = kept.iter().filter(|p| p.id != prefab).cloned().collect();
+    if next.len() == kept.len() {
+        return Err(AppError::not_found(format!(
+            "No saved group with id {prefab}"
+        )));
+    }
+    state.db().execute(
+        "UPDATE tables SET prefabs = ?2 WHERE id = ?1",
+        params![id, serde_json::to_string(&next)?],
+    )?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // Changes a map. Players act on the map everyone sees, never on the DM's others.

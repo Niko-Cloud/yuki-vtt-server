@@ -100,6 +100,9 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE scenes ADD COLUMN folder TEXT;
 "#,
+    r#"
+    ALTER TABLE tables ADD COLUMN prefabs TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
