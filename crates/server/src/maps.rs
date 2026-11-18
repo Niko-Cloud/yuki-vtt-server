@@ -293,8 +293,11 @@ pub struct Prop {
     pub asset_id: String,
     pub x: u32,
     pub y: u32,
-    pub w: u32,
-    pub h: u32,
+    /// Cells across and down: any size from half a cell to 40.
+    #[serde(serialize_with = "whole")]
+    pub w: f64,
+    #[serde(serialize_with = "whole")]
+    pub h: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -484,10 +487,11 @@ impl TableMap {
 
     fn keep_prop(&self, mut prop: Prop) -> Prop {
         let (columns, rows) = self.cells();
-        prop.w = prop.w.min(columns);
-        prop.h = prop.h.min(rows);
-        prop.x = prop.x.min(columns - prop.w);
-        prop.y = prop.y.min(rows - prop.h);
+        let (cols, rows) = (f64::from(columns), f64::from(rows));
+        prop.w = ((prop.w.min(cols)) * 100.0).round() / 100.0;
+        prop.h = ((prop.h.min(rows)) * 100.0).round() / 100.0;
+        prop.x = prop.x.min((cols - prop.w).floor().max(0.0) as u32);
+        prop.y = prop.y.min((rows - prop.h).floor().max(0.0) as u32);
         prop
     }
 
@@ -544,12 +548,10 @@ fn cell(x: f64, y: f64) -> Result<()> {
 }
 
 fn size(size: f64) -> Result<f64> {
-    if (0.5..=4.0).contains(&size) && (size * 2.0).fract() == 0.0 {
-        Ok(size)
+    if (0.5..=4.0).contains(&size) {
+        Ok((size * 100.0).round() / 100.0)
     } else {
-        Err(AppError::bad(
-            "A token is half a cell to 4 cells across, by halves",
-        ))
+        Err(AppError::bad("A token is half a cell to 4 cells across"))
     }
 }
 
@@ -1319,16 +1321,18 @@ pub struct NewProp {
     asset_id: String,
     x: u32,
     y: u32,
-    w: u32,
-    h: u32,
+    w: f64,
+    h: f64,
     locked: Option<bool>,
 }
 
-fn prop_size(w: u32, h: u32) -> Result<()> {
-    if (1..=40).contains(&w) && (1..=40).contains(&h) {
+fn prop_size(w: f64, h: f64) -> Result<()> {
+    if (0.5..=40.0).contains(&w) && (0.5..=40.0).contains(&h) {
         Ok(())
     } else {
-        Err(AppError::bad("A picture on the map is 1 to 40 cells"))
+        Err(AppError::bad(
+            "A picture on the map is half a cell to 40 cells",
+        ))
     }
 }
 
@@ -1368,8 +1372,8 @@ pub async fn add_prop(
 pub struct PropChange {
     x: Option<u32>,
     y: Option<u32>,
-    w: Option<u32>,
-    h: Option<u32>,
+    w: Option<f64>,
+    h: Option<f64>,
     locked: Option<bool>,
     layer: Option<String>,
     rotation: Option<u32>,

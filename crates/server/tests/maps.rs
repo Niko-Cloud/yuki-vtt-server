@@ -1106,6 +1106,107 @@ async fn keeps_tokens_between_cells_and_tiny_ones() {
 }
 
 #[tokio::test]
+async fn keeps_freely_resized_tokens_and_pictures() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Ogre", "x": 4, "y": 4, "size": 2 })),
+    )
+    .await;
+    let id = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = format!("{path}/{id}");
+    // A corner handle sends any size in range, to two decimals.
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(json!({ "size": 2.37 })))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["size"],
+        json!(2.37)
+    );
+    // Whole cells stay whole, as the website sends them with Shift held.
+    call(&app, As::Dm, "PATCH", &at, Some(json!({ "size": 3 }))).await;
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["size"],
+        json!(3)
+    );
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(json!({ "size": 5 })))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // A picture on the map stretches freely too, across and down apart.
+    let (_, art) = upload(
+        &app,
+        As::Dm,
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=prop&name=Chest&width=128&height=64",
+            t.id
+        ),
+        PNG,
+    )
+    .await;
+    let art = art["id"].as_str().unwrap();
+    let props = format!("/tables/{}/scenes/{cave}/props", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &props,
+        Some(json!({ "assetId": art, "x": 0, "y": 0, "w": 2, "h": 1 })),
+    )
+    .await;
+    let prop = view(&app, As::Dm, &t).await["scene"]["props"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prop_at = format!("{props}/{prop}");
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &prop_at,
+            Some(json!({ "w": 2.5, "h": 1.5 }))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let shown = view(&app, As::Dm, &t).await["scene"]["props"][0].clone();
+    assert_eq!(
+        (shown["w"].clone(), shown["h"].clone()),
+        (json!(2.5), json!(1.5))
+    );
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &prop_at,
+            Some(json!({ "w": 0.2, "h": 1 }))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn shares_rulers_with_anyone_and_trails_with_those_who_draw() {
     let app = host();
     let t = table(&app).await;
