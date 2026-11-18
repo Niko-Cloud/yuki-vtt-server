@@ -263,11 +263,14 @@ pub fn for_players(scene: &mut Value) {
     if let Some(templates) = scene["templates"].as_array_mut() {
         templates.retain(|t| t["hidden"] != json!(true));
     }
-    // A name the DM keeps off the map isn't sent either.
+    // A name the DM keeps off the map isn't sent either, nor a screen-reader description.
     if let Some(tokens) = scene["tokens"].as_array_mut() {
         for t in tokens {
             if t["nameHidden"] == json!(true) {
                 t["name"] = json!("Unknown");
+            }
+            if let Some(object) = t.as_object_mut() {
+                object.remove("description");
             }
         }
     }

@@ -76,6 +76,9 @@ pub struct Token {
     /// Its name not written under it on the map (players never get it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hidden: Option<bool>,
+    /// A description read by screen readers, for the DM only (players never get it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Coloured dots on it, for whatever the table agrees they mean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marks: Option<Vec<String>>,
@@ -928,6 +931,7 @@ pub async fn add_token(
         attached_to: None,
         follow: None,
         name_hidden: None,
+        description: None,
         marks: None,
         rotation: None,
         flip: None,
@@ -1003,6 +1007,7 @@ pub async fn place_party(
                 attached_to: None,
                 follow: None,
                 name_hidden: None,
+                description: None,
                 marks: None,
                 rotation: None,
                 flip: None,
@@ -1043,6 +1048,9 @@ pub struct TokenChange {
     follow: Option<Vec<String>>,
     layer: Option<String>,
     name_hidden: Option<bool>,
+    /// A screen-reader description, or null to take it off (the DM only).
+    #[serde(default, deserialize_with = "present")]
+    description: Option<Value>,
     marks: Option<Vec<String>>,
     rotation: Option<u32>,
     flip: Option<bool>,
@@ -1137,6 +1145,20 @@ pub async fn change_token(
         }
         Some(_) => return Err(AppError::bad("A token's picture is a picture's id")),
     };
+    let description = match &body.description {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.chars().count() > 280 {
+                return Err(AppError::bad(
+                    "A token's description is up to 280 characters",
+                ));
+            }
+            Some((!text.is_empty()).then(|| text.to_string()))
+        }
+        Some(_) => return Err(AppError::bad("A token's description is text, or null")),
+    };
     edit(&state, &access, &id, &scene, |mut map| {
         let at = map
             .tokens
@@ -1177,6 +1199,9 @@ pub async fn change_token(
         if body.hidden.is_some() || body.locked.is_some() {
             allow(access.runs(), "hide or lock tokens")?;
         }
+        if description.is_some() {
+            allow(access.runs(), "describe tokens")?;
+        }
         if vision.is_some() || light.is_some() || body.shared_with.is_some() {
             allow(access.runs(), "change a token's sight")?;
         }
@@ -1203,6 +1228,9 @@ pub async fn change_token(
         }
         if let Some(hidden) = body.name_hidden {
             token.name_hidden = hidden.then_some(true);
+        }
+        if let Some(desc) = description {
+            token.description = desc;
         }
         if let Some(rotation) = body.rotation {
             token.rotation = turn(rotation)?;

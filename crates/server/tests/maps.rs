@@ -1136,6 +1136,60 @@ async fn marks_tokens_and_keeps_a_hidden_name_from_players() {
 }
 
 #[tokio::test]
+async fn keeps_a_screen_reader_description_for_the_dm_alone() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Ogre", "x": 3, "y": 3 })),
+    )
+    .await;
+    let id = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = format!("{path}/{id}");
+    let described = json!({ "description": "A big ogre with a club" });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(described)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["description"],
+        "A big ogre with a club"
+    );
+    // A player never receives it, and may not write one.
+    let theirs = view(&app, As::Seat(&tam), &t).await["scene"]["tokens"][0].clone();
+    assert!(theirs.get("description").is_none());
+    let sneaky = json!({ "description": "sneaky" });
+    assert!(
+        call(&app, As::Seat(&tam), "PATCH", &at, Some(sneaky))
+            .await
+            .0
+            .is_client_error()
+    );
+    // Too long is refused; null takes it off.
+    let long = json!({ "description": "x".repeat(281) });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(long)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let cleared = json!({ "description": null });
+    call(&app, As::Dm, "PATCH", &at, Some(cleared)).await;
+    assert!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]
+            .get("description")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn turns_and_mirrors_pictures() {
     let app = host();
     let t = table(&app).await;
