@@ -13,7 +13,7 @@ use std::io::Read;
 use std::path::Path;
 
 const FORMAT: u64 = 1;
-// A table's pictures are at most 200 of 8 MB; a file bigger than this isn't one of ours.
+// A table's pictures are at most 200 of 25 MB; a file bigger than this isn't one of ours.
 const BIGGEST: u64 = 2 * 1024 * 1024 * 1024;
 // The table's rows, without pictures: far more than any real table's log and maps.
 const TABLE_LIMIT: u64 = 256 * 1024 * 1024;
@@ -41,6 +41,7 @@ const PARTS: [(&str, &[&str]); 6] = [
             "timer",
             "loot",
             "journal",
+            "music",
         ],
     ),
     (
@@ -141,6 +142,7 @@ fn fits(column: &str, value: &Value) -> bool {
         "banned" => holds::<Vec<Value>>(value),
         "encounter" => value.is_null() || holds::<yuki_vtt_rules::encounter::Encounter>(value),
         "handout" => value.is_null() || holds::<Value>(value),
+        "music" => value.is_null() || holds::<Value>(value),
         "timer" => value.is_null() || holds::<Value>(value),
         "loot" | "journal" => value.is_null() || value.is_array(),
         "prefabs" => value.is_null() || holds::<Vec<crate::maps::Prefab>>(value),
@@ -291,7 +293,8 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
         let limit = if path == "table.json" {
             TABLE_LIMIT
         } else {
-            crate::pictures::MAP_LIMIT as u64
+            // A picture file may be a map (up to 25 MB) or a library track or clip (up to 10 MB).
+            crate::pictures::VIDEO_MAP_LIMIT as u64
         };
         let mut bytes = Vec::new();
         (&mut entry)

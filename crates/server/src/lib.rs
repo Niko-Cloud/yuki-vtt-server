@@ -120,9 +120,10 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/notes", post(fog::add_note))
         .route("/tables/{id}/scenes/{scene}/notes/{note}", axum::routing::delete(fog::remove_note))
         .route("/tables/{id}/scenes/{scene}/explored", get(fog::explored).post(fog::explore).delete(fog::forget_explored))
-        .route("/tables/{id}/assets", post(pictures::add).layer(DefaultBodyLimit::max(pictures::LIBRARY_LIMIT + 1024)))
+        .route("/tables/{id}/assets", post(pictures::add).layer(DefaultBodyLimit::max(pictures::VIDEO_LIBRARY_LIMIT.max(pictures::AUDIO_LIMIT) + 1024)))
         .route("/tables/{id}/assets/{asset}", get(pictures::picture).delete(pictures::remove))
         .route("/tables/{id}/handout", axum::routing::put(pictures::show).delete(pictures::hide))
+        .route("/tables/{id}/music", axum::routing::put(pictures::play_music).delete(pictures::stop_music))
         .route("/tables/{id}/ask", patch(requests::set_asking))
         .route("/tables/{id}/requests/{request}/{choice}", post(requests::decide))
         // The seat token comes in the x-seat-token header, never in the address.

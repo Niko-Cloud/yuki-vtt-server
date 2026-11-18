@@ -421,6 +421,124 @@ async fn the_party_keeps_a_loot_list_and_a_session_journal() {
 }
 
 #[tokio::test]
+async fn the_dm_plays_a_looping_track_to_everyone() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+
+    // The table starts quiet.
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert!(view["music"].is_null());
+
+    // The DM uploads a track (an MP3 by its first bytes); it has no pixels.
+    let (status, asset) = upload(
+        &app,
+        As::Dm,
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=audio&name=Tavern%20loop&width=0&height=0",
+            t.id
+        ),
+        b"ID3\x03\x00\x00\x00\x00\x00\x00rest",
+    )
+    .await;
+    assert!(status.is_success(), "{asset}");
+    assert_eq!(asset["kind"], "audio");
+    let asset_id = asset["id"].as_str().unwrap();
+    let (_, view) = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None).await;
+    let stored = view["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == asset_id)
+        .unwrap();
+    assert_eq!(stored["mime"], "audio/mpeg");
+    assert_eq!(stored["width"], 0);
+
+    // A picture is not a track: the same bytes refused as audio.
+    let (status, _) = upload(
+        &app,
+        As::Dm,
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=audio&name=Nope&width=0&height=0",
+            t.id
+        ),
+        b"\x89PNG\r\n\x1a\nrest",
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    // The DM plays it to everyone; the player reads the track.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/music", t.id),
+        Some(json!({ "assetId": asset_id, "name": "Tavern loop" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(view["music"]["assetId"], asset_id);
+    assert_eq!(view["music"]["name"], "Tavern loop");
+
+    // A player cannot start or stop the music, and a track must exist.
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PUT",
+        &format!("/tables/{}/music", t.id),
+        Some(json!({ "assetId": asset_id, "name": "Tavern loop" })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/music", t.id),
+        Some(json!({ "assetId": "no-such-track", "name": "Ghost" })),
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    // Deleting the track stops the music for everyone.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!("/tables/{}/assets/{}", t.id, asset_id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert!(view["music"].is_null());
+}
+
+#[tokio::test]
 async fn keeps_hidden_rolls_to_the_dm_and_a_private_roll_to_its_player() {
     let app = host();
     let t = table(&app).await;

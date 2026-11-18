@@ -113,6 +113,9 @@ const STEPS: &[&str] = &[
     ALTER TABLE tables ADD COLUMN loot TEXT;
     ALTER TABLE tables ADD COLUMN journal TEXT;
 "#,
+    r#"
+    ALTER TABLE tables ADD COLUMN music TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

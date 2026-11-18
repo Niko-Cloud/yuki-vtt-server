@@ -22,9 +22,11 @@ pub const LIBRARY_LIMIT: usize = 4 * 1024 * 1024;
 // Animated pictures (GIF and WebM video) may be larger: a short looping clip weighs more.
 pub const VIDEO_MAP_LIMIT: usize = 25 * 1024 * 1024;
 pub const VIDEO_LIBRARY_LIMIT: usize = 10 * 1024 * 1024;
+// A music track, compressed in the browser before it goes up, may weigh as much as a clip.
+pub const AUDIO_LIMIT: usize = 10 * 1024 * 1024;
 // A table's library stays a library, not a photo album.
 const MOST_PICTURES: i64 = 200;
-const KINDS: [&str; 3] = ["token", "prop", "handout"];
+const KINDS: [&str; 4] = ["token", "prop", "handout", "audio"];
 
 /// The picture's type, told by its first bytes, not by what the upload claims to be.
 pub fn picture_type(data: &[u8], limit: usize, animated_limit: usize) -> Result<&'static str> {
@@ -50,6 +52,40 @@ pub fn picture_type(data: &[u8], limit: usize, animated_limit: usize) -> Result<
         return Err(AppError::bad(format!(
             "The picture is over {} MB",
             cap / (1024 * 1024)
+        )));
+    }
+    Ok(mime)
+}
+
+/// A music track's type, told by its first bytes. MP3 opens with an ID3 tag or a frame sync;
+/// the rest have their own marks. A WebM track shares the EBML header with a clip.
+pub fn audio_type(data: &[u8], limit: usize) -> Result<&'static str> {
+    if data.is_empty() {
+        return Err(AppError::bad("No track came with the upload"));
+    }
+    let mime = if data.starts_with(b"ID3")
+        || (data.len() >= 2 && data[0] == 0xff && data[1] & 0xe0 == 0xe0)
+    {
+        "audio/mpeg"
+    } else if data.starts_with(b"OggS") {
+        "audio/ogg"
+    } else if data.starts_with(b"fLaC") {
+        "audio/flac"
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
+        "audio/wav"
+    } else if data.len() >= 12 && &data[4..8] == b"ftyp" {
+        "audio/mp4"
+    } else if data.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        "audio/webm"
+    } else {
+        return Err(AppError::bad(
+            "Use an MP3, OGG, M4A, WAV, FLAC or WebM track",
+        ));
+    };
+    if data.len() > limit {
+        return Err(AppError::bad(format!(
+            "The track is over {} MB",
+            limit / (1024 * 1024)
         )));
     }
     Ok(mime)
@@ -193,14 +229,22 @@ pub async fn add(
 ) -> Result<Json<Value>> {
     let access = access::at_table(&state, &id, &Credentials::from(&headers, None))?;
     if !KINDS.contains(&upload.kind.as_str()) {
-        return Err(AppError::bad("A picture is a token, a prop or a handout"));
+        return Err(AppError::bad(
+            "A picture is a token, a prop, a handout or a track",
+        ));
     }
     if !(access.runs() || (upload.kind == "token" && access.may("tokens"))) {
         return Err(AppError::not_found("The DM hasn't let you add pictures"));
     }
-    let mime = picture_type(&data, LIBRARY_LIMIT, VIDEO_LIBRARY_LIMIT)?;
+    let audio = upload.kind == "audio";
+    let mime = if audio {
+        audio_type(&data, AUDIO_LIMIT)?
+    } else {
+        picture_type(&data, LIBRARY_LIMIT, VIDEO_LIBRARY_LIMIT)?
+    };
+    // A track has no pixels; only a picture is measured.
     let fits = |n: f64| n.is_finite() && n > 0.0 && n <= 16_384.0;
-    if !fits(upload.width) || !fits(upload.height) {
+    if !audio && (!fits(upload.width) || !fits(upload.height)) {
         return Err(AppError::bad("The picture must be 1 to 16384 pixels"));
     }
     let name: String = upload
@@ -216,7 +260,11 @@ pub async fn add(
     } else {
         name
     };
-    let (width, height) = (upload.width.round() as i64, upload.height.round() as i64);
+    let (width, height) = if audio {
+        (0, 0)
+    } else {
+        (upload.width.round() as i64, upload.height.round() as i64)
+    };
     let picture_id = ids::id();
     {
         let db = state.db();
@@ -304,6 +352,7 @@ pub async fn remove(
         }
         maps::forget_picture(&db, &id, &asset)?;
         db.execute("UPDATE tables SET handout = NULL WHERE id = ?1 AND json_extract(handout, '$.assetId') = ?2", [&id, &asset])?;
+        db.execute("UPDATE tables SET music = NULL WHERE id = ?1 AND json_extract(music, '$.assetId') = ?2", [&id, &asset])?;
     }
     let _ = std::fs::remove_file(library_file(&state, &id, &asset)?);
     state.events.changed(&id);
@@ -360,6 +409,57 @@ pub async fn hide(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Music {
+    asset_id: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// `PUT /api/tables/{id}/music`: plays a track to everyone at the table, looping.
+pub async fn play_music(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(music): Json<Music>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
+    let name: String = music.name.trim().chars().take(80).collect();
+    {
+        let db = state.db();
+        let found: i64 = db.query_row(
+            "SELECT COUNT(*) FROM assets WHERE table_id = ?1 AND id = ?2",
+            [&id, &music.asset_id],
+            |row| row.get(0),
+        )?;
+        if found == 0 {
+            return Err(AppError::not_found("That picture is gone"));
+        }
+        let playing = json!({ "assetId": music.asset_id, "name": name }).to_string();
+        db.execute(
+            "UPDATE tables SET music = ?2 WHERE id = ?1",
+            [&id, &playing],
+        )?;
+    }
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/music`: stops the track for everyone.
+pub async fn stop_music(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &Credentials::from(&headers, None))?;
+    state
+        .db()
+        .execute("UPDATE tables SET music = NULL WHERE id = ?1", [&id])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +495,30 @@ mod tests {
         assert!(safe("../../etc/passwd").is_err());
         assert!(safe("abc/def").is_err());
         assert!(safe("tok-AbC123").is_ok());
+    }
+
+    #[test]
+    fn tells_a_track_by_its_first_bytes() {
+        assert_eq!(audio_type(b"ID3rest", 100).unwrap(), "audio/mpeg");
+        assert_eq!(
+            audio_type(&[0xff, 0xfb, 0x90, 0x00], 100).unwrap(),
+            "audio/mpeg"
+        );
+        assert_eq!(audio_type(b"OggSrest", 100).unwrap(), "audio/ogg");
+        assert_eq!(audio_type(b"fLaCrest", 100).unwrap(), "audio/flac");
+        assert_eq!(
+            audio_type(b"RIFF\0\0\0\0WAVErest", 100).unwrap(),
+            "audio/wav"
+        );
+        assert_eq!(
+            audio_type(b"\0\0\0\x18ftypM4A rest", 100).unwrap(),
+            "audio/mp4"
+        );
+        assert_eq!(
+            audio_type(b"\x1a\x45\xdf\xa3rest", 100).unwrap(),
+            "audio/webm"
+        );
+        assert!(audio_type(b"<svg onload=alert(1)>", 100).is_err());
+        assert!(audio_type(b"ID3rest", 3).is_err());
     }
 }

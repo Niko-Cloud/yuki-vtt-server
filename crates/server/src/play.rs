@@ -102,6 +102,10 @@ pub async fn view(
         db.query_row("SELECT timer FROM tables WHERE id = ?1", [&id], |row| {
             row.get(0)
         })?;
+    let music: Option<String> =
+        db.query_row("SELECT music FROM tables WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })?;
     let (loot, journal): (Option<String>, Option<String>) = db.query_row(
         "SELECT loot, journal FROM tables WHERE id = ?1",
         [&id],
@@ -157,6 +161,8 @@ pub async fn view(
         "activeSceneId": active_scene,
         "assets": pictures::list(&db, &id, access.runs())?,
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // The track the DM plays to everyone, looping; null when the table is quiet.
+        "music": music.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         // The countdown the DM started, for everyone to watch.
         "timer": timer.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         // The party's shared loot list and session journal; everyone at the table reads them.
