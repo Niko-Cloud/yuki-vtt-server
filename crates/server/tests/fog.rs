@@ -554,3 +554,79 @@ async fn keeps_a_fog_colour_like_the_website() {
     let plain = view(&app, As::Dm, &t).await["scene"]["fog"].clone();
     assert!(plain.get("color").is_none());
 }
+
+#[tokio::test]
+async fn keeps_circle_and_brush_fog_shapes_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    // Rat stands in the circle, Bat in the brush band, Ogre outside both.
+    for (name, x, y) in [("Rat", 4, 3), ("Bat", 2, 1), ("Ogre", 10, 10)] {
+        let token = json!({ "name": name, "x": x, "y": y });
+        call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(token)).await;
+    }
+    // A circle is a 48-corner polygon; a brush stroke a band with round ends.
+    let circle: Vec<Value> = (0..48)
+        .map(|i| {
+            let a = (i as f64 / 48.0) * std::f64::consts::TAU;
+            json!([
+                (350.0 + a.cos() * 100.0).round(),
+                (245.0 + a.sin() * 100.0).round()
+            ])
+        })
+        .collect();
+    let band = json!([
+        [100, 80],
+        [300, 80],
+        [320, 100],
+        [300, 120],
+        [100, 120],
+        [80, 100]
+    ]);
+    let lighting = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true },
+        "walls": [],
+        "lights": [],
+        "fogAreas": [
+            { "id": "circle", "points": circle },
+            { "id": "brush", "points": band },
+        ],
+    });
+    let lit = format!("{at}/lighting");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(lighting)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = view(&app, As::Dm, &t).await["scene"]["fogAreas"].clone();
+    let areas = kept.as_array().unwrap();
+    assert_eq!(areas.len(), 2);
+    assert_eq!(areas[0]["points"].as_array().unwrap().len(), 48);
+    assert_eq!(areas[1]["points"].as_array().unwrap().len(), 6);
+    let names = |who| {
+        let app = app.clone();
+        let t = &t;
+        async move {
+            view(&app, who, t).await["scene"]["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    let theirs = names(As::Seat(&tam)).await;
+    assert!(theirs.contains(&"Tam".to_string()) && theirs.contains(&"Ogre".to_string()));
+    assert!(!theirs.contains(&"Rat".to_string()) && !theirs.contains(&"Bat".to_string()));
+    let dms = names(As::Dm).await;
+    assert!(dms.contains(&"Rat".to_string()) && dms.contains(&"Bat".to_string()));
+}
