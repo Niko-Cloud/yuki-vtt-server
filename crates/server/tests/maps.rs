@@ -1047,15 +1047,25 @@ async fn turns_and_mirrors_pictures() {
         call(&app, As::Dm, "PATCH", &at, Some(turned)).await.0,
         StatusCode::NO_CONTENT
     );
-    let odd = json!({ "rotation": 45 });
+    let odd = json!({ "rotation": 400 });
     assert_eq!(
         call(&app, As::Dm, "PATCH", &at, Some(odd)).await.0,
         StatusCode::BAD_REQUEST
     );
+    // Any whole degree is kept now, not just quarter turns.
+    let free = json!({ "rotation": 45 });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(free)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["rotation"],
+        json!(45)
+    );
     let bat = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
     assert_eq!(
         (bat["rotation"].clone(), bat["flip"].clone()),
-        (json!(90), json!(true))
+        (json!(45), json!(true))
     );
     let back = json!({ "rotation": 0, "flip": false });
     assert_eq!(

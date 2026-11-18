@@ -86,12 +86,12 @@ pub struct Token {
     pub counter: Option<i32>,
 }
 
-// A picture turned a quarter at a time.
+// A picture turned to any whole degree; 0 (and 360) leaves it unturned.
 fn turn(value: u32) -> Result<Option<u32>> {
     match value {
-        0 => Ok(None),
-        90 | 180 | 270 => Ok(Some(value)),
-        _ => Err(AppError::bad("A picture turns 0, 90, 180 or 270 degrees")),
+        0 | 360 => Ok(None),
+        1..=359 => Ok(Some(value)),
+        _ => Err(AppError::bad("A picture turns 0 to 360 degrees")),
     }
 }
 
