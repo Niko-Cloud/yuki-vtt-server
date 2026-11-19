@@ -62,7 +62,15 @@ const PARTS: [(&str, &[&str]); 6] = [
     ),
     (
         "scenes",
-        &["id", "table_id", "name", "position", "data", "created_at"],
+        &[
+            "id",
+            "table_id",
+            "name",
+            "position",
+            "data",
+            "created_at",
+            "folder",
+        ],
     ),
     // What players explored of each map with fog; after the scenes it belongs to.
     (

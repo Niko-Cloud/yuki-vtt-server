@@ -185,6 +185,15 @@ async fn backs_up_the_library_pictures_a_table_uses() {
         Some(json!({ "name": "Ogre", "x": 1, "y": 1, "imageId": ogre })),
     )
     .await;
+    let filed = json!({ "folder": "Act one" });
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/scenes/{scene}", t.id),
+        Some(filed),
+    )
+    .await;
     let order = json!({ "folder": "Monsters", "tags": ["giant"], "favorite": true });
     let path = format!("/tables/{}/assets/{ogre}", t.id);
     call(&app, As::Dm, "PATCH", &path, Some(order)).await;
@@ -199,6 +208,11 @@ async fn backs_up_the_library_pictures_a_table_uses() {
     let library = ids_of(&view(&moved, As::Dm, &t).await["assets"]);
     assert_eq!(library, std::slice::from_ref(&ogre));
     assert!(!library.contains(&unused));
+    // The map keeps its folder too.
+    assert_eq!(
+        view(&moved, As::Dm, &t).await["scenes"][0]["folder"],
+        "Act one"
+    );
     let kept = view(&moved, As::Dm, &t).await["assets"][0].clone();
     assert_eq!(
         (&kept["folder"], &kept["tags"], &kept["favorite"]),
