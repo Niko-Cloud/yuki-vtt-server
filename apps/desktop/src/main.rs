@@ -465,6 +465,17 @@ fn set_start_on_open(shared: State<'_, Shared>, on: bool) -> Result<(), String> 
     .map_err(|error| format!("Couldn't keep that choice: {error}"))
 }
 
+/// The copies the host keeps of each table, every twenty minutes while it changes.
+#[tauri::command]
+fn open_backups_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
+    let copies = yuki_vtt_server::backup::copies_folder(&shared.data);
+    std::fs::create_dir_all(&copies)
+        .map_err(|error| format!("Couldn't make the backups folder: {error}"))?;
+    app.opener()
+        .open_path(copies.display().to_string(), None::<&str>)
+        .map_err(|error| format!("Couldn't open the folder: {error}"))
+}
+
 /// The picture library, as folders: Tokens, Props, Handouts, Music and Maps.
 #[tauri::command]
 fn open_library_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
@@ -668,6 +679,7 @@ fn main() {
             set_start_on_open,
             open_data_folder,
             open_library_folder,
+            open_backups_folder,
             answer_link,
             answer_request,
             backup_table,

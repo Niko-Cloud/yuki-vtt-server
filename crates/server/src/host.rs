@@ -89,7 +89,11 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
 
     // Pictures the DM copied in, renamed or deleted while the host was off count from now on.
     crate::library::rescan(&state);
-    let mut helpers = vec![crate::library::watch(state.clone())];
+    let mut helpers = vec![
+        crate::library::watch(state.clone()),
+        // Each table is copied now and then, so a bad night or a broken disk loses little.
+        crate::backup::schedule(options.data.clone()),
+    ];
     let tunnel_address = if options.tunnel {
         let program =
             tunnel::find(&options.data).ok_or("The tunnel needs the cloudflared program")?;

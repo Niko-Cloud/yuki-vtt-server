@@ -164,6 +164,7 @@ $('start-on-open').addEventListener('change', (event) =>
 );
 $('folder').addEventListener('click', () => run('open_data_folder'));
 $('library').addEventListener('click', () => run('open_library_folder'));
+$('backups').addEventListener('click', () => run('open_backups_folder'));
 
 $('pair-website').value = localStorage.getItem('website') ?? '';
 refresh();

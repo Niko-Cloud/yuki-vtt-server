@@ -241,16 +241,22 @@ fn read_rows(
         .collect()
 }
 
+// Every row of one table, part by part.
+fn table_rows(db: &Connection, table_id: &str) -> Result<Map<String, Value>, String> {
+    let mut rows = Map::new();
+    for (part, columns) in PARTS {
+        let found = read_rows(db, part, columns, table_id)
+            .map_err(|e| format!("Couldn't read the table: {e}"))?;
+        rows.insert(part.to_string(), Value::Array(found));
+    }
+    Ok(rows)
+}
+
 /// Writes one table to `out`. Works while the host is on.
 pub fn export(data_dir: &Path, table_id: &str, out: &Path) -> Result<(), String> {
     let db = db::open(&data_dir.join("tables.db"))
         .map_err(|e| format!("Couldn't open the tables: {e}"))?;
-    let mut rows = Map::new();
-    for (part, columns) in PARTS {
-        let found = read_rows(&db, part, columns, table_id)
-            .map_err(|e| format!("Couldn't read the table: {e}"))?;
-        rows.insert(part.to_string(), Value::Array(found));
-    }
+    let rows = table_rows(&db, table_id)?;
     if rows["tables"].as_array().is_none_or(Vec::is_empty) {
         return Err("That table isn't on this computer".into());
     }
@@ -545,6 +551,79 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
         library::put(data_dir, &file, &bytes).map_err(problem("Couldn't save a picture"))?;
     }
     Ok((id, name))
+}
+
+// How many copies of each table are kept; the oldest go first.
+const KEPT_COPIES: usize = 10;
+// How often the host looks for tables that changed since their last copy.
+const EVERY: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Where the host keeps its own copies of each table.
+pub fn copies_folder(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("backups")
+}
+
+/// Keeps a fresh copy of every table that changed since its last copy, in
+/// `backups/<table>/<date and time>.yukitable`, with the newest ten of each. Says which
+/// tables it copied.
+pub fn copy_changed(data_dir: &Path) -> Result<Vec<String>, String> {
+    use sha2::{Digest, Sha256};
+    let db = db::open(&data_dir.join("tables.db"))
+        .map_err(|e| format!("Couldn't open the tables: {e}"))?;
+    let ids: Vec<String> = db
+        .prepare("SELECT id FROM tables")
+        .and_then(|mut rows| rows.query_map([], |row| row.get(0))?.collect())
+        .map_err(|e| e.to_string())?;
+    let mut copied = Vec::new();
+    for id in ids {
+        if !safe_picture(&format!("{id}.map")) {
+            continue;
+        }
+        let folder = copies_folder(data_dir).join(&id);
+        // A table changed when its rows did: map edits don't move the table's own time.
+        let rows = table_rows(&db, &id)?;
+        let print = hex::encode(Sha256::digest(Value::Object(rows).to_string()));
+        let last = folder.join("last-copied");
+        if std::fs::read_to_string(&last).is_ok_and(|was| was == print) {
+            continue;
+        }
+        std::fs::create_dir_all(&folder).map_err(problem("Couldn't make the backups folder"))?;
+        let name = chrono::Local::now()
+            .format("%Y-%m-%d %H-%M-%S%.3f.yukitable")
+            .to_string();
+        export(data_dir, &id, &folder.join(name))?;
+        std::fs::write(&last, &print).map_err(problem("Couldn't note the backup"))?;
+        let mut kept: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)
+            .map_err(problem("Couldn't read the backups folder"))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "yukitable"))
+            .collect();
+        kept.sort();
+        for old in kept.iter().rev().skip(KEPT_COPIES) {
+            let _ = std::fs::remove_file(old);
+        }
+        copied.push(id);
+    }
+    Ok(copied)
+}
+
+/// Copies changed tables a minute after the host starts, then every twenty minutes.
+pub fn schedule(data_dir: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        loop {
+            let folder = data_dir.clone();
+            match tokio::task::spawn_blocking(move || copy_changed(&folder)).await {
+                Ok(Ok(copied)) if !copied.is_empty() => {
+                    tracing::info!("kept a fresh copy of {} table(s)", copied.len());
+                }
+                Ok(Err(error)) => tracing::warn!("couldn't keep copies of the tables: {error}"),
+                _ => {}
+            }
+            tokio::time::sleep(EVERY).await;
+        }
+    })
 }
 
 #[cfg(test)]
