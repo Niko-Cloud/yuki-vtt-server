@@ -262,3 +262,71 @@ async fn keeps_the_library_in_order() {
     let (status, _) = call(&app, As::Seat(&token), "PATCH", &path, Some(star)).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+async fn picture_site() -> u16 {
+    use axum::response::{IntoResponse, Redirect};
+    use axum::routing::get;
+    let site = Router::new()
+        .route("/ogre.png", get(|| async { PNG }))
+        .route("/moved", get(|| async { Redirect::temporary("/ogre.png") }))
+        .route(
+            "/inside",
+            get(|| async { Redirect::temporary("http://10.0.0.5/x") }),
+        )
+        .route("/loop", get(|| async { Redirect::temporary("/loop") }))
+        .route("/page", get(|| async { "<html>not a picture</html>" }))
+        .route(
+            "/huge",
+            get(|| async { vec![1u8; 13 * 1024 * 1024].into_response() }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, site).await.unwrap() });
+    port
+}
+
+#[tokio::test]
+async fn fetches_pictures_from_the_open_internet_only() {
+    use yuki_vtt_server::web_picture::{Rules, fetch};
+    let port = picture_site().await;
+    // The test's own site is on this computer, which the real rules turn away.
+    let here = Rules {
+        allowed: |ip| ip.is_loopback(),
+        ports: vec![None, Some(port)],
+    };
+    let at = |path: &str| format!("http://127.0.0.1:{port}{path}");
+    let message = |result: Result<(Vec<u8>, &str), yuki_vtt_server::error::AppError>| {
+        format!("{:?}", result.expect_err("a refusal"))
+    };
+
+    let (data, mime) = fetch(&at("/ogre.png"), &here).await.unwrap();
+    assert_eq!((data.as_slice(), mime), (PNG, "image/png"));
+    assert_eq!(fetch(&at("/moved"), &here).await.unwrap().1, "image/png");
+    assert!(message(fetch(&at("/inside"), &here).await).contains("open internet"));
+    assert!(message(fetch(&at("/loop"), &here).await).contains("too many times"));
+    assert!(message(fetch(&at("/page"), &here).await).contains("PNG"));
+    assert!(message(fetch(&at("/huge"), &here).await).contains("over 12 MB"));
+    assert!(message(fetch(&at("/gone"), &here).await).contains("answered 404"));
+
+    let real = Rules::default();
+    let local = fetch("http://127.0.0.1/ogre.png", &real).await;
+    assert!(message(local).contains("open internet"));
+    assert!(message(fetch("http://localhost/ogre.png", &real).await).contains("open internet"));
+    assert!(message(fetch("ftp://example.com/a.png", &real).await).contains("http or https"));
+    assert!(message(fetch("http://me:pw@example.com/a.png", &real).await).contains("password"));
+    assert!(message(fetch("http://example.com:6379/", &real).await).contains("usual port"));
+}
+
+#[tokio::test]
+async fn fetches_for_whoever_may_add_pictures() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let path = format!("/tables/{}/web-picture", t.id);
+    let inside = json!({ "url": "http://169.254.169.254/latest/meta-data" });
+    let (status, _) = call(&app, As::Seat(&token), "POST", &path, Some(inside.clone())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, refused) = call(&app, As::Dm, "POST", &path, Some(inside)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refused.to_string().contains("open internet"));
+}
