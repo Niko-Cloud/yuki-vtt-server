@@ -997,6 +997,7 @@ pub async fn remove(
         file
     };
     crate::pictures::forget_map(&state, file);
+    crate::served::forget(&state.config.data_dir, &scene);
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }

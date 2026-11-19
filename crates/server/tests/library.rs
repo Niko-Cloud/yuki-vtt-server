@@ -628,3 +628,52 @@ async fn opens_the_library_folder_on_the_hosting_computer_for_the_dm() {
     assert_eq!(asked[0], data.path().join("Library"));
     assert_eq!(asked[1], data.path().join("Library/Tokens/Ogre/ogre.png"));
 }
+
+#[tokio::test]
+async fn sends_players_a_small_clean_copy_of_a_picture_copied_in_by_hand() {
+    use yuki_vtt_server::library;
+    let data = tempfile::tempdir().unwrap();
+    let state = state_in(data.path());
+    let app = app(state.clone());
+    let t = table(&app).await;
+    // A big photo-like PNG with a note in it, as a phone or an editor leaves.
+    let picture = image::RgbaImage::from_fn(2400, 1600, |x, y| {
+        image::Rgba([(x / 10) as u8, (y / 7) as u8, 128, 255])
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(picture)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let text = b"tEXtLocation\x0051.5N 0.12W";
+    let mut chunk = (text.len() as u32 - 4).to_be_bytes().to_vec();
+    chunk.extend_from_slice(text);
+    chunk.extend_from_slice(&[0, 0, 0, 0]);
+    png.splice(33..33, chunk);
+    let folder = data.path().join("Library/Tokens/Wolf");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("wolf.png"), &png).unwrap();
+    library::rescan(&state);
+    let wolf = view(&app, As::Dm, &t).await["assets"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (_, given) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/media-token", t.id),
+        None,
+    )
+    .await;
+    let pass = given["pass"].as_str().unwrap();
+    let (status, kind, size) =
+        fetch(&app, &format!("/tables/{}/assets/{wolf}?pass={pass}", t.id)).await;
+    assert_eq!((status, kind.as_str()), (StatusCode::OK, "image/webp"));
+    assert!(size * 5 < png.len(), "{size} against {}", png.len());
+    assert_eq!(
+        std::fs::read(folder.join("wolf.png")).unwrap(),
+        png,
+        "the DM's file stays"
+    );
+}

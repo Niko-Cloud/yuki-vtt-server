@@ -274,6 +274,30 @@ fn send(path: PathBuf, mime: &str) -> Result<Response> {
         .into_response())
 }
 
+// What players get of a still: a small, clean copy where the DM's own file isn't one. Making
+// the copy the first time takes a moment, so it runs beside the requests, not in their way.
+async fn send_served(
+    state: &AppState,
+    id: String,
+    path: PathBuf,
+    kind: &str,
+    mime: String,
+) -> Result<Response> {
+    let data_dir = state.config.data_dir.clone();
+    let kind = kind.to_string();
+    let (path, mime) = tokio::task::spawn_blocking(move || {
+        crate::served::served(&data_dir, &id, &path, &kind, &mime)
+    })
+    .await
+    .map_err(|_| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The picture couldn't be read",
+        )
+    })?;
+    send(path, &mime)
+}
+
 /// A map was deleted: its picture goes too.
 pub fn forget_map(state: &AppState, file: Option<String>) {
     if let Some(file) = file {
@@ -362,6 +386,7 @@ pub async fn set_map(
         if let Some(old) = had.filter(|old| *old != file) {
             library::drop_file(data_dir, &old);
         }
+        crate::served::forget(data_dir, &scene);
         db.execute(
             "UPDATE scenes SET file = ?3 WHERE table_id = ?1 AND id = ?2",
             params![id, scene, file],
@@ -395,7 +420,7 @@ pub async fn map(
     let path = file
         .and_then(|file| library::resolve(&state.config.data_dir, &file))
         .ok_or_else(|| AppError::not_found("This map has no picture"))?;
-    send(path, &picture.mime)
+    send_served(&state, scene, path, "map", picture.mime).await
 }
 
 #[derive(Deserialize)]
@@ -543,17 +568,23 @@ pub async fn picture(
     Query(seen): Query<Seen>,
 ) -> Result<Response> {
     access::at_table(&state, &id, &Credentials::from(&headers, seen.pass))?;
-    let (mime, path) = {
+    let (kind, mime, path) = {
         let db = state.db();
-        let mime: String = db
-            .query_row("SELECT mime FROM assets WHERE id = ?1", [&asset], |row| {
-                row.get(0)
-            })
+        let (kind, mime): (String, String) = db
+            .query_row(
+                "SELECT kind, mime FROM assets WHERE id = ?1",
+                [&asset],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .optional()?
             .ok_or_else(|| AppError::not_found("That picture is gone"))?;
-        (mime, library_path(&db, &state.config.data_dir, &asset)?)
+        (
+            kind,
+            mime,
+            library_path(&db, &state.config.data_dir, &asset)?,
+        )
     };
-    send(path, &mime)
+    send_served(&state, asset, path, &kind, mime).await
 }
 
 /// Takes a deleted picture off every map, handout, track and background, and says which tables
@@ -739,6 +770,7 @@ pub async fn remove(
         if let Some(file) = file {
             library::drop_file(&state.config.data_dir, &file);
         }
+        crate::served::forget(&state.config.data_dir, &asset);
         forget_everywhere(&db, &asset)?
     };
     for table in &tables {

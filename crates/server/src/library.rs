@@ -312,16 +312,17 @@ struct Found {
     size: i64,
 }
 
+// A still on the DM's own disk may be big: players get a small copy of it (`served.rs`).
+const HAND_STILL_LIMIT: usize = 40 * 1024 * 1024;
+
 fn read_found(data_dir: &Path, kind: &'static str, path: &Path) -> Result<Found, String> {
-    use crate::pictures::{
-        AUDIO_LIMIT, LIBRARY_LIMIT, VIDEO_LIBRARY_LIMIT, audio_type, picture_type,
-    };
+    use crate::pictures::{AUDIO_LIMIT, VIDEO_LIBRARY_LIMIT, audio_type, picture_type};
     let kind_root = root(data_dir).join(kind_folder(kind));
     let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     let limit = if kind == "audio" {
         AUDIO_LIMIT
     } else {
-        VIDEO_LIBRARY_LIMIT
+        HAND_STILL_LIMIT
     };
     if size as usize > limit {
         return Err(format!("over {} MB", limit / (1024 * 1024)));
@@ -330,7 +331,7 @@ fn read_found(data_dir: &Path, kind: &'static str, path: &Path) -> Result<Found,
     let mime = if kind == "audio" {
         audio_type(&data, AUDIO_LIMIT)
     } else {
-        picture_type(&data, LIBRARY_LIMIT, VIDEO_LIBRARY_LIMIT)
+        picture_type(&data, HAND_STILL_LIMIT, VIDEO_LIBRARY_LIMIT)
     }
     .map_err(|e| e.message)?;
     let (width, height) = if kind == "audio" {
@@ -499,6 +500,7 @@ pub fn rescan(state: &crate::state::AppState) -> Scan {
             }
         };
         for id in &report.removed {
+            crate::served::forget(&data_dir, id);
             if let Err(error) = crate::pictures::forget_everywhere(&db, id) {
                 tracing::error!("taking a deleted picture off the maps: {}", error.message);
             }
