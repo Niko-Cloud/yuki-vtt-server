@@ -155,7 +155,7 @@ pub fn apply(from: &Value, delta: Option<&Value>) -> Value {
 }
 
 // A few recent copies per viewer; a screen whose copy is gone gets the whole table.
-const KEPT_PER_VIEWER: usize = 3;
+const KEPT_PER_VIEWER: usize = 2;
 const MOST_VIEWERS: usize = 300;
 // A delta nearly as big as the table isn't worth it: the whole table goes instead.
 const WORTH_IT: f64 = 0.6;
