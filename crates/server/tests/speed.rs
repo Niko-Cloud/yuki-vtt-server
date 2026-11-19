@@ -145,3 +145,59 @@ async fn sends_the_newest_30_log_entries_and_older_ones_a_page_at_a_time() {
     let (status, _) = call(&app, As::Dm, "GET", &format!("/tables/{}/log", t.id), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn answers_a_screen_that_has_the_table_with_only_what_changed() {
+    use yuki_vtt_server::delta::apply;
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(serde_json::json!({ "name": "Cave" })),
+    )
+    .await;
+    let scene = made["id"].as_str().unwrap();
+    let ogre = serde_json::json!({ "name": "Ogre", "x": 2, "y": 2 });
+    let tokens = format!("/tables/{}/scenes/{scene}/tokens", t.id);
+    call(&app, As::Dm, "POST", &tokens, Some(ogre)).await;
+    let path = format!("/tables/{}", t.id);
+    let (_, mut had) = call(&app, As::Dm, "GET", &path, None).await;
+    let version = had["version"].as_str().unwrap().to_string();
+    assert_eq!(version.len(), 16);
+    had.as_object_mut().unwrap().remove("version");
+
+    let moved = format!(
+        "{tokens}/{}",
+        had["scene"]["tokens"][0]["id"].as_str().unwrap()
+    );
+    let x = serde_json::json!({ "x": 5 });
+    call(&app, As::Dm, "PATCH", &moved, Some(x)).await;
+    let (_, changed) = call(&app, As::Dm, "GET", &format!("{path}?base={version}"), None).await;
+    assert_eq!(changed.get("party"), None);
+    assert_eq!(changed["base"], version.as_str());
+    assert!(changed["delta"].to_string().len() * 5 < had.to_string().len());
+    let (_, mut whole) = call(&app, As::Dm, "GET", &path, None).await;
+    assert_eq!(changed["version"], whole["version"]);
+    let now = whole["version"].as_str().unwrap().to_string();
+    whole.as_object_mut().unwrap().remove("version");
+    assert_eq!(apply(&had, changed.get("delta")), whole);
+
+    // Nothing new: just the version. An unknown one, or another viewer's, gets the whole table.
+    let (_, same) = call(&app, As::Dm, "GET", &format!("{path}?base={now}"), None).await;
+    assert_eq!(same, serde_json::json!({ "version": now, "base": now }));
+    let (_, unknown) = call(&app, As::Dm, "GET", &format!("{path}?base=nope"), None).await;
+    assert!(unknown.get("party").is_some());
+    let (_, theirs) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("{path}?base={now}"),
+        None,
+    )
+    .await;
+    assert_eq!(theirs["you"]["role"], "player");
+}

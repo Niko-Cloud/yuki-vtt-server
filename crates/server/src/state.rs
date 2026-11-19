@@ -1,5 +1,6 @@
 //! What every request can reach: the database, the host's settings and the live channels.
 
+use crate::delta::ViewVersions;
 use crate::events::Events;
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -24,6 +25,8 @@ pub struct AppState {
     db: Arc<Mutex<Connection>>,
     pub config: Arc<Config>,
     pub events: Events,
+    /// Recent copies of the table per viewer, so a screen gets only what changed.
+    pub versions: ViewVersions,
 }
 
 impl AppState {
@@ -32,6 +35,7 @@ impl AppState {
             db: Arc::new(Mutex::new(connection)),
             config: Arc::new(config),
             events: Events::default(),
+            versions: ViewVersions::default(),
         }
     }
 

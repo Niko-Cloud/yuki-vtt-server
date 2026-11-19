@@ -68,6 +68,8 @@ fn seats(db: &Connection, table_id: &str) -> Result<Vec<Seat>> {
 pub struct ViewQuery {
     // The map the DM is looking at; players always see the one the DM shows.
     scene: Option<String>,
+    // The version of the table this screen already has: then only what changed comes back.
+    base: Option<String>,
 }
 
 /// `GET /api/tables/{id}`: the table as this person sees it.
@@ -120,7 +122,7 @@ pub async fn view(
     )?;
     let seated = seats(&db, &id)?;
     let looking = if access.runs() {
-        query.scene.or(active_scene.clone())
+        query.scene.clone().or(active_scene.clone())
     } else {
         active_scene.clone()
     };
@@ -154,7 +156,7 @@ pub async fn view(
         vec![]
     };
     let (log, log_more) = log_page(&db, &id, &access, None, LOG_SHOWN)?;
-    Ok(Json(json!({
+    let view = json!({
         "party": { "id": id, "name": name, "edition": edition, "sharedSight": crate::fog::shared_sight(&db, &id)? },
         "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "screen": access.screen, "characters": characters },
         // Player characters' health is everyone's to see, as at a real table.
@@ -186,7 +188,23 @@ pub async fn view(
         "logMore": log_more,
         // Waiting to join: for whoever runs the table, to let in from the map room.
         "requests": if access.runs() { crate::requests::waiting(&db, &id)? } else { vec![] },
-    })))
+    });
+    // Who the copy is for: what they may see decides what they get.
+    let mut seats = access.seat_ids.clone();
+    seats.sort();
+    let viewer = format!(
+        "{id}|{:?}|{}|{}|{}",
+        access.role,
+        seats.join(","),
+        access.screen,
+        query.scene.as_deref().unwrap_or("")
+    );
+    drop(db);
+    Ok(Json(state.versions.answer(
+        &viewer,
+        query.base.as_deref(),
+        view,
+    )))
 }
 
 // A page of the entries this person may see, oldest first, ending just before `before` (or at

@@ -6,6 +6,7 @@ pub mod areas;
 pub mod backup;
 pub mod cloudflared;
 pub mod db;
+pub mod delta;
 pub mod error;
 pub mod events;
 pub mod fog;
