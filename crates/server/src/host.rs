@@ -29,6 +29,8 @@ pub struct Running {
     stop: Option<oneshot::Sender<()>>,
     server: JoinHandle<()>,
     helpers: Vec<JoinHandle<()>>,
+    // The computer stays awake while this is held: until the host stops.
+    _awake: crate::awake::Awake,
 }
 
 /// The DM's key, made on the first start and kept; the website gets it when pairing.
@@ -131,6 +133,7 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
         stop: Some(stop),
         server,
         helpers,
+        _awake: crate::awake::keep_awake(),
     })
 }
 

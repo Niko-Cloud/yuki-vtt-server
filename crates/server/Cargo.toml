@@ -30,6 +30,9 @@ opener = { version = "0.8", features = ["reveal"] }
 tar = "0.4"
 webp = "0.3"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
