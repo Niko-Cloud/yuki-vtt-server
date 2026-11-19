@@ -434,6 +434,56 @@ pub fn scan(db: &Connection, data_dir: &Path) -> rusqlite::Result<Scan> {
     Ok(report)
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Open {
+    asset_id: Option<String>,
+}
+
+/// `POST /api/tables/{id}/library/open`: opens the library folder, or shows one picture in it,
+/// on the hosting computer's own screen. Only the DM, who sits at that computer.
+pub async fn open(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(_id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> crate::error::Result<axum::http::StatusCode> {
+    use crate::error::AppError;
+    crate::access::owner(&state, &crate::access::Credentials::from(&headers, None))?;
+    // No body opens the whole library; `{ assetId }` shows that picture.
+    let asked: Open = if body.is_empty() {
+        Open::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|_| AppError::bad("Say which picture to show"))?
+    };
+    let data_dir = &state.config.data_dir;
+    let path = match asked.asset_id {
+        Some(asset) => {
+            let file: Option<String> = state
+                .db()
+                .query_row("SELECT file FROM assets WHERE id = ?1", [&asset], |row| {
+                    row.get(0)
+                })
+                .optional()?
+                .flatten();
+            file.and_then(|file| resolve(data_dir, &file))
+                .ok_or_else(|| AppError::not_found("That picture is gone"))?
+        }
+        None => {
+            let library = root(data_dir);
+            std::fs::create_dir_all(&library).ok();
+            library
+        }
+    };
+    (state.show_on_screen)(&path).map_err(|error| {
+        AppError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("This computer couldn't open the folder: {error}"),
+        )
+    })?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// Scans the folder and brings every table in line: pictures deleted by hand come off the
 /// maps, and every screen hears the library changed. Files it couldn't take are kept for the
 /// app to show.

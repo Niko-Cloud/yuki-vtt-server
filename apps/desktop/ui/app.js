@@ -91,6 +91,13 @@ function draw(status) {
   );
   $('no-tables').hidden = status.tables.length > 0;
 
+  const skipped = status.librarySkipped;
+  $('library-skipped').hidden = skipped.length === 0;
+  $('library-skipped').textContent =
+    skipped.length === 1
+      ? `One file in the picture library couldn't be added: ${skipped[0]}`
+      : `${skipped.length} files in the picture library couldn't be added: ${skipped.join('; ')}`;
+
   $('start-on-open').checked = status.startOnOpen;
   $('tray-note').textContent = status.hasTray
     ? 'Closing this window keeps the app in the tray. Quit from the tray menu.'
@@ -156,6 +163,7 @@ $('start-on-open').addEventListener('change', (event) =>
   run('set_start_on_open', { on: event.target.checked }),
 );
 $('folder').addEventListener('click', () => run('open_data_folder'));
+$('library').addEventListener('click', () => run('open_library_folder'));
 
 $('pair-website').value = localStorage.getItem('website') ?? '';
 refresh();

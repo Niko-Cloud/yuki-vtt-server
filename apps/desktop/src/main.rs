@@ -65,6 +65,8 @@ struct Status {
     requests: Vec<serde_json::Value>,
     tables: Vec<TableCard>,
     data_folder: String,
+    /// Files in the picture library folder the host couldn't take, with why.
+    library_skipped: Vec<String>,
     start_on_open: bool,
     has_tray: bool,
     version: &'static str,
@@ -114,6 +116,10 @@ async fn status(shared: State<'_, Shared>) -> Result<Status, String> {
         requests: running.as_ref().map(waiting).unwrap_or_default(),
         tables: host::tables(&shared.data).unwrap_or_default(),
         data_folder: shared.data.display().to_string(),
+        library_skipped: running
+            .as_ref()
+            .map(|r| r.state.skipped.lock().unwrap_or_else(|p| p.into_inner()).clone())
+            .unwrap_or_default(),
         start_on_open: start_on_open(&shared),
         has_tray: shared
             .tray
@@ -453,6 +459,17 @@ fn set_start_on_open(shared: State<'_, Shared>, on: bool) -> Result<(), String> 
     .map_err(|error| format!("Couldn't keep that choice: {error}"))
 }
 
+/// The picture library, as folders: Tokens, Props, Handouts, Music and Maps.
+#[tauri::command]
+fn open_library_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
+    let library = yuki_vtt_server::library::root(&shared.data);
+    std::fs::create_dir_all(&library)
+        .map_err(|error| format!("Couldn't make the picture library folder: {error}"))?;
+    app.opener()
+        .open_path(library.display().to_string(), None::<&str>)
+        .map_err(|error| format!("Couldn't open the folder: {error}"))
+}
+
 #[tauri::command]
 fn open_data_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
     app.opener()
@@ -644,6 +661,7 @@ fn main() {
             unpair,
             set_start_on_open,
             open_data_folder,
+            open_library_folder,
             answer_link,
             answer_request,
             backup_table,

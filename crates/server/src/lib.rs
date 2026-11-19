@@ -139,6 +139,7 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/assets", post(pictures::add).layer(DefaultBodyLimit::max(pictures::VIDEO_LIBRARY_LIMIT.max(pictures::AUDIO_LIMIT) + 1024)))
         .route("/tables/{id}/assets/{asset}", get(pictures::picture).patch(pictures::change).delete(pictures::remove))
         .route("/tables/{id}/web-picture", post(web_picture::web_picture))
+        .route("/tables/{id}/library/open", post(library::open))
         .route("/tables/{id}/handout", axum::routing::put(pictures::show).delete(pictures::hide))
         .route("/tables/{id}/music", axum::routing::put(pictures::play_music).delete(pictures::stop_music))
         .route("/tables/{id}/background", axum::routing::put(pictures::set_background).delete(pictures::clear_background))

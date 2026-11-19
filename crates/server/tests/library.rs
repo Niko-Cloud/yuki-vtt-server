@@ -580,3 +580,51 @@ async fn notices_a_picture_copied_in_while_the_host_runs() {
     watcher.abort();
     assert_eq!(seen, [("Cart".into(), "prop".into())]);
 }
+
+#[tokio::test]
+async fn opens_the_library_folder_on_the_hosting_computer_for_the_dm() {
+    let data = tempfile::tempdir().unwrap();
+    let mut state = state_in(data.path());
+    let asked: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> = Default::default();
+    let noted = asked.clone();
+    state.show_on_screen = std::sync::Arc::new(move |path: &std::path::Path| {
+        noted.lock().unwrap().push(path.to_path_buf());
+        Ok(())
+    });
+    let app = app(state);
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let ogre = add(&app, &t, "token").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = format!("/tables/{}/library/open", t.id);
+
+    let (status, _) = call(&app, As::Dm, "POST", &path, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "assetId": ogre })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, As::Seat(&token), "POST", &path, None).await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "assetId": "gone" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(asked[0], data.path().join("Library"));
+    assert_eq!(asked[1], data.path().join("Library/Tokens/Ogre/ogre.png"));
+}
