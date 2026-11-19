@@ -27,6 +27,8 @@ pub struct AppState {
     pub events: Events,
     /// Recent copies of the table per viewer, so a screen gets only what changed.
     pub versions: ViewVersions,
+    /// Files in the library folder the last scan couldn't take, with why, for the app to show.
+    pub skipped: Arc<Mutex<Vec<String>>>,
 }
 
 impl AppState {
@@ -36,6 +38,7 @@ impl AppState {
             config: Arc::new(config),
             events: Events::default(),
             versions: ViewVersions::default(),
+            skipped: Arc::default(),
         }
     }
 

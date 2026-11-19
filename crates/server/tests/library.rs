@@ -448,3 +448,135 @@ async fn pass_for(app: &Router, table: &str) -> String {
     .await;
     given["pass"].as_str().unwrap().to_string()
 }
+
+// A real (1 by 1) PNG: the scan reads a picture's size from it.
+const REAL_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+fn state_in(data: &std::path::Path) -> AppState {
+    let config = Config {
+        owner_key_hash: ids::hash(KEY),
+        website_secret: Some(SECRET.to_vec()),
+        allowed_origins: vec![SITE.into()],
+        data_dir: data.to_path_buf(),
+    };
+    AppState::new(db::open(&data.join("tables.db")).unwrap(), config)
+}
+
+fn named(library: &Value) -> Vec<(String, String)> {
+    library
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["name"].as_str().unwrap().to_string(),
+                a["kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn follows_what_the_dm_changes_in_the_folder_by_hand() {
+    use yuki_vtt_server::library;
+    let data = tempfile::tempdir().unwrap();
+    let state = state_in(data.path());
+    let app = app(state.clone());
+    let t = table(&app).await;
+    let tokens = data.path().join("Library/Tokens");
+    std::fs::create_dir_all(tokens.join("Wolf")).unwrap();
+    std::fs::write(tokens.join("Wolf/wolf.png"), REAL_PNG).unwrap();
+    std::fs::write(tokens.join("bat.png"), REAL_PNG).unwrap();
+    std::fs::create_dir_all(tokens.join("Broken")).unwrap();
+    std::fs::write(tokens.join("Broken/broken.png"), b"not a picture").unwrap();
+    std::fs::write(tokens.join("Wolf/notes.txt"), "bites").unwrap();
+
+    let report = library::rescan(&state);
+    assert_eq!(report.added.len(), 2);
+    assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
+    assert!(report.skipped[0].starts_with("Tokens/Broken/broken.png"));
+    let shown = view(&app, As::Dm, &t).await;
+    let mut found = named(&shown["assets"]);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("Wolf".into(), "token".into()),
+            ("bat".into(), "token".into())
+        ]
+    );
+    let wolf = shown["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "Wolf")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(shown["assets"][0]["width"], 1);
+
+    // Put on a map, then renamed by hand: the same picture, so the map keeps it.
+    let scene = cave(&app, &t).await;
+    let token = json!({ "name": "Wolf", "x": 1, "y": 1, "imageId": wolf });
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes/{scene}/tokens", t.id),
+        Some(token),
+    )
+    .await;
+    std::fs::rename(tokens.join("Wolf"), tokens.join("Dire Wolf")).unwrap();
+    let report = library::rescan(&state);
+    assert_eq!(report.renamed, ["Dire Wolf"]);
+    let shown = view(&app, As::Dm, &t).await;
+    let kept = shown["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == wolf.as_str());
+    assert_eq!(kept.unwrap()["name"], "Dire Wolf");
+    assert_eq!(shown["scene"]["tokens"][0]["imageId"], wolf.as_str());
+
+    // Deleted by hand: gone from the library, and the token shows its initials again.
+    std::fs::remove_dir_all(tokens.join("Dire Wolf")).unwrap();
+    let report = library::rescan(&state);
+    assert_eq!(report.removed, [wolf]);
+    let shown = view(&app, As::Dm, &t).await;
+    assert_eq!(named(&shown["assets"]), [("bat".into(), "token".into())]);
+    assert_eq!(shown["scene"]["tokens"][0].get("imageId"), None);
+
+    // Scanning again with nothing new changes nothing.
+    assert!(!library::rescan(&state).changed());
+}
+
+#[tokio::test]
+async fn notices_a_picture_copied_in_while_the_host_runs() {
+    use yuki_vtt_server::library;
+    let data = tempfile::tempdir().unwrap();
+    let state = state_in(data.path());
+    let app = app(state.clone());
+    let t = table(&app).await;
+    let watcher = library::watch(state.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let props = data.path().join("Library/Props/Cart");
+    std::fs::create_dir_all(&props).unwrap();
+    std::fs::write(props.join("cart.png"), REAL_PNG).unwrap();
+    let mut seen = vec![];
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        seen = named(&view(&app, As::Dm, &t).await["assets"]);
+        if !seen.is_empty() {
+            break;
+        }
+    }
+    watcher.abort();
+    assert_eq!(seen, [("Cart".into(), "prop".into())]);
+}

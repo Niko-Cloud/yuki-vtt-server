@@ -87,7 +87,9 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
         })?;
     tracing::info!("hosting on http://{address}");
 
-    let mut helpers = Vec::new();
+    // Pictures the DM copied in, renamed or deleted while the host was off count from now on.
+    crate::library::rescan(&state);
+    let mut helpers = vec![crate::library::watch(state.clone())];
     let tunnel_address = if options.tunnel {
         let program =
             tunnel::find(&options.data).ok_or("The tunnel needs the cloudflared program")?;

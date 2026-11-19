@@ -1,7 +1,11 @@
 //! The picture library as a folder the DM can open, as in Foundry: `Library/Tokens/Goblin/
 //! goblin.png`, `Library/Props/Chest/chest.png`, `Library/Maps/Goblin cave/map.png`. Each
-//! picture keeps its place in the database (`file`, a path inside `Library`).
+//! picture keeps its place in the database (`file`, a path inside `Library`), and the DM may
+//! change the folder by hand: a scan (at start, and while the host runs) adds what was copied
+//! in, follows a renamed folder and drops what was deleted.
 
+use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 pub const LIBRARY: &str = "Library";
@@ -243,6 +247,277 @@ fn junk(name: &str) -> bool {
         || lower.ends_with(".tmp")
         || lower.ends_with('~')
         || matches!(lower.as_str(), "thumbs.db" | "desktop.ini")
+}
+
+// Every file under a kind's folder, two folders deep at most.
+fn files_under(folder: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if junk(&name) {
+            continue;
+        }
+        if path.is_dir() && depth > 0 {
+            files_under(&path, depth - 1, found);
+        } else if path.is_file() {
+            found.push(path);
+        }
+    }
+}
+
+/// What a scan found: pictures added, renamed or gone, and files it couldn't take, with why.
+#[derive(Debug, Default, PartialEq)]
+pub struct Scan {
+    pub added: Vec<String>,
+    pub renamed: Vec<String>,
+    pub removed: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+impl Scan {
+    pub fn changed(&self) -> bool {
+        !(self.added.is_empty() && self.renamed.is_empty() && self.removed.is_empty())
+    }
+}
+
+// The name a file found by hand goes by: its own folder's name, or the file's when it sits
+// straight in the kind's folder or shares a folder with others.
+fn found_name(kind_root: &Path, path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let Some(folder) = path.parent() else {
+        return stem;
+    };
+    let alone = media_in(folder) == 1;
+    if folder != kind_root && alone {
+        folder
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or(stem)
+    } else {
+        stem
+    }
+}
+
+/// A picture found in the folder, read and checked like an upload.
+struct Found {
+    kind: &'static str,
+    file: String,
+    name: String,
+    mime: &'static str,
+    width: i64,
+    height: i64,
+    size: i64,
+}
+
+fn read_found(data_dir: &Path, kind: &'static str, path: &Path) -> Result<Found, String> {
+    use crate::pictures::{
+        AUDIO_LIMIT, LIBRARY_LIMIT, VIDEO_LIBRARY_LIMIT, audio_type, picture_type,
+    };
+    let kind_root = root(data_dir).join(kind_folder(kind));
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let limit = if kind == "audio" {
+        AUDIO_LIMIT
+    } else {
+        VIDEO_LIBRARY_LIMIT
+    };
+    if size as usize > limit {
+        return Err(format!("over {} MB", limit / (1024 * 1024)));
+    }
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mime = if kind == "audio" {
+        audio_type(&data, AUDIO_LIMIT)
+    } else {
+        picture_type(&data, LIBRARY_LIMIT, VIDEO_LIBRARY_LIMIT)
+    }
+    .map_err(|e| e.message)?;
+    let (width, height) = if kind == "audio" {
+        (0, 0)
+    } else {
+        match imagesize::blob_size(&data) {
+            Ok(dim) => (dim.width as i64, dim.height as i64),
+            // A clip's size isn't in its first bytes; the map shows it square until resized.
+            Err(_) if mime.starts_with("video/") => (512, 512),
+            Err(_) => return Err("not a picture this host can read".into()),
+        }
+    };
+    let inside = path
+        .strip_prefix(root(data_dir))
+        .map_err(|_| "outside the library".to_string())?;
+    Ok(Found {
+        kind,
+        file: relative(inside),
+        name: found_name(&kind_root, path)
+            .chars()
+            .take(60)
+            .collect::<String>(),
+        mime,
+        width,
+        height,
+        size: size as i64,
+    })
+}
+
+/// Brings the database in line with the folder. Run with the database held, so the app's own
+/// writes (which hold it too) are never half seen. Returns what changed; the caller takes
+/// removed pictures off the maps.
+pub fn scan(db: &Connection, data_dir: &Path) -> rusqlite::Result<Scan> {
+    let mut report = Scan::default();
+    let mut rows = db.prepare("SELECT id, kind, file, size FROM assets WHERE file IS NOT NULL")?;
+    let known: Vec<(String, String, String, i64)> = rows
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let known_files: HashSet<String> = known.iter().map(|k| k.2.to_lowercase()).collect();
+    let mut missing: Vec<&(String, String, String, i64)> = known
+        .iter()
+        .filter(|(_, _, file, _)| resolve(data_dir, file).is_none_or(|p| !p.is_file()))
+        .collect();
+
+    for (kind, folder) in KINDS {
+        let mut paths = Vec::new();
+        files_under(&root(data_dir).join(folder), 2, &mut paths);
+        for path in paths {
+            let Ok(inside) = path.strip_prefix(root(data_dir)) else {
+                continue;
+            };
+            if !is_media(&path) || known_files.contains(&relative(inside).to_lowercase()) {
+                continue;
+            }
+            let found = match read_found(data_dir, kind, &path) {
+                Ok(found) => found,
+                Err(why) => {
+                    report.skipped.push(format!("{}: {why}", relative(inside)));
+                    continue;
+                }
+            };
+            // A picture that went missing just as one of the same kind and size appeared was
+            // moved or renamed by hand: it keeps its id, so the maps keep it.
+            let moved = missing.iter().position(|(_, k, file, size)| {
+                k == kind
+                    && *size == found.size
+                    && Path::new(file).extension() == Path::new(&found.file).extension()
+            });
+            if let Some(at) = moved {
+                let (id, ..) = missing.remove(at);
+                db.execute(
+                    "UPDATE assets SET file = ?2, name = ?3 WHERE id = ?1",
+                    params![id, found.file, found.name],
+                )?;
+                report.renamed.push(found.name);
+                continue;
+            }
+            let id = crate::ids::id();
+            db.execute(
+                "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at, size, file)
+                 VALUES (?1, '', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![id, found.kind, found.name, found.mime, found.width, found.height, crate::ids::now(), found.size, found.file],
+            )?;
+            report.added.push(found.name);
+        }
+    }
+    for (id, ..) in missing {
+        let name: Option<String> = db
+            .query_row("SELECT name FROM assets WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        db.execute("DELETE FROM assets WHERE id = ?1", [id])?;
+        report.removed.push(id.clone());
+        if let Some(name) = name {
+            tracing::info!("{name} was deleted from the picture library folder");
+        }
+    }
+    Ok(report)
+}
+
+/// Scans the folder and brings every table in line: pictures deleted by hand come off the
+/// maps, and every screen hears the library changed. Files it couldn't take are kept for the
+/// app to show.
+pub fn rescan(state: &crate::state::AppState) -> Scan {
+    let data_dir = state.config.data_dir.clone();
+    let (report, tables) = {
+        let db = state.db();
+        let report = match scan(&db, &data_dir) {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::error!("scanning the picture library: {error}");
+                return Scan::default();
+            }
+        };
+        for id in &report.removed {
+            if let Err(error) = crate::pictures::forget_everywhere(&db, id) {
+                tracing::error!("taking a deleted picture off the maps: {}", error.message);
+            }
+        }
+        // The library is every table's, so every screen hears it changed.
+        let tables: Vec<String> = if report.changed() {
+            db.prepare("SELECT id FROM tables")
+                .and_then(|mut rows| {
+                    rows.query_map([], |row| row.get(0))?
+                        .collect::<rusqlite::Result<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        (report, tables)
+    };
+    *state.skipped.lock().unwrap_or_else(|p| p.into_inner()) = report.skipped.clone();
+    if report.changed() {
+        tracing::info!(
+            "picture library: {} added, {} renamed, {} removed by hand",
+            report.added.len(),
+            report.renamed.len(),
+            report.removed.len()
+        );
+        for table in &tables {
+            state.events.changed(table);
+        }
+    }
+    report
+}
+
+// How long the folder must stay quiet before a scan: copying many files sends many events.
+const QUIET: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// Watches the library folder while the host runs, and scans once it goes quiet after a change.
+pub fn watch(state: crate::state::AppState) -> tokio::task::JoinHandle<()> {
+    use notify::{RecursiveMode, Watcher};
+    let library = root(&state.config.data_dir);
+    for (_, folder) in KINDS {
+        let _ = std::fs::create_dir_all(library.join(folder));
+    }
+    let (sender, mut changes) = tokio::sync::mpsc::unbounded_channel();
+    let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if event.is_ok() {
+            let _ = sender.send(());
+        }
+    });
+    tokio::spawn(async move {
+        let mut watcher = match watcher {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                tracing::warn!("can't watch the picture library folder: {error}");
+                return;
+            }
+        };
+        if let Err(error) = watcher.watch(&library, RecursiveMode::Recursive) {
+            tracing::warn!("can't watch the picture library folder: {error}");
+            return;
+        }
+        while changes.recv().await.is_some() {
+            while tokio::time::timeout(QUIET, changes.recv())
+                .await
+                .is_ok_and(|c| c.is_some())
+            {}
+            let state = state.clone();
+            let _ = tokio::task::spawn_blocking(move || rescan(&state)).await;
+        }
+    })
 }
 
 #[cfg(test)]
