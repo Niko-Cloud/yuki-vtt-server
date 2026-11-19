@@ -715,3 +715,25 @@ async fn sends_a_small_first_look_at_a_map() {
     let (_, _, whole) = fetch(&app, &format!("{at}?v=1&pass={pass}")).await;
     assert!(small * 4 < whole, "{small} against {whole}");
 }
+
+#[tokio::test]
+async fn tells_every_screen_to_fetch_a_maps_picture_before_it_is_shown() {
+    let data = tempfile::tempdir().unwrap();
+    let state = state_in(data.path());
+    let app = app(state.clone());
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let scene = cave(&app, &t).await;
+    let image = format!("/tables/{}/scenes/{scene}/image?width=700&height=700", t.id);
+    upload(&app, As::Dm, "PUT", &image, PNG).await;
+    let mut heard = state.events.listen(&t.id);
+    let at = format!("/tables/{}/scenes/{scene}/preload", t.id);
+    let (status, _) = call(&app, As::Seat(&token), "POST", &at, None).await;
+    assert!(status.is_client_error());
+    let (status, _) = call(&app, As::Dm, "POST", &at, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let message: Value = serde_json::from_str(&heard.recv().await.unwrap()).unwrap();
+    assert_eq!(message["type"], "preload");
+    assert_eq!(message["preload"]["sceneId"], scene.as_str());
+    assert_eq!(message["preload"]["mime"], "image/png");
+}

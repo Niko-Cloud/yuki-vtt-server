@@ -51,6 +51,13 @@ impl Events {
             .send(json!({ "type": "ping", "ping": ping }).to_string());
     }
 
+    /// A map's picture for screens to fetch now, so it is there the moment the DM shows it.
+    pub fn preload(&self, table_id: &str, preload: Value) {
+        let _ = self
+            .channel(table_id)
+            .send(json!({ "type": "preload", "preload": preload }).to_string());
+    }
+
     /// A ruler or pointer trail on the map, as it goes, not kept.
     pub fn mark(&self, table_id: &str, mark: Value) {
         let _ = self

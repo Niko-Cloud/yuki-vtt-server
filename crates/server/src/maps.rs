@@ -1046,6 +1046,22 @@ pub async fn copy(
     Ok(Json(made))
 }
 
+/// `POST /api/tables/{id}/scenes/{scene}/preload`: every screen fetches this map's picture now,
+/// before the DM shows it.
+pub async fn preload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    let image = load(&state.db(), &id, &scene)?.image;
+    if let Some(image) = image {
+        let preload = json!({ "sceneId": scene, "version": image.version, "mime": image.mime });
+        state.events.preload(&id, preload);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /api/tables/{id}/scenes/{scene}/show`: the map the players see from now on.
 pub async fn show(
     State(state): State<AppState>,
