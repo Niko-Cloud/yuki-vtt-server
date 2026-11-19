@@ -832,17 +832,9 @@ pub(crate) fn edit(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn picture_exists(db: &Connection, table_id: &str, asset_id: &str) -> Result<()> {
-    let found: i64 = db.query_row(
-        "SELECT COUNT(*) FROM assets WHERE table_id = ?1 AND id = ?2",
-        [table_id, asset_id],
-        |row| row.get(0),
-    )?;
-    if found == 0 {
-        Err(AppError::not_found("That picture is gone"))
-    } else {
-        Ok(())
-    }
+// Any picture in the host's library, whichever table it was uploaded at.
+fn picture_exists(db: &Connection, asset_id: &str) -> Result<()> {
+    crate::pictures::kind_of(db, asset_id).map(|_| ())
 }
 
 #[derive(Deserialize)]
@@ -1102,7 +1094,7 @@ pub async fn add_token(
         counter: None,
     };
     if let Some(image) = &token.image_id {
-        picture_exists(&state.db(), &id, image)?;
+        picture_exists(&state.db(), image)?;
     }
     edit(&state, &access, &id, &scene, |mut map| {
         if map.tokens.len() >= MOST_TOKENS {
@@ -1304,7 +1296,7 @@ pub async fn change_token(
         None => None,
         Some(Value::Null) => Some(None),
         Some(Value::String(image)) => {
-            picture_exists(&state.db(), &id, image)?;
+            picture_exists(&state.db(), image)?;
             Some(Some(image.clone()))
         }
         Some(_) => return Err(AppError::bad("A token's picture is a picture's id")),
@@ -1630,7 +1622,7 @@ pub async fn add_prop(
     allow(access.may("tokens"), "place pictures")?;
     cell(f64::from(body.x), f64::from(body.y))?;
     prop_size(body.w, body.h)?;
-    picture_exists(&state.db(), &id, &body.asset_id)?;
+    picture_exists(&state.db(), &body.asset_id)?;
     let locked = body.locked.filter(|l| *l && access.runs());
     edit(&state, &access, &id, &scene, |mut map| {
         if map.props.len() >= MOST_PROPS {
@@ -1678,7 +1670,7 @@ pub async fn change_prop(
         allow(access.runs(), "lock pictures")?;
     }
     if let Some(asset) = &body.asset_id {
-        picture_exists(&state.db(), &id, asset)?;
+        picture_exists(&state.db(), asset)?;
     }
     edit(&state, &access, &id, &scene, |mut map| {
         let at = map

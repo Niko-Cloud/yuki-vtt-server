@@ -65,6 +65,8 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
     }
     let connection = db::open(&options.data.join("tables.db"))
         .map_err(|error| format!("Couldn't open the tables: {error}"))?;
+    crate::pictures::gather_library(&options.data, &connection)
+        .map_err(|error| format!("Couldn't gather the picture library: {error}"))?;
     let state = AppState::new(
         connection,
         Config {

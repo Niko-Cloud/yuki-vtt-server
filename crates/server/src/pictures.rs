@@ -1,7 +1,8 @@
-//! Pictures: each map's own picture, and the table's library of token portraits, props for the
-//! map and handouts to show. They are kept as files in the data folder, one folder per table.
+//! Pictures: each map's own picture, and the host's library of token portraits, props for the
+//! map, handouts to show and music. They are kept as files in the data folder: map pictures in
+//! one folder per table, the library in one folder that every table shares.
 
-use crate::access::{self, Credentials};
+use crate::access::{self, Credentials, Role};
 use crate::error::{AppError, Result};
 use crate::ids;
 use crate::maps;
@@ -14,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path as FilePath, PathBuf};
 
 // Map pictures are big; token portraits and props are small.
 pub const MAP_LIMIT: usize = 8 * 1024 * 1024;
@@ -24,8 +25,8 @@ pub const VIDEO_MAP_LIMIT: usize = 25 * 1024 * 1024;
 pub const VIDEO_LIBRARY_LIMIT: usize = 10 * 1024 * 1024;
 // A music track, compressed in the browser before it goes up, may weigh as much as a clip.
 pub const AUDIO_LIMIT: usize = 10 * 1024 * 1024;
-// A table's library stays a library, not a photo album.
-const MOST_PICTURES: i64 = 200;
+// The host's library stays a library, not a photo album.
+const MOST_PICTURES: i64 = 1000;
 const KINDS: [&str; 4] = ["token", "prop", "handout", "audio"];
 
 /// The picture's type, told by its first bytes, not by what the upload claims to be.
@@ -111,8 +112,51 @@ fn map_file(state: &AppState, table_id: &str, scene_id: &str) -> Result<PathBuf>
     Ok(folder(state, safe(table_id)?).join(format!("{}.map", safe(scene_id)?)))
 }
 
-fn library_file(state: &AppState, table_id: &str, asset_id: &str) -> Result<PathBuf> {
-    Ok(folder(state, safe(table_id)?).join(format!("{}.pic", safe(asset_id)?)))
+pub fn library_folder(data_dir: &FilePath) -> PathBuf {
+    data_dir.join("library")
+}
+
+fn library_file(state: &AppState, asset_id: &str) -> Result<PathBuf> {
+    Ok(library_folder(&state.config.data_dir).join(format!("{}.pic", safe(asset_id)?)))
+}
+
+/// Moves library pictures kept beside their table, as older hosts did, into the shared
+/// library folder. Runs at start; a picture already moved is left alone.
+pub fn gather_library(data_dir: &FilePath, db: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let mut rows = db.prepare("SELECT id, table_id FROM assets")?;
+    let pictures = rows
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let library = library_folder(data_dir);
+    for (asset_id, table_id) in pictures {
+        let (Ok(asset_id), Ok(table_id)) = (safe(&asset_id), safe(&table_id)) else {
+            continue;
+        };
+        let old = data_dir
+            .join("pictures")
+            .join(table_id)
+            .join(format!("{asset_id}.pic"));
+        let new = library.join(format!("{asset_id}.pic"));
+        if old.exists()
+            && !new.exists()
+            && let Err(error) =
+                std::fs::create_dir_all(&library).and_then(|()| std::fs::rename(&old, &new))
+        {
+            tracing::error!("moving a picture into the library: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// The kind of a picture in the library, if it is there.
+pub fn kind_of(db: &rusqlite::Connection, asset_id: &str) -> Result<String> {
+    db.query_row("SELECT kind FROM assets WHERE id = ?1", [asset_id], |row| {
+        row.get(0)
+    })
+    .optional()?
+    .ok_or_else(|| AppError::not_found("That picture is gone"))
 }
 
 // Written whole or not at all: a new name first, then moved into place.
@@ -154,7 +198,7 @@ pub fn forget_map(state: &AppState, table_id: &str, scene_id: &str) {
     }
 }
 
-/// A table was deleted: all its pictures go.
+/// A table was deleted: its map pictures go. The library keeps what was uploaded there.
 pub fn forget_table(state: &AppState, table_id: &str) {
     if safe(table_id).is_ok() {
         let _ = std::fs::remove_dir_all(folder(state, table_id));
@@ -218,8 +262,9 @@ pub struct Upload {
     height: f64,
 }
 
-/// `POST /api/tables/{id}/assets`: a picture for the library. A player may add a token
-/// portrait when the DM lets them change tokens; the rest is the DM's.
+/// `POST /api/tables/{id}/assets`: a picture for the host's library, noted as uploaded at this
+/// table. A player may add a token portrait when the DM lets them change tokens; the rest is
+/// the DM's.
 pub async fn add(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -268,17 +313,13 @@ pub async fn add(
     let picture_id = ids::id();
     {
         let db = state.db();
-        let count: i64 = db.query_row(
-            "SELECT COUNT(*) FROM assets WHERE table_id = ?1",
-            [&id],
-            |row| row.get(0),
-        )?;
+        let count: i64 = db.query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))?;
         if count >= MOST_PICTURES {
             return Err(AppError::bad(format!(
-                "A table keeps {MOST_PICTURES} pictures"
+                "A library keeps {MOST_PICTURES} pictures"
             )));
         }
-        write(&library_file(&state, &id, &picture_id)?, &data)?;
+        write(&library_file(&state, &picture_id)?, &data)?;
         db.execute(
             "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![picture_id, id, upload.kind, name, mime, width, height, ids::now()],
@@ -286,18 +327,24 @@ pub async fn add(
     }
     state.events.changed(&id);
     Ok(Json(
-        json!({ "id": picture_id, "kind": upload.kind, "name": name, "width": width, "height": height }),
+        json!({ "id": picture_id, "kind": upload.kind, "name": name, "width": width, "height": height, "mime": mime, "here": true }),
     ))
 }
 
-/// The library as the table view sends it. Players get the token portraits and props on the
-/// map; handouts reach them when shown.
-pub fn list(db: &rusqlite::Connection, table_id: &str, runs: bool) -> Result<Vec<Value>> {
+/// The library as the table view sends it, with `here` on what was uploaded at this table.
+/// Whoever runs the table sees all of it. A player gets the token portraits and props uploaded
+/// here or on the map they see (`shown`); handouts reach them when shown.
+pub fn list(
+    db: &rusqlite::Connection,
+    table_id: &str,
+    runs: bool,
+    shown: Option<&Value>,
+) -> Result<Vec<Value>> {
     let mut rows = db.prepare(
-        "SELECT id, kind, name, width, height, mime FROM assets WHERE table_id = ?1 ORDER BY created_at",
+        "SELECT id, kind, name, width, height, mime, table_id FROM assets ORDER BY created_at",
     )?;
     let all = rows
-        .query_map([table_id], |row| {
+        .query_map([], |row| {
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "kind": row.get::<_, String>(1)?,
@@ -305,13 +352,32 @@ pub fn list(db: &rusqlite::Connection, table_id: &str, runs: bool) -> Result<Vec
                 "width": row.get::<_, i64>(3)?,
                 "height": row.get::<_, i64>(4)?,
                 "mime": row.get::<_, String>(5)?,
+                "here": row.get::<_, String>(6)? == table_id,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    if runs {
+        return Ok(all);
+    }
+    let on_map = shown.map(pictures_on).unwrap_or_default();
     Ok(all
         .into_iter()
-        .filter(|a| runs || a["kind"] != "handout")
+        .filter(|a| a["kind"] == "token" || a["kind"] == "prop")
+        .filter(|a| a["here"] == true || a["id"].as_str().is_some_and(|id| on_map.contains(&id)))
         .collect())
+}
+
+// The library pictures a map shows: its props and token portraits.
+fn pictures_on(scene: &Value) -> Vec<&str> {
+    let field = |list: &str, key: &str| {
+        scene[list]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item[key].as_str())
+            .collect::<Vec<_>>()
+    };
+    [field("props", "assetId"), field("tokens", "imageId")].concat()
 }
 
 /// `GET /api/tables/{id}/assets/{asset}`: a picture from the library, for anyone at the table.
@@ -324,39 +390,57 @@ pub async fn picture(
     access::at_table(&state, &id, &Credentials::from(&headers, seen.pass))?;
     let mime: String = state
         .db()
-        .query_row(
-            "SELECT mime FROM assets WHERE table_id = ?1 AND id = ?2",
-            [&id, &asset],
-            |row| row.get(0),
-        )
+        .query_row("SELECT mime FROM assets WHERE id = ?1", [&asset], |row| {
+            row.get(0)
+        })
         .optional()?
         .ok_or_else(|| AppError::not_found("That picture is gone"))?;
-    send(library_file(&state, &id, &asset)?, &mime)
+    send(library_file(&state, &asset)?, &mime)
 }
 
-/// Deletes a picture, and takes it off every map, the handout, the music and the background.
+/// Deletes a picture, and takes it off every map, handout, track and background of every table
+/// on the host. A co-DM only deletes what was uploaded at their table.
 pub async fn remove(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, asset)): Path<(String, String)>,
 ) -> Result<StatusCode> {
-    access::runner(&state, &id, &Credentials::from(&headers, None))?;
-    {
+    let access = access::runner(&state, &id, &Credentials::from(&headers, None))?;
+    let tables = {
         let db = state.db();
-        if db.execute(
-            "DELETE FROM assets WHERE table_id = ?1 AND id = ?2",
-            [&id, &asset],
-        )? == 0
-        {
-            return Err(AppError::not_found("That picture is gone"));
+        let from: String = db
+            .query_row(
+                "SELECT table_id FROM assets WHERE id = ?1",
+                [&asset],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("That picture is gone"))?;
+        if access.role != Role::Dm && from != id {
+            return Err(AppError::forbidden(
+                "Only the DM deletes pictures from their other tables",
+            ));
         }
-        maps::forget_picture(&db, &id, &asset)?;
-        db.execute("UPDATE tables SET handout = NULL WHERE id = ?1 AND json_extract(handout, '$.assetId') = ?2", [&id, &asset])?;
-        db.execute("UPDATE tables SET music = NULL WHERE id = ?1 AND json_extract(music, '$.assetId') = ?2", [&id, &asset])?;
-        db.execute("UPDATE tables SET background = NULL WHERE id = ?1 AND json_extract(background, '$.assetId') = ?2", [&id, &asset])?;
+        let mut rows = db.prepare("SELECT id FROM tables")?;
+        let tables = rows
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        db.execute("DELETE FROM assets WHERE id = ?1", [&asset])?;
+        for table in &tables {
+            maps::forget_picture(&db, table, &asset)?;
+        }
+        for column in ["handout", "music", "background"] {
+            db.execute(
+                &format!("UPDATE tables SET {column} = NULL WHERE json_extract({column}, '$.assetId') = ?1"),
+                [&asset],
+            )?;
+        }
+        tables
+    };
+    let _ = std::fs::remove_file(library_file(&state, &asset)?);
+    for table in &tables {
+        state.events.changed(table);
     }
-    let _ = std::fs::remove_file(library_file(&state, &id, &asset)?);
-    state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -379,14 +463,7 @@ pub async fn show(
     let title: String = handout.title.trim().chars().take(100).collect();
     {
         let db = state.db();
-        let found: i64 = db.query_row(
-            "SELECT COUNT(*) FROM assets WHERE table_id = ?1 AND id = ?2",
-            [&id, &handout.asset_id],
-            |row| row.get(0),
-        )?;
-        if found == 0 {
-            return Err(AppError::not_found("That picture is gone"));
-        }
+        kind_of(&db, &handout.asset_id)?;
         let shown = json!({ "assetId": handout.asset_id, "title": title }).to_string();
         db.execute(
             "UPDATE tables SET handout = ?2 WHERE id = ?1",
@@ -429,14 +506,7 @@ pub async fn play_music(
     let name: String = music.name.trim().chars().take(80).collect();
     {
         let db = state.db();
-        let found: i64 = db.query_row(
-            "SELECT COUNT(*) FROM assets WHERE table_id = ?1 AND id = ?2",
-            [&id, &music.asset_id],
-            |row| row.get(0),
-        )?;
-        if found == 0 {
-            return Err(AppError::not_found("That picture is gone"));
-        }
+        kind_of(&db, &music.asset_id)?;
         let playing = json!({ "assetId": music.asset_id, "name": name }).to_string();
         db.execute(
             "UPDATE tables SET music = ?2 WHERE id = ?1",
@@ -477,17 +547,8 @@ pub async fn set_background(
     access::runner(&state, &id, &Credentials::from(&headers, None))?;
     {
         let db = state.db();
-        let kind: Option<String> = db
-            .query_row(
-                "SELECT kind FROM assets WHERE table_id = ?1 AND id = ?2",
-                [&id, &background.asset_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match kind.as_deref() {
-            None => return Err(AppError::not_found("That picture is gone")),
-            Some("audio") => return Err(AppError::bad("A background is a picture, not a track")),
-            _ => {}
+        if kind_of(&db, &background.asset_id)? == "audio" {
+            return Err(AppError::bad("A background is a picture, not a track"));
         }
         let shown = json!({ "assetId": background.asset_id }).to_string();
         db.execute(

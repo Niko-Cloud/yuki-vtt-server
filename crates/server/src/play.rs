@@ -164,7 +164,7 @@ pub async fn view(
         "scene": shown,
         "scenes": if access.runs() { maps::list(&db, &id)? } else { vec![] },
         "activeSceneId": active_scene,
-        "assets": pictures::list(&db, &id, access.runs())?,
+        "assets": pictures::list(&db, &id, access.runs(), shown.as_ref())?,
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         // The track the DM plays to everyone, looping; null when the table is quiet.
         "music": music.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,

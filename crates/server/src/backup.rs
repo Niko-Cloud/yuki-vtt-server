@@ -1,6 +1,7 @@
 //! A table in one file, to keep somewhere safe or move to another computer: its maps, tokens,
 //! seats, log and pictures. The file is a .yukitable (a gzipped tar): `table.json` with every
-//! row, and the table's pictures beside it.
+//! row, and the table's pictures beside it: its map pictures, and the library pictures it
+//! uploaded or uses.
 
 use crate::db;
 use flate2::Compression;
@@ -193,16 +194,25 @@ fn read_rows(
     columns: &[&str],
     table_id: &str,
 ) -> rusqlite::Result<Vec<Value>> {
-    let key = if part == "tables" { "id" } else { "table_id" };
     let order = if part == "log" { " ORDER BY seq" } else { "" };
-    // Screens are transient displays with no character: a restored table opens them again.
-    let only = if part == "seats" {
-        " AND kind != 'screen'"
-    } else {
-        ""
+    let only = match part {
+        "tables" => "id = ?1",
+        // Screens are transient displays with no character: a restored table opens them again.
+        "seats" => "table_id = ?1 AND kind != 'screen'",
+        // The library is the host's: a table takes what it uploaded, and what its maps,
+        // prefabs, handout, music or background name. Ids are long and random, so finding one
+        // in the stored JSON is finding a use of it.
+        "assets" => {
+            "table_id = ?1
+             OR EXISTS (SELECT 1 FROM scenes s WHERE s.table_id = ?1 AND instr(s.data, assets.id) > 0)
+             OR EXISTS (SELECT 1 FROM tables t WHERE t.id = ?1 AND instr(
+                 coalesce(t.prefabs, '') || coalesce(t.handout, '') || coalesce(t.music, '')
+                 || coalesce(t.background, ''), assets.id) > 0)"
+        }
+        _ => "table_id = ?1",
     };
     let sql = format!(
-        "SELECT {} FROM {part} WHERE {key} = ?1{only}{order}",
+        "SELECT {} FROM {part} WHERE {only}{order}",
         columns.join(", ")
     );
     let mut statement = db.prepare(&sql)?;
@@ -242,10 +252,9 @@ pub fn export(data_dir: &Path, table_id: &str, out: &Path) -> Result<(), String>
     archive
         .append_data(&mut header, "table.json", text.as_slice())
         .map_err(problem("Couldn't write the backup"))?;
-    let pictures = data_dir.join("pictures").join(table_id);
-    if pictures.is_dir() {
+    for (name, path) in picture_files(data_dir, table_id, &rows["assets"]) {
         archive
-            .append_dir_all("pictures", &pictures)
+            .append_path_with_name(&path, format!("pictures/{name}"))
             .map_err(problem("Couldn't add the pictures"))?;
     }
     archive
@@ -253,6 +262,43 @@ pub fn export(data_dir: &Path, table_id: &str, out: &Path) -> Result<(), String>
         .and_then(|gz| gz.finish())
         .map_err(problem("Couldn't finish the backup"))?;
     Ok(())
+}
+
+// The files a backup carries: the table's map pictures, and the library pictures in its rows.
+// A host that hasn't started since the library was shared still keeps those beside the table.
+fn picture_files(
+    data_dir: &Path,
+    table_id: &str,
+    assets: &Value,
+) -> Vec<(String, std::path::PathBuf)> {
+    let beside = data_dir.join("pictures").join(table_id);
+    let mut files: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(&beside)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            name.ends_with(".map").then(|| (name, entry.path()))
+        })
+        .collect();
+    let library = crate::pictures::library_folder(data_dir);
+    for row in assets.as_array().into_iter().flatten() {
+        let name = format!("{}.pic", row["id"].as_str().unwrap_or_default());
+        let from = row["table_id"].as_str().unwrap_or_default();
+        if !safe_picture(&name) || !safe_picture(&format!("{from}.map")) {
+            continue;
+        }
+        let found = [
+            library.join(&name),
+            data_dir.join("pictures").join(from).join(&name),
+        ]
+        .into_iter()
+        .find(|path| path.is_file());
+        if let Some(path) = found {
+            files.push((name, path));
+        }
+    }
+    files
 }
 
 // Picture files are named by the host: letters, digits and dashes, then .map or .pic.
@@ -349,13 +395,14 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
         .map_err(|e| e.to_string())?;
     for (part, columns) in PARTS {
         for row in rows[part].as_array().into_iter().flatten() {
-            // Every row belongs to this table, whatever the file says.
+            // Every row belongs to this table, whatever the file says. Library pictures are the
+            // host's, and may have been uploaded at another table.
             let owner = if part == "tables" {
                 &row["id"]
             } else {
                 &row["table_id"]
             };
-            if owner.as_str() != Some(id.as_str()) {
+            if part != "assets" && owner.as_str() != Some(id.as_str()) {
                 continue;
             }
             // Only the columns the row has: an older backup lacks newer ones, which keep their
@@ -373,8 +420,14 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // A library picture already on this host is kept as it is.
+            let verb = if part == "assets" {
+                "INSERT OR IGNORE"
+            } else {
+                "INSERT"
+            };
             let sql = format!(
-                "INSERT INTO {part} ({}) VALUES ({marks})",
+                "{verb} INTO {part} ({}) VALUES ({marks})",
                 present.join(", ")
             );
             tx.execute(&sql, params_from_iter(values))
@@ -389,10 +442,20 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
     )
     .map_err(|e| e.to_string())?;
     let folder = data_dir.join("pictures").join(&id);
+    let library = crate::pictures::library_folder(data_dir);
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::create_dir_all(&folder).map_err(problem("Couldn't make the pictures folder"))?;
+    std::fs::create_dir_all(&library).map_err(problem("Couldn't make the library folder"))?;
     for (file, bytes) in pictures {
-        std::fs::write(folder.join(file), bytes).map_err(problem("Couldn't save a picture"))?;
+        let path = if file.ends_with(".pic") {
+            library.join(&file)
+        } else {
+            folder.join(&file)
+        };
+        if file.ends_with(".pic") && path.exists() {
+            continue;
+        }
+        std::fs::write(path, bytes).map_err(problem("Couldn't save a picture"))?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((id, name))

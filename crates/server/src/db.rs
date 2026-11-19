@@ -119,6 +119,25 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE tables ADD COLUMN background TEXT;
 "#,
+    // One library for every table on this host: a picture outlives the table it was uploaded
+    // at, which `table_id` still names.
+    r#"
+    CREATE TABLE library (
+        id TEXT PRIMARY KEY,
+        table_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        width INTEGER NOT NULL,
+        height INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    INSERT INTO library SELECT id, table_id, kind, name, mime, width, height, created_at FROM assets;
+    DROP TABLE assets;
+    ALTER TABLE library RENAME TO assets;
+    CREATE INDEX assets_by_table ON assets(table_id, created_at);
+    CREATE INDEX assets_by_age ON assets(created_at);
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
