@@ -1963,3 +1963,64 @@ async fn copies_a_map_with_everything_on_it() {
     let (status, _) = call(&app, As::Dm, "GET", &format!("{at}/image"), None).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn never_sends_a_player_a_token_they_cant_see_with_dynamic_fog() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    let ogre = json!({ "name": "Ogre", "x": 8, "y": 1 });
+    call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(ogre)).await;
+    let tam = view(&app, As::Dm, &t).await["scene"]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "Tam")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let to_corner = json!({ "x": 1, "y": 1 });
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{at}/tokens/{tam}"),
+        Some(to_corner),
+    )
+    .await;
+    let lighting = |walls: Value| json!({ "fog": { "mode": "dynamic", "light": "bright", "remember": false }, "walls": walls, "lights": [] });
+    let wall = json!([{ "id": "w1", "a": [350, 0], "b": [350, 490] }]);
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting(wall)),
+    )
+    .await;
+    let names = |view: Value| -> Vec<String> {
+        view["scene"]["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let seen = names(view(&app, As::Seat(&token), &t).await);
+    assert!(seen.contains(&"Tam".to_string()));
+    assert!(!seen.contains(&"Ogre".to_string()));
+    assert!(names(view(&app, As::Dm, &t).await).contains(&"Ogre".to_string()));
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting(json!([]))),
+    )
+    .await;
+    assert!(names(view(&app, As::Seat(&token), &t).await).contains(&"Ogre".to_string()));
+}

@@ -134,7 +134,18 @@ pub async fn view(
     if let Some(scene) = shown.as_mut()
         && !access.runs()
     {
-        crate::fog::for_players(scene);
+        let looking = crate::sight::Looking {
+            seat_ids: &access.seat_ids,
+            shared: crate::fog::shared_sight(&db, &id)?,
+            darkvision: seated
+                .iter()
+                .map(|seat| {
+                    let member = seat.snapshot.member(&seat.id, &seat.permissions);
+                    (seat.id.clone(), member["darkvision"].as_f64())
+                })
+                .collect(),
+        };
+        crate::fog::for_players(scene, &looking);
     }
     let characters: Vec<Value> = seated
         .iter()

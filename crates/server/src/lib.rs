@@ -22,6 +22,7 @@ pub mod rulers;
 pub mod seats;
 pub mod secrets;
 pub mod served;
+pub mod sight;
 pub mod snapshot;
 pub mod state;
 pub mod tables;

@@ -253,7 +253,7 @@ pub fn shared_sight(db: &Connection, table_id: &str) -> Result<bool> {
 }
 
 /// A map as players get it: without the DM's layer (hidden tokens and drawings, notes).
-pub fn for_players(scene: &mut Value) {
+pub fn for_players(scene: &mut Value, looking: &crate::sight::Looking) {
     if let Some(tokens) = scene["tokens"].as_array_mut() {
         tokens.retain(|t| t["hidden"] != json!(true));
     }
@@ -287,6 +287,20 @@ pub fn for_players(scene: &mut Value) {
             };
             !map.hand_fogged(middle_of(&map, &token))
         });
+    }
+    // With dynamic fog, a token this player can't see right now isn't sent at all: hiding it on
+    // screen alone would still let anyone reading the page find it.
+    if let Ok(map) = serde_json::from_value::<TableMap>(scene.clone())
+        && map.fog.mode == "dynamic"
+    {
+        let shown = crate::sight::shown_ids(&map, looking);
+        if let Some(tokens) = scene["tokens"].as_array_mut() {
+            tokens.retain(|t| {
+                t["id"]
+                    .as_str()
+                    .is_some_and(|id| shown.iter().any(|s| s == id))
+            });
+        }
     }
     // Only notes the DM lets players read.
     if let Some(notes) = scene["notes"].as_array_mut() {
