@@ -34,6 +34,24 @@ function draw(status) {
   $('problem').hidden = !status.problem;
   $('problem').textContent = status.problem ?? '';
 
+  // How the connection looked once hosting started.
+  const connection = status.hosting ? status.connection : null;
+  const said = (ok, good, bad) => (ok === null || ok === undefined ? null : ok ? good : bad);
+  const parts = connection
+    ? [
+        said(connection.tunnel, 'players can reach this computer', 'the tunnel isn\'t answering'),
+        said(connection.website, 'the website answers', 'the website can\'t be reached'),
+        connection.uploadMbps != null ? `upload about ${connection.uploadMbps} Mbit/s` : null,
+      ].filter(Boolean)
+    : [];
+  $('connection').hidden = parts.length === 0;
+  $('connection').textContent = parts.length ? `Connection: ${parts.join(' · ')}.` : '';
+  $('slow').hidden = !connection?.slow;
+  $('slow').textContent = connection?.slow
+    ? 'Your upload is slow for hosting: with more than a few players, maps and pictures will ' +
+      'come slowly. A wired connection or a quieter network helps.'
+    : '';
+
   $('waiting-card').hidden = status.requests.length === 0;
   $('waiting').replaceChildren(
     ...status.requests.map((request) => {

@@ -6,6 +6,7 @@ pub mod areas;
 pub mod awake;
 pub mod backup;
 pub mod cloudflared;
+pub mod connection;
 pub mod db;
 pub mod delta;
 pub mod error;

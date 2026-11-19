@@ -38,6 +38,8 @@ struct Notes {
     /// The website asked, by a link, to pair this computer: its address and the link's token,
     /// until the DM says yes or no in the window.
     link_offer: Option<(String, String)>,
+    /// How the connection looked once hosting started: tunnel, website, upload.
+    connection: Option<yuki_vtt_server::connection::Connection>,
 }
 
 struct TrayLines {
@@ -61,6 +63,7 @@ struct Status {
     link_offer: Option<String>,
     /// Screens with a table open right now.
     screens: usize,
+    connection: Option<yuki_vtt_server::connection::Connection>,
     /// Players waiting for the DM to let them in, at every table.
     requests: Vec<serde_json::Value>,
     tables: Vec<TableCard>,
@@ -109,6 +112,7 @@ async fn status(shared: State<'_, Shared>) -> Result<Status, String> {
         pairing_code: notes.pairing_code,
         problem: notes.problem,
         link_offer: notes.link_offer.map(|(site, _)| site),
+        connection: notes.connection,
         screens: running
             .as_ref()
             .map(|r| r.state.events.listeners())
@@ -186,8 +190,10 @@ async fn start(app: &AppHandle) -> Result<(), String> {
     note(&shared, |n| n.starting = false);
     match started {
         Ok(host) => {
+            let address = host.address.clone();
             *running = Some(host);
             refresh_tray(app, true, None, 0);
+            check_connection(app.clone(), address);
             Ok(())
         }
         Err(problem) => {
@@ -196,6 +202,32 @@ async fn start(app: &AppHandle) -> Result<(), String> {
             Err(problem)
         }
     }
+}
+
+// Once the tunnel has its address, a look at the tunnel, the website and the upload, for the
+// window to show (and warn about a slow upload).
+fn check_connection(app: AppHandle, address: Option<tokio::sync::watch::Receiver<Option<String>>>) {
+    note(&app.state::<Shared>(), |n| n.connection = None);
+    tauri::async_runtime::spawn(async move {
+        let mut tunnel = None;
+        if let Some(mut address) = address {
+            let waited = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                loop {
+                    if let Some(url) = address.borrow_and_update().clone() {
+                        return Some(url);
+                    }
+                    if address.changed().await.is_err() {
+                        return None;
+                    }
+                }
+            });
+            tunnel = waited.await.ok().flatten();
+        }
+        let shared = app.state::<Shared>();
+        let website = paired_website(&shared);
+        let found = yuki_vtt_server::connection::check(tunnel.as_deref(), website.as_deref()).await;
+        note(&shared, |n| n.connection = Some(found.clone()));
+    });
 }
 
 async fn stop(app: &AppHandle) {
