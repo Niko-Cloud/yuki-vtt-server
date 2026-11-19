@@ -1272,3 +1272,56 @@ async fn keeps_monsters_numbers_for_the_dm_and_counts_effects_down() {
             .any(|t| t.starts_with("Initiative rolled again: "))
     );
 }
+
+#[tokio::test]
+async fn lets_the_dm_keep_guests_out_as_on_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let table_id = table_of(&app, &t.invite).await;
+    // A character from someone not signed in: the website signs it with no player.
+    let guest = || {
+        let signed = signed("Wren", "nobody", 12, fresh(), For::Join(&table_id));
+        let mut snapshot: Value =
+            serde_json::from_str(signed["snapshot"].as_str().unwrap()).unwrap();
+        snapshot.as_object_mut().unwrap().remove("playerId");
+        sign(&snapshot.to_string())
+    };
+    let join_path = format!("/join/{}", t.invite);
+    let guests = format!("/tables/{}/guests", t.id);
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PATCH",
+        &guests,
+        Some(json!({ "guests": false })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &guests,
+        Some(json!({ "guests": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, invite) = call(&app, As::Nobody, "GET", &join_path, None).await;
+    assert_eq!(invite["party"]["guests"], false);
+    let (status, refused) = call(&app, As::Nobody, "POST", &join_path, Some(guest())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(refused["message"].as_str().unwrap().contains("sign in"));
+    // Signed in, a player sits down as before; with guests back on, so does a guest.
+    join(&app, &t.invite, "Ash", "user-2").await;
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &guests,
+        Some(json!({ "guests": true })),
+    )
+    .await;
+    let (status, _) = call(&app, As::Nobody, "POST", &join_path, Some(guest())).await;
+    assert_eq!(status, StatusCode::CREATED);
+}

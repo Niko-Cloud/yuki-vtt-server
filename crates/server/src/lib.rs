@@ -88,6 +88,7 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/media-token", post(tables::media_token))
         .route("/tables/{id}/seat-pass", post(tables::seat_pass))
         .route("/tables/{id}/lock", patch(tables::lock))
+        .route("/tables/{id}/guests", patch(tables::set_guests))
         .route("/tables/{id}/log", get(play::older_log).post(play::post))
         .route("/tables/{id}/log/{entry}/reveal", post(play::reveal))
         .route("/tables/{id}/roll", post(play::roll))

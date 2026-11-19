@@ -38,6 +38,7 @@ const PARTS: [(&str, &[&str]); 6] = [
             "updated_at",
             "ask_to_join",
             "shared_sight",
+            "guests",
             "prefabs",
             "timer",
             "loot",
@@ -125,8 +126,9 @@ fn as_json(value: ValueRef<'_>) -> Value {
 }
 
 // Columns kept as numbers; every other one is text.
-const NUMBERS: [&str; 11] = [
+const NUMBERS: [&str; 12] = [
     "locked",
+    "guests",
     "ask_to_join",
     "shared_sight",
     "created_at",

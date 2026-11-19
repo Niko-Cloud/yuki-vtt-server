@@ -152,6 +152,10 @@ const STEPS: &[&str] = &[
     ALTER TABLE assets ADD COLUMN file TEXT;
     ALTER TABLE scenes ADD COLUMN file TEXT;
 "#,
+    // Whether players without an account may join; as before, they may.
+    r#"
+    ALTER TABLE tables ADD COLUMN guests INTEGER NOT NULL DEFAULT 1;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

@@ -25,12 +25,13 @@ struct Invited {
     dm_name: String,
     locked: bool,
     ask_to_join: bool,
+    guests: bool,
     banned: Vec<crate::tables::Banned>,
 }
 
 fn invited(db: &Connection, invite: &str) -> Result<Invited> {
     db.query_row(
-        "SELECT id, name, edition, dm_name, locked, banned, ask_to_join FROM tables WHERE invite_token = ?1",
+        "SELECT id, name, edition, dm_name, locked, banned, ask_to_join, guests FROM tables WHERE invite_token = ?1",
         [invite],
         |row| {
             Ok((
@@ -41,12 +42,13 @@ fn invited(db: &Connection, invite: &str) -> Result<Invited> {
                 row.get(4)?,
                 row.get::<_, String>(5)?,
                 row.get(6)?,
+                row.get(7)?,
             ))
         },
     )
     .optional()?
     .map(
-        |(id, name, edition, dm_name, locked, banned, ask_to_join)| -> Result<Invited> {
+        |(id, name, edition, dm_name, locked, banned, ask_to_join, guests)| -> Result<Invited> {
             Ok(Invited {
                 id,
                 name,
@@ -54,6 +56,7 @@ fn invited(db: &Connection, invite: &str) -> Result<Invited> {
                 dm_name,
                 locked,
                 ask_to_join,
+                guests,
                 banned: crate::tables::bans(&banned)?,
             })
         },
@@ -77,7 +80,7 @@ pub async fn invite(
         |row| row.get(0),
     )?;
     Ok(Json(json!({
-        "party": { "id": table.id, "name": table.name, "edition": table.edition, "dm": table.dm_name, "locked": table.locked },
+        "party": { "id": table.id, "name": table.name, "edition": table.edition, "dm": table.dm_name, "locked": table.locked, "guests": table.guests },
         "seats": seats,
         "full": seats >= MOST_SEATS,
     })))
@@ -101,6 +104,11 @@ pub async fn join(
         if table.locked {
             return Err(AppError::forbidden(
                 "The DM locked this table: ask them to open it",
+            ));
+        }
+        if !table.guests && snapshot.player_id.is_none() {
+            return Err(AppError::forbidden(
+                "This table takes players signed in with Discord: sign in, then use the invite again",
             ));
         }
         if snapshot
