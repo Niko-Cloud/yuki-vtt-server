@@ -327,7 +327,7 @@ pub async fn add(
     }
     state.events.changed(&id);
     Ok(Json(
-        json!({ "id": picture_id, "kind": upload.kind, "name": name, "width": width, "height": height, "mime": mime, "here": true }),
+        json!({ "id": picture_id, "kind": upload.kind, "name": name, "width": width, "height": height, "mime": mime, "here": true, "folder": null, "tags": [], "favorite": false }),
     ))
 }
 
@@ -340,21 +340,9 @@ pub fn list(
     runs: bool,
     shown: Option<&Value>,
 ) -> Result<Vec<Value>> {
-    let mut rows = db.prepare(
-        "SELECT id, kind, name, width, height, mime, table_id FROM assets ORDER BY created_at",
-    )?;
+    let mut rows = db.prepare(&format!("SELECT {SHOWN} FROM assets ORDER BY created_at"))?;
     let all = rows
-        .query_map([], |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "kind": row.get::<_, String>(1)?,
-                "name": row.get::<_, String>(2)?,
-                "width": row.get::<_, i64>(3)?,
-                "height": row.get::<_, i64>(4)?,
-                "mime": row.get::<_, String>(5)?,
-                "here": row.get::<_, String>(6)? == table_id,
-            }))
-        })?
+        .query_map([], |row| shown_row(row, table_id))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if runs {
         return Ok(all);
@@ -365,6 +353,25 @@ pub fn list(
         .filter(|a| a["kind"] == "token" || a["kind"] == "prop")
         .filter(|a| a["here"] == true || a["id"].as_str().is_some_and(|id| on_map.contains(&id)))
         .collect())
+}
+
+// The columns a table is sent about a picture, read by `shown_row`.
+const SHOWN: &str = "id, kind, name, width, height, mime, table_id, folder, tags, favorite";
+
+fn shown_row(row: &rusqlite::Row, table_id: &str) -> rusqlite::Result<Value> {
+    let tags: String = row.get(8)?;
+    Ok(json!({
+        "id": row.get::<_, String>(0)?,
+        "kind": row.get::<_, String>(1)?,
+        "name": row.get::<_, String>(2)?,
+        "width": row.get::<_, i64>(3)?,
+        "height": row.get::<_, i64>(4)?,
+        "mime": row.get::<_, String>(5)?,
+        "here": row.get::<_, String>(6)? == table_id,
+        "folder": row.get::<_, Option<String>>(7)?,
+        "tags": serde_json::from_str::<Vec<String>>(&tags).unwrap_or_default(),
+        "favorite": row.get::<_, bool>(9)?,
+    }))
 }
 
 // The library pictures a map shows: its props and token portraits.
@@ -398,6 +405,123 @@ pub async fn picture(
     send(library_file(&state, &asset)?, &mime)
 }
 
+// A co-DM looks after what was uploaded at their table; the DM looks after the whole library.
+fn may_keep(access: &access::Access, table_id: &str, uploaded_at: &str) -> bool {
+    access.role == Role::Dm || uploaded_at == table_id
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Change {
+    name: Option<String>,
+    /// A folder's name, or null to take the picture out of its folder.
+    #[serde(default, deserialize_with = "crate::play::present")]
+    folder: Option<Option<String>>,
+    tags: Option<Vec<String>>,
+    favorite: Option<bool>,
+}
+
+fn trimmed(text: &str, most: usize, what: &str) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > most {
+        return Err(AppError::bad(format!("{what} is 1 to {most} letters")));
+    }
+    Ok(text.to_string())
+}
+
+/// `PATCH /api/tables/{id}/assets/{asset}`: renames a picture, files it in a folder, tags it
+/// or stars it, for every table on the host.
+pub async fn change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, asset)): Path<(String, String)>,
+    Json(body): Json<Change>,
+) -> Result<Json<Value>> {
+    let access = access::runner(&state, &id, &Credentials::from(&headers, None))?;
+    let name = body
+        .name
+        .as_deref()
+        .map(|name| trimmed(name, 60, "A name"))
+        .transpose()?;
+    let folder = body
+        .folder
+        .map(|folder| {
+            folder
+                .as_deref()
+                .map(|name| trimmed(name, 40, "A folder's name"))
+                .transpose()
+        })
+        .transpose()?;
+    let tags = match body.tags {
+        Some(tags) if tags.len() > 10 => return Err(AppError::bad("A picture keeps 10 tags")),
+        Some(tags) => {
+            let mut kept: Vec<String> = Vec::new();
+            for tag in tags {
+                let tag = trimmed(&tag, 24, "A tag")?.to_lowercase();
+                if !kept.contains(&tag) {
+                    kept.push(tag);
+                }
+            }
+            Some(serde_json::to_string(&kept)?)
+        }
+        None => None,
+    };
+    let (changed, tables) = {
+        let db = state.db();
+        let from: String = db
+            .query_row(
+                "SELECT table_id FROM assets WHERE id = ?1",
+                [&asset],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("That picture is gone"))?;
+        if !may_keep(&access, &id, &from) {
+            return Err(AppError::forbidden(
+                "Only the DM changes pictures from their other tables",
+            ));
+        }
+        if let Some(name) = &name {
+            db.execute(
+                "UPDATE assets SET name = ?2 WHERE id = ?1",
+                params![asset, name],
+            )?;
+        }
+        if let Some(folder) = &folder {
+            db.execute(
+                "UPDATE assets SET folder = ?2 WHERE id = ?1",
+                params![asset, folder],
+            )?;
+        }
+        if let Some(tags) = &tags {
+            db.execute(
+                "UPDATE assets SET tags = ?2 WHERE id = ?1",
+                params![asset, tags],
+            )?;
+        }
+        if let Some(favorite) = body.favorite {
+            db.execute(
+                "UPDATE assets SET favorite = ?2 WHERE id = ?1",
+                params![asset, favorite],
+            )?;
+        }
+        let changed = db.query_row(
+            &format!("SELECT {SHOWN} FROM assets WHERE id = ?1"),
+            [&asset],
+            |row| shown_row(row, &id),
+        )?;
+        let mut rows = db.prepare("SELECT id FROM tables")?;
+        let tables = rows
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        (changed, tables)
+    };
+    for table in &tables {
+        state.events.changed(table);
+    }
+    Ok(Json(changed))
+}
+
 /// Deletes a picture, and takes it off every map, handout, track and background of every table
 /// on the host. A co-DM only deletes what was uploaded at their table.
 pub async fn remove(
@@ -416,7 +540,7 @@ pub async fn remove(
             )
             .optional()?
             .ok_or_else(|| AppError::not_found("That picture is gone"))?;
-        if access.role != Role::Dm && from != id {
+        if !may_keep(&access, &id, &from) {
             return Err(AppError::forbidden(
                 "Only the DM deletes pictures from their other tables",
             ));

@@ -138,6 +138,11 @@ const STEPS: &[&str] = &[
     CREATE INDEX assets_by_table ON assets(table_id, created_at);
     CREATE INDEX assets_by_age ON assets(created_at);
 "#,
+    r#"
+    ALTER TABLE assets ADD COLUMN folder TEXT;
+    ALTER TABLE assets ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE assets ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

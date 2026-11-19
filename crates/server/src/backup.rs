@@ -80,6 +80,9 @@ const PARTS: [(&str, &[&str]); 6] = [
             "width",
             "height",
             "created_at",
+            "folder",
+            "tags",
+            "favorite",
         ],
     ),
     (
@@ -113,7 +116,7 @@ fn as_json(value: ValueRef<'_>) -> Value {
 }
 
 // Columns kept as numbers; every other one is text.
-const NUMBERS: [&str; 9] = [
+const NUMBERS: [&str; 10] = [
     "locked",
     "ask_to_join",
     "shared_sight",
@@ -123,6 +126,7 @@ const NUMBERS: [&str; 9] = [
     "width",
     "height",
     "seq",
+    "favorite",
 ];
 
 // Text that must read back as `T`.
@@ -140,7 +144,7 @@ fn fits(column: &str, value: &Value) -> bool {
     match column {
         c if NUMBERS.contains(&c) => value.is_i64() || value.is_boolean(),
         "snapshot" => holds::<Snapshot>(value),
-        "permissions" | "visible_to" => holds::<Vec<String>>(value),
+        "permissions" | "visible_to" | "tags" => holds::<Vec<String>>(value),
         "banned" => holds::<Vec<Value>>(value),
         "encounter" => value.is_null() || holds::<yuki_vtt_rules::encounter::Encounter>(value),
         "handout" => value.is_null() || holds::<Value>(value),
@@ -149,7 +153,7 @@ fn fits(column: &str, value: &Value) -> bool {
         "timer" => value.is_null() || holds::<Value>(value),
         "loot" | "journal" => value.is_null() || value.is_array(),
         "prefabs" => value.is_null() || holds::<Vec<crate::maps::Prefab>>(value),
-        "active_scene_id" | "player_id" => value.is_null() || value.is_string(),
+        "active_scene_id" | "player_id" | "folder" => value.is_null() || value.is_string(),
         _ => value.is_string(),
     }
 }

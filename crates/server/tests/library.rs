@@ -175,6 +175,9 @@ async fn backs_up_the_library_pictures_a_table_uses() {
         Some(json!({ "name": "Ogre", "x": 1, "y": 1, "imageId": ogre })),
     )
     .await;
+    let order = json!({ "folder": "Monsters", "tags": ["giant"], "favorite": true });
+    let path = format!("/tables/{}/assets/{ogre}", t.id);
+    call(&app, As::Dm, "PATCH", &path, Some(order)).await;
 
     let file = first.path().join("night.yukitable");
     backup::export(first.path(), &t.id, &file).unwrap();
@@ -186,6 +189,11 @@ async fn backs_up_the_library_pictures_a_table_uses() {
     let library = ids_of(&view(&moved, As::Dm, &t).await["assets"]);
     assert_eq!(library, std::slice::from_ref(&ogre));
     assert!(!library.contains(&unused));
+    let kept = view(&moved, As::Dm, &t).await["assets"][0].clone();
+    assert_eq!(
+        (&kept["folder"], &kept["tags"], &kept["favorite"]),
+        (&json!("Monsters"), &json!(["giant"]), &json!(true))
+    );
     let pass = seat_pass(&moved, &t.id, &token).await;
     let (status, _, size) = fetch(
         &moved,
@@ -197,4 +205,60 @@ async fn backs_up_the_library_pictures_a_table_uses() {
     // Bringing it back over itself keeps the library as it is.
     backup::restore(second.path(), &file, true).unwrap();
     assert_eq!(ids_of(&view(&moved, As::Dm, &t).await["assets"]), [ogre]);
+}
+
+#[tokio::test]
+async fn keeps_the_library_in_order() {
+    let app = host();
+    let t = table(&app).await;
+    let (seat, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let ogre = add(&app, &t, "token").await;
+    assert_eq!(
+        (&ogre["folder"], &ogre["tags"], &ogre["favorite"]),
+        (&Value::Null, &json!([]), &json!(false))
+    );
+    let path = format!("/tables/{}/assets/{}", t.id, ogre["id"].as_str().unwrap());
+    let order = json!({
+        "name": "Cave ogre",
+        "folder": "Monsters",
+        "tags": ["Giant", "giant", "cave"],
+        "favorite": true,
+    });
+    let (status, changed) = call(&app, As::Dm, "PATCH", &path, Some(order)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changed["name"], "Cave ogre");
+    assert_eq!(changed["folder"], "Monsters");
+    assert_eq!(changed["tags"], json!(["giant", "cave"]));
+    assert_eq!(
+        (&changed["favorite"], &changed["here"]),
+        (&json!(true), &json!(true))
+    );
+
+    // Null takes it out of its folder; the rest stays.
+    let out = json!({ "folder": null });
+    call(&app, As::Dm, "PATCH", &path, Some(out)).await;
+    let kept = view(&app, As::Dm, &t).await["assets"][0].clone();
+    assert_eq!(kept["folder"], Value::Null);
+    assert_eq!(kept["tags"], json!(["giant", "cave"]));
+
+    let many: Vec<String> = (0..11).map(|i| format!("t{i}")).collect();
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(json!({ "tags": many }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(json!({ "owner": "me" }))).await;
+    assert!(status.is_client_error());
+
+    // Players don't keep the DM's library; a co-DM keeps what was uploaded at their table.
+    let star = json!({ "favorite": false });
+    let (status, _) = call(&app, As::Seat(&token), "PATCH", &path, Some(star.clone())).await;
+    assert!(status.is_client_error());
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/seats/{seat}/role", t.id),
+        Some(json!({ "role": "codm" })),
+    )
+    .await;
+    let (status, _) = call(&app, As::Seat(&token), "PATCH", &path, Some(star)).await;
+    assert_eq!(status, StatusCode::OK);
 }

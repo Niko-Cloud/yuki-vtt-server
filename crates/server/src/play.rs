@@ -893,7 +893,7 @@ pub struct CombatantChange {
 }
 
 // Something sent, even null: Some(None) for null, None when it was left out.
-fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     sent: D,
 ) -> std::result::Result<Option<Option<T>>, D::Error> {
     Option::<T>::deserialize(sent).map(Some)
