@@ -74,3 +74,74 @@ async fn compresses_the_table_but_not_its_pictures() {
     assert_eq!((status, encoding), (StatusCode::OK, None));
     assert_eq!(bytes, PNG);
 }
+
+#[tokio::test]
+async fn sends_the_newest_30_log_entries_and_older_ones_a_page_at_a_time() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let roll = |label: String, hidden: bool| serde_json::json!({ "label": label, "expression": "1d20", "hidden": hidden });
+    let at = format!("/tables/{}/roll", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &at,
+        Some(roll("Secret first".into(), true)),
+    )
+    .await;
+    for i in 1..=40 {
+        call(
+            &app,
+            As::Dm,
+            "POST",
+            &at,
+            Some(roll(format!("Roll {i}"), false)),
+        )
+        .await;
+    }
+    let labels = |entries: &serde_json::Value| -> Vec<String> {
+        entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["data"]["label"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let (_, view) = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None).await;
+    let shown = labels(&view["log"]);
+    assert_eq!(shown.len(), 30);
+    assert_eq!(
+        (shown[0].as_str(), shown[29].as_str()),
+        ("Roll 11", "Roll 40")
+    );
+    assert_eq!(view["logMore"], true);
+
+    let first = view["log"][0]["id"].as_str().unwrap();
+    let back = format!("/tables/{}/log?before={first}", t.id);
+    let (_, older) = call(&app, As::Dm, "GET", &back, None).await;
+    let mut expected = vec!["Secret first".to_string()];
+    expected.extend((1..=10).map(|i| format!("Roll {i}")));
+    assert_eq!(labels(&older["entries"]), expected);
+    assert_eq!(older["more"], false);
+
+    // A player reads back too, without the DM's hidden roll.
+    let (_, theirs) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    let first = theirs["log"][0]["id"].as_str().unwrap();
+    let back = format!("/tables/{}/log?before={first}", t.id);
+    let (_, older) = call(&app, As::Seat(&token), "GET", &back, None).await;
+    assert_eq!(labels(&older["entries"]).len(), 10);
+    assert!(!labels(&older["entries"]).contains(&"Secret first".to_string()));
+    let (status, _) = call(&app, As::Nobody, "GET", &back, None).await;
+    assert!(status.is_client_error());
+    let (status, _) = call(&app, As::Dm, "GET", &format!("/tables/{}/log", t.id), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

@@ -19,8 +19,10 @@ use yuki_vtt_rules::changes::{self, Change};
 use yuki_vtt_rules::encounter::{self, Combatant, Effect, Encounter, Hp};
 use yuki_vtt_rules::{Advantage, parse_dice, roll_detail};
 
-// What each screen gets of the log; older entries are dropped from the table.
-const LOG_SHOWN: usize = 100;
+// What each screen gets of the log with the table: the newest few, so every download stays
+// small. Older entries come a page at a time as the log is scrolled; past LOG_KEPT they go.
+const LOG_SHOWN: usize = 30;
+const LOG_PAGE: usize = 30;
 const LOG_KEPT: i64 = 300;
 
 fn d20() -> i32 {
@@ -151,6 +153,7 @@ pub async fn view(
     } else {
         vec![]
     };
+    let (log, log_more) = log_page(&db, &id, &access, None, LOG_SHOWN)?;
     Ok(Json(json!({
         "party": { "id": id, "name": name, "edition": edition, "sharedSight": crate::fog::shared_sight(&db, &id)? },
         "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "screen": access.screen, "characters": characters },
@@ -179,18 +182,29 @@ pub async fn view(
         "prefabs": if access.runs() { maps::parse_prefabs(prefabs) } else { vec![] },
         // The TV screens watching this table; the DM's alone.
         "screens": screens,
-        "log": log_for(&db, &id, &access)?,
+        "log": log,
+        "logMore": log_more,
         // Waiting to join: for whoever runs the table, to let in from the map room.
         "requests": if access.runs() { crate::requests::waiting(&db, &id)? } else { vec![] },
     })))
 }
 
-// The newest entries this person may see, oldest first. A player sees what is for everyone,
-// and private rolls meant for their seat.
-fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value>> {
-    let mut rows = db.prepare("SELECT id, kind, author, data, visible_to, created_at FROM log WHERE table_id = ?1 ORDER BY seq DESC")?;
+// A page of the entries this person may see, oldest first, ending just before `before` (or at
+// the newest), and whether older ones are left. A player sees what is for everyone, and
+// private rolls meant for their seat.
+fn log_page(
+    db: &Connection,
+    table_id: &str,
+    access: &Access,
+    before: Option<i64>,
+    page: usize,
+) -> Result<(Vec<Value>, bool)> {
+    let mut rows = db.prepare(
+        "SELECT id, kind, author, data, visible_to, created_at FROM log
+         WHERE table_id = ?1 AND seq < ?2 ORDER BY seq DESC",
+    )?;
     let entries = rows
-        .query_map([table_id], |row| {
+        .query_map(params![table_id, before.unwrap_or(i64::MAX)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -202,6 +216,7 @@ fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut shown = Vec::new();
+    let mut more = false;
     for (entry, kind, author, data, visible_to, at) in entries {
         let visible_to: Vec<String> = serde_json::from_str(&visible_to)?;
         let mine = visible_to.is_empty()
@@ -209,6 +224,10 @@ fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value
             || visible_to.iter().any(|v| access.seat_ids.contains(v));
         if !mine {
             continue;
+        }
+        if shown.len() == page {
+            more = true;
+            break;
         }
         shown.push(json!({
             "id": entry,
@@ -218,12 +237,39 @@ fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value
             "hidden": !visible_to.is_empty(),
             "at": ids::iso(at),
         }));
-        if shown.len() == LOG_SHOWN {
-            break;
-        }
     }
     shown.reverse();
-    Ok(shown)
+    Ok((shown, more))
+}
+
+#[derive(Deserialize)]
+pub struct Before {
+    before: Option<String>,
+}
+
+/// `GET /api/tables/{id}/log?before=`: older log entries, a page at a time, as the log is
+/// scrolled back.
+pub async fn older_log(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<Before>,
+) -> Result<Json<Value>> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let before = query
+        .before
+        .ok_or_else(|| AppError::bad("Say which entry to read back from"))?;
+    let db = state.db();
+    let seq: i64 = db
+        .query_row(
+            "SELECT seq FROM log WHERE table_id = ?1 AND id = ?2",
+            [&id, &before],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("That log entry is gone"))?;
+    let (entries, more) = log_page(&db, &id, &access, Some(seq), LOG_PAGE)?;
+    Ok(Json(json!({ "entries": entries, "more": more })))
 }
 
 /// Who a whisper is for, and who may read it. The DM whispers to one seat; a player only to
