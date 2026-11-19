@@ -1,38 +1,62 @@
-//! Getting the `cloudflared` program for the tunnel: the official build from Cloudflare's
-//! releases on GitHub, kept in the data folder's `bin`. The download is checked against the
-//! SHA-256 GitHub lists for that file before it is ever run.
+//! Getting the `cloudflared` program for the tunnel: one fixed release of Cloudflare's official
+//! build from GitHub, kept in the data folder's `bin`. Its SHA-256 is written here, so the
+//! download is checked against what this app was built with, not against what a web page says
+//! today; a new cloudflared comes with a new version of this app.
 
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const RELEASE: &str = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest";
+/// The cloudflared release this app uses.
+pub const VERSION: &str = "2026.11.1";
+
+// Each file Cloudflare publishes for that release, and its SHA-256.
+const FILES: [(&str, &str, &str, &str); 5] = [
+    (
+        "linux",
+        "x86_64",
+        "cloudflared-linux-amd64",
+        "97bb3b02d23a5980fc9c15a1a270e692da1923f103f920d5b16d4931d5ab55e7",
+    ),
+    (
+        "linux",
+        "aarch64",
+        "cloudflared-linux-arm64",
+        "b155cec3e48e489cfb8e5c602769fb8c771083018d8881d68b4d18a791567c5a",
+    ),
+    (
+        "windows",
+        "x86_64",
+        "cloudflared-windows-amd64.exe",
+        "341deda3db5ec498a0482254d6c38c0b7cf01a30c37bb5dd95d2216d08955e35",
+    ),
+    (
+        "macos",
+        "x86_64",
+        "cloudflared-darwin-amd64.tgz",
+        "5e0403b188dfee71fbd9b995e7dc9910d61b661c52371935ab6475d41185632f",
+    ),
+    (
+        "macos",
+        "aarch64",
+        "cloudflared-darwin-arm64.tgz",
+        "02fe4bcf08f2c09699cff30658228a739a0c47fb75f3653d1b8772a27ade4462",
+    ),
+];
+
+/// The file Cloudflare publishes for this computer and its SHA-256, or none for a computer
+/// they don't build for.
+pub fn asset() -> Option<(&'static str, &'static str)> {
+    FILES
+        .iter()
+        .find(|(os, arch, ..)| *os == std::env::consts::OS && *arch == std::env::consts::ARCH)
+        .map(|(_, _, name, sha)| (*name, *sha))
+}
 
 /// The file Cloudflare publishes for this computer, or none for one they don't build for.
 pub fn asset_name() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some("cloudflared-linux-amd64"),
-        ("linux", "aarch64") => Some("cloudflared-linux-arm64"),
-        ("windows", "x86_64") => Some("cloudflared-windows-amd64.exe"),
-        ("macos", "x86_64") => Some("cloudflared-darwin-amd64.tgz"),
-        ("macos", "aarch64") => Some("cloudflared-darwin-arm64.tgz"),
-        _ => None,
-    }
-}
-
-#[derive(Deserialize)]
-struct Release {
-    assets: Vec<Asset>,
-}
-
-#[derive(Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
-    /// "sha256:..." as GitHub worked it out when the file was published.
-    digest: Option<String>,
+    asset().map(|(name, _)| name)
 }
 
 fn file_name() -> &'static str {
@@ -45,7 +69,7 @@ fn file_name() -> &'static str {
 
 /// Downloads cloudflared into `<data>/bin` and returns where it is.
 pub async fn download(data_dir: &Path) -> Result<PathBuf, String> {
-    let wanted = asset_name()
+    let (wanted, expected) = asset()
         .ok_or("Cloudflare has no cloudflared for this kind of computer: install it yourself")?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
@@ -54,37 +78,10 @@ pub async fn download(data_dir: &Path) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())?;
     let unreachable =
         |error: reqwest::Error| format!("Couldn't reach GitHub for cloudflared: {error}");
-    let release: Release = http
-        .get(RELEASE)
-        .send()
-        .await
-        .map_err(unreachable)?
-        .error_for_status()
-        .map_err(unreachable)?
-        .json()
-        .await
-        .map_err(unreachable)?;
-    let asset = release
-        .assets
-        .into_iter()
-        .find(|a| a.name == wanted)
-        .ok_or("The newest cloudflared release has no file for this computer")?;
-    // Only Cloudflare's own release files, whatever the list says.
-    if !asset
-        .browser_download_url
-        .starts_with("https://github.com/cloudflare/cloudflared/releases/download/")
-    {
-        return Err("The cloudflared download came from an unexpected place".into());
-    }
-    let expected = asset
-        .digest
-        .as_deref()
-        .and_then(|d| d.strip_prefix("sha256:"))
-        .ok_or(
-            "GitHub lists no checksum for cloudflared, so it can't be checked: install it yourself",
-        )?;
+    let address =
+        format!("https://github.com/cloudflare/cloudflared/releases/download/{VERSION}/{wanted}");
     let bytes = http
-        .get(&asset.browser_download_url)
+        .get(&address)
         .send()
         .await
         .map_err(unreachable)?
@@ -93,7 +90,7 @@ pub async fn download(data_dir: &Path) -> Result<PathBuf, String> {
         .bytes()
         .await
         .map_err(unreachable)?;
-    if hex::encode(Sha256::digest(&bytes)) != expected.to_lowercase() {
+    if hex::encode(Sha256::digest(&bytes)) != expected {
         return Err(
             "The cloudflared download doesn't match its checksum: nothing was installed".into(),
         );
@@ -144,9 +141,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn knows_the_file_for_this_computer() {
+    fn knows_the_file_and_its_checksum_for_this_computer() {
         // Every system the app is built for has one.
         assert!(asset_name().is_some());
+        for (_, _, name, sha) in FILES {
+            assert!(name.starts_with("cloudflared-"), "{name}");
+            assert_eq!(sha.len(), 64, "{name}");
+            assert!(
+                sha.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
+        }
     }
 
     // Needs the network: `cargo test -- --ignored`.
