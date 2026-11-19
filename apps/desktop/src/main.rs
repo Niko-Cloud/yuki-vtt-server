@@ -118,7 +118,13 @@ async fn status(shared: State<'_, Shared>) -> Result<Status, String> {
         data_folder: shared.data.display().to_string(),
         library_skipped: running
             .as_ref()
-            .map(|r| r.state.skipped.lock().unwrap_or_else(|p| p.into_inner()).clone())
+            .map(|r| {
+                r.state
+                    .skipped
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+            })
             .unwrap_or_default(),
         start_on_open: start_on_open(&shared),
         has_tray: shared
