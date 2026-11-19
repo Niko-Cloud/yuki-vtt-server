@@ -83,6 +83,7 @@ const PARTS: [(&str, &[&str]); 6] = [
             "folder",
             "tags",
             "favorite",
+            "size",
         ],
     ),
     (
@@ -116,7 +117,7 @@ fn as_json(value: ValueRef<'_>) -> Value {
 }
 
 // Columns kept as numbers; every other one is text.
-const NUMBERS: [&str; 10] = [
+const NUMBERS: [&str; 11] = [
     "locked",
     "ask_to_join",
     "shared_sight",
@@ -127,6 +128,7 @@ const NUMBERS: [&str; 10] = [
     "height",
     "seq",
     "favorite",
+    "size",
 ];
 
 // Text that must read back as `T`.

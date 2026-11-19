@@ -67,7 +67,10 @@ async fn keeps_one_library_for_every_table() {
     let second = table(&app).await;
     let (seat, token) = join(&app, &second.invite, "Tam", "user-1").await;
     let ogre = add(&app, &first, "token").await;
-    assert_eq!(ogre["here"], true);
+    assert_eq!(
+        (&ogre["here"], &ogre["size"]),
+        (&json!(true), &json!(PNG.len()))
+    );
     let ogre = ogre["id"].as_str().unwrap().to_string();
     let chest = add(&app, &first, "prop").await["id"]
         .as_str()
@@ -146,6 +149,13 @@ fn gathers_pictures_kept_beside_their_table() {
     pictures::gather_library(data.path(), &db).unwrap();
     let moved = pictures::library_folder(data.path()).join("pic-1.pic");
     assert_eq!(std::fs::read(moved).unwrap(), PNG);
+    // An older picture learns its size from its file.
+    let size: i64 = db
+        .query_row("SELECT size FROM assets WHERE id = 'pic-1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(size, PNG.len() as i64);
     assert!(!old.join("pic-1.pic").exists());
     // Running again changes nothing.
     pictures::gather_library(data.path(), &db).unwrap();

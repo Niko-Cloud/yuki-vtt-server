@@ -121,16 +121,21 @@ fn library_file(state: &AppState, asset_id: &str) -> Result<PathBuf> {
 }
 
 /// Moves library pictures kept beside their table, as older hosts did, into the shared
-/// library folder. Runs at start; a picture already moved is left alone.
+/// library folder, and notes the size of any picture that lacks one. Runs at start; a picture
+/// already moved is left alone.
 pub fn gather_library(data_dir: &FilePath, db: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let mut rows = db.prepare("SELECT id, table_id FROM assets")?;
+    let mut rows = db.prepare("SELECT id, table_id, size FROM assets")?;
     let pictures = rows
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let library = library_folder(data_dir);
-    for (asset_id, table_id) in pictures {
+    for (asset_id, table_id, size) in pictures {
         let (Ok(asset_id), Ok(table_id)) = (safe(&asset_id), safe(&table_id)) else {
             continue;
         };
@@ -145,6 +150,14 @@ pub fn gather_library(data_dir: &FilePath, db: &rusqlite::Connection) -> rusqlit
                 std::fs::create_dir_all(&library).and_then(|()| std::fs::rename(&old, &new))
         {
             tracing::error!("moving a picture into the library: {error}");
+        }
+        if size == 0
+            && let Ok(file) = std::fs::metadata(&new)
+        {
+            db.execute(
+                "UPDATE assets SET size = ?2 WHERE id = ?1",
+                params![asset_id, file.len() as i64],
+            )?;
         }
     }
     Ok(())
@@ -321,13 +334,13 @@ pub async fn add(
         }
         write(&library_file(&state, &picture_id)?, &data)?;
         db.execute(
-            "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![picture_id, id, upload.kind, name, mime, width, height, ids::now()],
+            "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at, size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![picture_id, id, upload.kind, name, mime, width, height, ids::now(), data.len() as i64],
         )?;
     }
     state.events.changed(&id);
     Ok(Json(
-        json!({ "id": picture_id, "kind": upload.kind, "name": name, "width": width, "height": height, "mime": mime, "here": true, "folder": null, "tags": [], "favorite": false }),
+        json!({ "id": picture_id, "kind": upload.kind, "name": name, "width": width, "height": height, "mime": mime, "here": true, "folder": null, "tags": [], "favorite": false, "size": data.len() }),
     ))
 }
 
@@ -356,7 +369,7 @@ pub fn list(
 }
 
 // The columns a table is sent about a picture, read by `shown_row`.
-const SHOWN: &str = "id, kind, name, width, height, mime, table_id, folder, tags, favorite";
+const SHOWN: &str = "id, kind, name, width, height, mime, table_id, folder, tags, favorite, size";
 
 fn shown_row(row: &rusqlite::Row, table_id: &str) -> rusqlite::Result<Value> {
     let tags: String = row.get(8)?;
@@ -371,6 +384,7 @@ fn shown_row(row: &rusqlite::Row, table_id: &str) -> rusqlite::Result<Value> {
         "folder": row.get::<_, Option<String>>(7)?,
         "tags": serde_json::from_str::<Vec<String>>(&tags).unwrap_or_default(),
         "favorite": row.get::<_, bool>(9)?,
+        "size": row.get::<_, i64>(10)?,
     }))
 }
 

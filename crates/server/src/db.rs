@@ -143,6 +143,10 @@ const STEPS: &[&str] = &[
     ALTER TABLE assets ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE assets ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
 "#,
+    // The bytes each picture takes; the host fills in older ones from their files at start.
+    r#"
+    ALTER TABLE assets ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
