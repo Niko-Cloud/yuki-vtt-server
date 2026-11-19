@@ -922,12 +922,19 @@ pub async fn update(
     let access = access::runner(&state, &id, &credentials(&headers))?;
     if let Some(name) = &body.name {
         let name = scene_name(name)?;
-        let changed = state.db().execute(
+        let db = state.db();
+        let changed = db.execute(
             "UPDATE scenes SET name = ?3 WHERE table_id = ?1 AND id = ?2",
             [&id, &scene, &name],
         )?;
         if changed == 0 {
             return Err(AppError::not_found("That map is gone"));
+        }
+        // The map's folder in the library takes the new name too.
+        if let Some(file) = crate::pictures::map_file(&db, &id, &scene)?
+            && let Some(picture) = load(&db, &id, &scene)?.image
+        {
+            crate::pictures::rename_map(&state, &db, &scene, &file, &name, &picture.mime)?;
         }
     }
     if let Some(folder) = &body.folder {
@@ -968,8 +975,9 @@ pub async fn remove(
     Path((id, scene)): Path<(String, String)>,
 ) -> Result<StatusCode> {
     access::runner(&state, &id, &credentials(&headers))?;
-    {
+    let file = {
         let db = state.db();
+        let file = crate::pictures::map_file(&db, &id, &scene)?;
         if db.execute(
             "DELETE FROM scenes WHERE table_id = ?1 AND id = ?2",
             [&id, &scene],
@@ -986,8 +994,9 @@ pub async fn remove(
                 params![id, next],
             )?;
         }
-    }
-    crate::pictures::forget_map(&state, &id, &scene);
+        file
+    };
+    crate::pictures::forget_map(&state, file);
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1020,10 +1029,11 @@ pub async fn copy(
             return Err(AppError::bad(format!("A table keeps {MOST_SCENES} maps")));
         }
         let name = format!("{} (copy)", name.chars().take(53).collect::<String>());
-        crate::pictures::copy_map(&state, &id, &scene, &copy_id)?;
+        let had = crate::pictures::map_file(&db, &id, &scene)?;
+        let file = crate::pictures::copy_map(&state, had.as_deref(), &name)?;
         db.execute(
-            "INSERT INTO scenes (id, table_id, name, folder, position, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![copy_id, id, name, folder, count, data, ids::now()],
+            "INSERT INTO scenes (id, table_id, name, folder, position, data, created_at, file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![copy_id, id, name, folder, count, data, ids::now(), file],
         )?;
         (name, folder)
     };

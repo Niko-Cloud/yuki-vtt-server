@@ -133,32 +133,53 @@ async fn keeps_one_library_for_every_table() {
 }
 
 #[test]
-fn gathers_pictures_kept_beside_their_table() {
+fn gathers_pictures_kept_the_old_way_into_readable_folders() {
     let data = tempfile::tempdir().unwrap();
     let db = db::open(&data.path().join("tables.db")).unwrap();
-    db.execute(
-        "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at)
-         VALUES ('pic-1', 'tab-1', 'token', 'Ogre', 'image/png', 64, 64, 0)",
-        [],
+    db.execute_batch(
+        "INSERT INTO tables (id, name, edition, dm_name, invite_token, created_at, updated_at)
+           VALUES ('tab-1', 'Tuesday', '2014', 'Yuki', 'inv-1', 0, 0);
+         INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at)
+           VALUES ('pic-1', 'tab-1', 'token', 'Ogre Chief', 'image/png', 64, 64, 0),
+                  ('pic-2', 'tab-1', 'prop', 'Chest', 'image/png', 64, 64, 0);
+         INSERT INTO scenes (id, table_id, name, position, data, created_at)
+           VALUES ('scn-1', 'tab-1', 'Goblin cave', 0,
+                   '{\"width\":700,\"height\":700,\"image\":{\"mime\":\"image/png\",\"version\":1}}', 0);",
     )
     .unwrap();
-    let old = data.path().join("pictures").join("tab-1");
-    std::fs::create_dir_all(&old).unwrap();
-    std::fs::write(old.join("pic-1.pic"), PNG).unwrap();
+    // One beside its table (the oldest hosts), one in the id-named library, and a map.
+    let beside = data.path().join("pictures").join("tab-1");
+    std::fs::create_dir_all(&beside).unwrap();
+    std::fs::write(beside.join("pic-1.pic"), PNG).unwrap();
+    std::fs::write(beside.join("scn-1.map"), PNG).unwrap();
+    std::fs::create_dir_all(data.path().join("library")).unwrap();
+    std::fs::write(data.path().join("library").join("pic-2.pic"), PNG).unwrap();
 
     pictures::gather_library(data.path(), &db).unwrap();
-    let moved = pictures::library_folder(data.path()).join("pic-1.pic");
-    assert_eq!(std::fs::read(moved).unwrap(), PNG);
-    // An older picture learns its size from its file.
-    let size: i64 = db
-        .query_row("SELECT size FROM assets WHERE id = 'pic-1'", [], |row| {
-            row.get(0)
-        })
+    let library = data.path().join("Library");
+    for path in [
+        "Tokens/Ogre Chief/ogre-chief.png",
+        "Props/Chest/chest.png",
+        "Maps/Goblin cave/map.png",
+    ] {
+        assert_eq!(std::fs::read(library.join(path)).unwrap(), PNG, "{path}");
+    }
+    let (file, size): (String, i64) = db
+        .query_row(
+            "SELECT file, size FROM assets WHERE id = 'pic-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .unwrap();
-    assert_eq!(size, PNG.len() as i64);
-    assert!(!old.join("pic-1.pic").exists());
-    // Running again changes nothing.
+    assert_eq!(
+        (file.as_str(), size),
+        ("Tokens/Ogre Chief/ogre-chief.png", PNG.len() as i64)
+    );
+    // The old folders are gone, and running again changes nothing.
+    assert!(!data.path().join("pictures").exists());
+    assert!(!data.path().join("library").exists());
     pictures::gather_library(data.path(), &db).unwrap();
+    assert!(library.join("Tokens/Ogre Chief/ogre-chief.png").is_file());
 }
 
 #[tokio::test]
@@ -353,4 +374,77 @@ async fn fetches_for_whoever_may_add_pictures() {
     let (status, refused) = call(&app, As::Dm, "POST", &path, Some(inside)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(refused.to_string().contains("open internet"));
+}
+
+#[tokio::test]
+async fn keeps_each_picture_in_its_own_readable_folder() {
+    let data = tempfile::tempdir().unwrap();
+    let app = host_in(data.path());
+    let t = table(&app).await;
+    let library = data.path().join("Library");
+    let upload_as = |name: &'static str| {
+        let app = app.clone();
+        let id = t.id.clone();
+        async move {
+            let path = format!("/tables/{id}/assets?kind=token&name={name}&width=64&height=64");
+            upload(&app, As::Dm, "POST", &path, PNG).await.1["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let ogre = upload_as("Ogre%20Chief").await;
+    assert!(library.join("Tokens/Ogre Chief/ogre-chief.png").is_file());
+    // The same name gets its own folder.
+    upload_as("Ogre%20Chief").await;
+    assert!(
+        library
+            .join("Tokens/Ogre Chief (2)/ogre-chief.png")
+            .is_file()
+    );
+
+    // Renaming in the app renames the folder, and anything kept beside the picture moves along.
+    std::fs::write(library.join("Tokens/Ogre Chief/notes.txt"), "keep").unwrap();
+    let rename = json!({ "name": "Ogre King" });
+    let at = format!("/tables/{}/assets/{ogre}", t.id);
+    call(&app, As::Dm, "PATCH", &at, Some(rename)).await;
+    assert!(library.join("Tokens/Ogre King/ogre-king.png").is_file());
+    assert!(!library.join("Tokens/Ogre Chief").exists());
+    let pass = pass_for(&app, &t.id).await;
+    let (status, _, size) = fetch(&app, &format!("{at}?pass={pass}")).await;
+    assert_eq!((status, size), (StatusCode::OK, PNG.len()));
+
+    // Deleting takes the file away, and its folder once empty.
+    std::fs::remove_file(library.join("Tokens/Ogre King/notes.txt")).unwrap();
+    call(&app, As::Dm, "DELETE", &at, None).await;
+    assert!(!library.join("Tokens/Ogre King").exists());
+
+    // A map's picture lives under Maps, follows a rename and a copy, and goes with its map.
+    let scene = cave(&app, &t).await;
+    let image = format!("/tables/{}/scenes/{scene}/image?width=700&height=700", t.id);
+    upload(&app, As::Dm, "PUT", &image, PNG).await;
+    assert!(library.join("Maps/Cave/map.png").is_file());
+    let renamed = json!({ "name": "Goblin cave" });
+    let map_at = format!("/tables/{}/scenes/{scene}", t.id);
+    call(&app, As::Dm, "PATCH", &map_at, Some(renamed)).await;
+    assert!(library.join("Maps/Goblin cave/map.png").is_file());
+    let (_, copy) = call(&app, As::Dm, "POST", &format!("{map_at}/copy"), None).await;
+    assert!(library.join("Maps/Goblin cave (copy)/map.png").is_file());
+    let copy_at = format!("/tables/{}/scenes/{}", t.id, copy["id"].as_str().unwrap());
+    call(&app, As::Dm, "DELETE", &copy_at, None).await;
+    assert!(!library.join("Maps/Goblin cave (copy)").exists());
+    call(&app, As::Dm, "DELETE", &format!("/tables/{}", t.id), None).await;
+    assert!(!library.join("Maps/Goblin cave").exists());
+}
+
+async fn pass_for(app: &Router, table: &str) -> String {
+    let (_, given) = call(
+        app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{table}/media-token"),
+        None,
+    )
+    .await;
+    given["pass"].as_str().unwrap().to_string()
 }

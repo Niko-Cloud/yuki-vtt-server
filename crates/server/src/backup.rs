@@ -3,12 +3,12 @@
 //! row, and the table's pictures beside it: its map pictures, and the library pictures it
 //! uploaded or uses.
 
-use crate::db;
+use crate::{db, library};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use rusqlite::types::{Value as Sql, ValueRef};
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use serde_json::{Map, Number, Value, json};
 use std::io::Read;
 use std::path::Path;
@@ -266,7 +266,9 @@ pub fn export(data_dir: &Path, table_id: &str, out: &Path) -> Result<(), String>
     archive
         .append_data(&mut header, "table.json", text.as_slice())
         .map_err(problem("Couldn't write the backup"))?;
-    for (name, path) in picture_files(data_dir, table_id, &rows["assets"]) {
+    let files = picture_files(&db, data_dir, table_id, &rows["assets"])
+        .map_err(|e| format!("Couldn't read the pictures: {e}"))?;
+    for (name, path) in files {
         archive
             .append_path_with_name(&path, format!("pictures/{name}"))
             .map_err(problem("Couldn't add the pictures"))?;
@@ -278,41 +280,61 @@ pub fn export(data_dir: &Path, table_id: &str, out: &Path) -> Result<(), String>
     Ok(())
 }
 
-// The files a backup carries: the table's map pictures, and the library pictures in its rows.
-// A host that hasn't started since the library was shared still keeps those beside the table.
+// The files a backup carries, named by id inside it: the table's map pictures, and the library
+// pictures in its rows. A host that hasn't started since an update may still keep them the old
+// way, by id.
 fn picture_files(
+    db: &Connection,
     data_dir: &Path,
     table_id: &str,
     assets: &Value,
-) -> Vec<(String, std::path::PathBuf)> {
-    let beside = data_dir.join("pictures").join(table_id);
-    let mut files: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(&beside)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            name.ends_with(".map").then(|| (name, entry.path()))
-        })
-        .collect();
-    let library = crate::pictures::library_folder(data_dir);
-    for row in assets.as_array().into_iter().flatten() {
-        let name = format!("{}.pic", row["id"].as_str().unwrap_or_default());
-        let from = row["table_id"].as_str().unwrap_or_default();
-        if !safe_picture(&name) || !safe_picture(&format!("{from}.map")) {
+) -> rusqlite::Result<Vec<(String, std::path::PathBuf)>> {
+    let in_library = |file: Option<String>| file.and_then(|f| library::resolve(data_dir, &f));
+    let mut files = Vec::new();
+    let mut rows = db.prepare("SELECT id, file FROM scenes WHERE table_id = ?1")?;
+    let maps = rows
+        .query_map([table_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<(String, Option<String>)>>>()?;
+    for (scene, file) in maps {
+        let name = format!("{scene}.map");
+        if !safe_picture(&name) {
             continue;
         }
-        let found = [
-            library.join(&name),
-            data_dir.join("pictures").join(from).join(&name),
-        ]
-        .into_iter()
-        .find(|path| path.is_file());
+        let found = in_library(file)
+            .into_iter()
+            .chain([data_dir.join("pictures").join(table_id).join(&name)])
+            .find(|path| path.is_file());
         if let Some(path) = found {
             files.push((name, path));
         }
     }
-    files
+    for row in assets.as_array().into_iter().flatten() {
+        let id = row["id"].as_str().unwrap_or_default();
+        let name = format!("{id}.pic");
+        let from = row["table_id"].as_str().unwrap_or_default();
+        if !safe_picture(&name) {
+            continue;
+        }
+        let file: Option<String> = db
+            .query_row("SELECT file FROM assets WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .flatten();
+        let found = in_library(file)
+            .into_iter()
+            .chain([
+                data_dir.join("library").join(&name),
+                data_dir.join("pictures").join(from).join(&name),
+            ])
+            .find(|path| path.is_file());
+        if let Some(path) = found {
+            files.push((name, path));
+        }
+    }
+    Ok(files)
 }
 
 // Picture files are named by the host: letters, digits and dashes, then .map or .pic.
@@ -405,6 +427,16 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
     if here > 0 && !replace {
         return Err(format!("{name} is already on this computer"));
     }
+    // A table brought back over itself: its old map pictures make way for the backup's.
+    let replaced: Vec<String> = {
+        let mut rows = tx
+            .prepare("SELECT file FROM scenes WHERE table_id = ?1 AND file IS NOT NULL")
+            .map_err(|e| e.to_string())?;
+        rows.query_map([&id], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(|e| e.to_string())?
+    };
     tx.execute("DELETE FROM tables WHERE id = ?1", [&id])
         .map_err(|e| e.to_string())?;
     for (part, columns) in PARTS {
@@ -455,23 +487,63 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
         [&id],
     )
     .map_err(|e| e.to_string())?;
-    let folder = data_dir.join("pictures").join(&id);
-    let library = crate::pictures::library_folder(data_dir);
-    let _ = std::fs::remove_dir_all(&folder);
-    std::fs::create_dir_all(&folder).map_err(problem("Couldn't make the pictures folder"))?;
-    std::fs::create_dir_all(&library).map_err(problem("Couldn't make the library folder"))?;
+    // Each picture gets its place in the library folder now; the files are written once the
+    // rows are in, so a running host's scan of the folder never takes them for new ones.
+    for file in &replaced {
+        library::drop_file(data_dir, file);
+    }
+    let mut writes: Vec<(String, Vec<u8>)> = Vec::new();
     for (file, bytes) in pictures {
-        let path = if file.ends_with(".pic") {
-            library.join(&file)
-        } else {
-            folder.join(&file)
-        };
-        if file.ends_with(".pic") && path.exists() {
+        let Some((stem, kind)) = file.rsplit_once('.') else {
             continue;
+        };
+        let placed: Option<String> = if kind == "map" {
+            let row: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT name, data FROM scenes WHERE table_id = ?1 AND id = ?2",
+                    [&id, stem],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            row.and_then(|(name, data)| {
+                let mime = serde_json::from_str::<Value>(&data).ok()?["image"]["mime"]
+                    .as_str()?
+                    .to_string();
+                let file = library::place_map(data_dir, &name, &mime);
+                tx.execute("UPDATE scenes SET file = ?2 WHERE id = ?1", [stem, &file])
+                    .ok()?;
+                Some(file)
+            })
+        } else {
+            // A picture this host has already keeps its own file.
+            let row: Option<(String, String, String)> = tx
+                .query_row(
+                    "SELECT kind, name, mime FROM assets WHERE id = ?1 AND file IS NULL",
+                    [stem],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            row.and_then(|(kind, name, mime)| {
+                let file = library::place(data_dir, &kind, &name, &mime, None);
+                tx.execute("UPDATE assets SET file = ?2 WHERE id = ?1", [stem, &file])
+                    .ok()?;
+                Some(file)
+            })
+        };
+        if let Some(placed) = placed {
+            // The folder is made now, so the next picture of the same name gets " (2)".
+            if let Some(path) = library::resolve(data_dir, &placed) {
+                let _ = std::fs::create_dir_all(path.parent().expect("a picture's folder"));
+            }
+            writes.push((placed, bytes));
         }
-        std::fs::write(path, bytes).map_err(problem("Couldn't save a picture"))?;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    for (file, bytes) in writes {
+        library::put(data_dir, &file, &bytes).map_err(problem("Couldn't save a picture"))?;
+    }
     Ok((id, name))
 }
 

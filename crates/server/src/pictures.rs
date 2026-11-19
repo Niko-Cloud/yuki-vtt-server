@@ -5,6 +5,7 @@
 use crate::access::{self, Credentials, Role};
 use crate::error::{AppError, Result};
 use crate::ids;
+use crate::library;
 use crate::maps;
 use crate::state::AppState;
 use axum::Json;
@@ -92,10 +93,6 @@ pub fn audio_type(data: &[u8], limit: usize) -> Result<&'static str> {
     Ok(mime)
 }
 
-fn folder(state: &AppState, table_id: &str) -> PathBuf {
-    state.config.data_dir.join("pictures").join(table_id)
-}
-
 // Ids are made by the host and only ever letters, digits and dashes, so they are safe names.
 fn safe(name: &str) -> Result<&str> {
     let ok = !name.is_empty()
@@ -108,58 +105,146 @@ fn safe(name: &str) -> Result<&str> {
     }
 }
 
-fn map_file(state: &AppState, table_id: &str, scene_id: &str) -> Result<PathBuf> {
-    Ok(folder(state, safe(table_id)?).join(format!("{}.map", safe(scene_id)?)))
+fn not_saved(error: std::io::Error) -> AppError {
+    tracing::error!("saving a picture: {error}");
+    AppError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "The host couldn't save the picture",
+    )
 }
 
-pub fn library_folder(data_dir: &FilePath) -> PathBuf {
-    data_dir.join("library")
+/// Where a library picture is kept, inside the library folder.
+fn library_path(db: &rusqlite::Connection, data_dir: &FilePath, asset_id: &str) -> Result<PathBuf> {
+    let file: Option<String> = db
+        .query_row("SELECT file FROM assets WHERE id = ?1", [asset_id], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .flatten();
+    file.and_then(|file| library::resolve(data_dir, &file))
+        .ok_or_else(|| AppError::not_found("That picture is gone"))
 }
 
-fn library_file(state: &AppState, asset_id: &str) -> Result<PathBuf> {
-    Ok(library_folder(&state.config.data_dir).join(format!("{}.pic", safe(asset_id)?)))
+/// The file of a map's picture, inside the library folder, if it has one.
+pub fn map_file(
+    db: &rusqlite::Connection,
+    table_id: &str,
+    scene_id: &str,
+) -> Result<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT file FROM scenes WHERE table_id = ?1 AND id = ?2",
+            [table_id, scene_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
 }
 
-/// Moves library pictures kept beside their table, as older hosts did, into the shared
-/// library folder, and notes the size of any picture that lacks one. Runs at start; a picture
-/// already moved is left alone.
+/// Brings pictures kept the old way (by id, beside their table or in `library/`) into the
+/// readable library folder, and notes the size of any picture that lacks one. Runs at start;
+/// a picture already in place is left alone.
 pub fn gather_library(data_dir: &FilePath, db: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let mut rows = db.prepare("SELECT id, table_id, size FROM assets")?;
+    let mut rows =
+        db.prepare("SELECT id, table_id, kind, name, mime, size FROM assets WHERE file IS NULL")?;
     let pictures = rows
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let library = library_folder(data_dir);
-    for (asset_id, table_id, size) in pictures {
-        let (Ok(asset_id), Ok(table_id)) = (safe(&asset_id), safe(&table_id)) else {
+    for (asset_id, table_id, kind, name, mime, size) in pictures {
+        let Ok(asset_id) = safe(&asset_id) else {
+            continue;
+        };
+        let mut old = vec![data_dir.join("library").join(format!("{asset_id}.pic"))];
+        if let Ok(table_id) = safe(&table_id) {
+            old.push(
+                data_dir
+                    .join("pictures")
+                    .join(table_id)
+                    .join(format!("{asset_id}.pic")),
+            );
+        }
+        let Some(old) = old.into_iter().find(|path| path.is_file()) else {
+            continue;
+        };
+        let file = library::place(data_dir, &kind, &name, &mime, None);
+        if let Some(new) = library::resolve(data_dir, &file) {
+            let moved = std::fs::create_dir_all(new.parent().expect("a picture's folder"))
+                .and_then(|()| std::fs::rename(&old, &new));
+            match moved {
+                Ok(()) => {
+                    let size = if size > 0 {
+                        size
+                    } else {
+                        std::fs::metadata(&new).map(|m| m.len() as i64).unwrap_or(0)
+                    };
+                    db.execute(
+                        "UPDATE assets SET file = ?2, size = ?3 WHERE id = ?1",
+                        params![asset_id, file, size],
+                    )?;
+                }
+                Err(error) => tracing::error!("moving a picture into the library: {error}"),
+            }
+        }
+    }
+    let mut rows = db.prepare("SELECT id, table_id, name, data FROM scenes WHERE file IS NULL")?;
+    let maps = rows
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (scene_id, table_id, name, data) in maps {
+        let (Ok(scene_id), Ok(table_id)) = (safe(&scene_id), safe(&table_id)) else {
             continue;
         };
         let old = data_dir
             .join("pictures")
             .join(table_id)
-            .join(format!("{asset_id}.pic"));
-        let new = library.join(format!("{asset_id}.pic"));
-        if old.exists()
-            && !new.exists()
-            && let Err(error) =
-                std::fs::create_dir_all(&library).and_then(|()| std::fs::rename(&old, &new))
-        {
-            tracing::error!("moving a picture into the library: {error}");
-        }
-        if size == 0
-            && let Ok(file) = std::fs::metadata(&new)
-        {
-            db.execute(
-                "UPDATE assets SET size = ?2 WHERE id = ?1",
-                params![asset_id, file.len() as i64],
-            )?;
+            .join(format!("{scene_id}.map"));
+        let mime = serde_json::from_str::<Value>(&data)
+            .ok()
+            .and_then(|map| map["image"]["mime"].as_str().map(str::to_string));
+        let (true, Some(mime)) = (old.is_file(), mime) else {
+            continue;
+        };
+        let file = library::place_map(data_dir, &name, &mime);
+        if let Some(new) = library::resolve(data_dir, &file) {
+            let moved = std::fs::create_dir_all(new.parent().expect("a map's folder"))
+                .and_then(|()| std::fs::rename(&old, &new));
+            match moved {
+                Ok(()) => {
+                    db.execute(
+                        "UPDATE scenes SET file = ?2 WHERE id = ?1",
+                        params![scene_id, file],
+                    )?;
+                }
+                Err(error) => tracing::error!("moving a map picture into the library: {error}"),
+            }
         }
     }
+    // The old folders go once nothing is left in them.
+    let _ = std::fs::remove_dir(data_dir.join("library"));
+    for entry in std::fs::read_dir(data_dir.join("pictures"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let _ = std::fs::remove_dir(entry.path());
+    }
+    let _ = std::fs::remove_dir(data_dir.join("pictures"));
     Ok(())
 }
 
@@ -170,21 +255,6 @@ pub fn kind_of(db: &rusqlite::Connection, asset_id: &str) -> Result<String> {
     })
     .optional()?
     .ok_or_else(|| AppError::not_found("That picture is gone"))
-}
-
-// Written whole or not at all: a new name first, then moved into place.
-fn write(path: &PathBuf, data: &[u8]) -> Result<()> {
-    let failed = |error: std::io::Error| {
-        tracing::error!("saving a picture: {error}");
-        AppError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "The host couldn't save the picture",
-        )
-    };
-    std::fs::create_dir_all(path.parent().expect("a picture's folder")).map_err(failed)?;
-    let part = path.with_extension("part");
-    std::fs::write(&part, data).map_err(failed)?;
-    std::fs::rename(&part, path).map_err(failed)
 }
 
 fn send(path: PathBuf, mime: &str) -> Result<Response> {
@@ -205,27 +275,50 @@ fn send(path: PathBuf, mime: &str) -> Result<Response> {
 }
 
 /// A map was deleted: its picture goes too.
-pub fn forget_map(state: &AppState, table_id: &str, scene_id: &str) {
-    if let Ok(path) = map_file(state, table_id, scene_id) {
-        let _ = std::fs::remove_file(path);
+pub fn forget_map(state: &AppState, file: Option<String>) {
+    if let Some(file) = file {
+        library::drop_file(&state.config.data_dir, &file);
     }
 }
 
-/// A map was copied: the copy gets its own copy of the picture, if there is one.
-pub fn copy_map(state: &AppState, table_id: &str, from: &str, to: &str) -> Result<()> {
-    let picture = map_file(state, table_id, from)?;
-    if picture.exists() {
-        let data = std::fs::read(&picture)
-            .map_err(|_| AppError::not_found("This map's picture couldn't be read"))?;
-        write(&map_file(state, table_id, to)?, &data)?;
+/// A map was copied: the copy gets its own copy of the picture, under its own name.
+pub fn copy_map(state: &AppState, file: Option<&str>, name: &str) -> Result<Option<String>> {
+    let Some(file) = file else {
+        return Ok(None);
+    };
+    let data_dir = &state.config.data_dir;
+    let from = library::resolve(data_dir, file)
+        .ok_or_else(|| AppError::not_found("This map's picture couldn't be read"))?;
+    let data = std::fs::read(&from)
+        .map_err(|_| AppError::not_found("This map's picture couldn't be read"))?;
+    let mime = picture_type(&data, MAP_LIMIT, VIDEO_MAP_LIMIT)?;
+    let copy = library::place_map(data_dir, name, mime);
+    library::put(data_dir, &copy, &data).map_err(not_saved)?;
+    Ok(Some(copy))
+}
+
+/// A renamed map's picture moves to a folder of its new name.
+pub fn rename_map(
+    state: &AppState,
+    db: &rusqlite::Connection,
+    scene_id: &str,
+    file: &str,
+    name: &str,
+    mime: &str,
+) -> Result<()> {
+    if let Some(moved) = library::rehome(&state.config.data_dir, file, "map", name, mime) {
+        db.execute(
+            "UPDATE scenes SET file = ?2 WHERE id = ?1",
+            params![scene_id, moved],
+        )?;
     }
     Ok(())
 }
 
 /// A table was deleted: its map pictures go. The library keeps what was uploaded there.
-pub fn forget_table(state: &AppState, table_id: &str) {
-    if safe(table_id).is_ok() {
-        let _ = std::fs::remove_dir_all(folder(state, table_id));
+pub fn forget_table(state: &AppState, files: Vec<String>) {
+    for file in files {
+        library::drop_file(&state.config.data_dir, &file);
     }
 }
 
@@ -252,7 +345,27 @@ pub async fn set_map(
     {
         let db = state.db();
         maps::load(&db, &id, &scene)?;
-        write(&map_file(&state, &id, &scene)?, &data)?;
+        let name: String = db.query_row(
+            "SELECT name FROM scenes WHERE table_id = ?1 AND id = ?2",
+            [&id, &scene],
+            |row| row.get(0),
+        )?;
+        // A new picture of the same type replaces the old in its folder; another type gets
+        // its own file, and the old one goes.
+        let had = map_file(&db, &id, &scene)?;
+        let data_dir = &state.config.data_dir;
+        let file = match &had {
+            Some(file) if file.ends_with(&format!(".{}", library::extension(mime))) => file.clone(),
+            _ => library::place_map(data_dir, &name, mime),
+        };
+        library::put(data_dir, &file, &data).map_err(not_saved)?;
+        if let Some(old) = had.filter(|old| *old != file) {
+            library::drop_file(data_dir, &old);
+        }
+        db.execute(
+            "UPDATE scenes SET file = ?3 WHERE table_id = ?1 AND id = ?2",
+            params![id, scene, file],
+        )?;
         maps::set_picture(&db, &id, &scene, mime, size.width, size.height)?;
     }
     state.events.changed(&id);
@@ -272,10 +385,17 @@ pub async fn map(
     Query(seen): Query<Seen>,
 ) -> Result<Response> {
     access::at_table(&state, &id, &Credentials::from(&headers, seen.pass))?;
-    let picture = maps::load(&state.db(), &id, &scene)?
-        .image
+    let (picture, file) = {
+        let db = state.db();
+        let picture = maps::load(&db, &id, &scene)?
+            .image
+            .ok_or_else(|| AppError::not_found("This map has no picture"))?;
+        (picture, map_file(&db, &id, &scene)?)
+    };
+    let path = file
+        .and_then(|file| library::resolve(&state.config.data_dir, &file))
         .ok_or_else(|| AppError::not_found("This map has no picture"))?;
-    send(map_file(&state, &id, &scene)?, &picture.mime)
+    send(path, &picture.mime)
 }
 
 #[derive(Deserialize)]
@@ -343,10 +463,13 @@ pub async fn add(
                 "A library keeps {MOST_PICTURES} pictures"
             )));
         }
-        write(&library_file(&state, &picture_id)?, &data)?;
+        // Written with the database held, so a scan of the folder never sees it half added.
+        let data_dir = &state.config.data_dir;
+        let file = library::place(data_dir, &upload.kind, &name, mime, None);
+        library::put(data_dir, &file, &data).map_err(not_saved)?;
         db.execute(
-            "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at, size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![picture_id, id, upload.kind, name, mime, width, height, ids::now(), data.len() as i64],
+            "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at, size, file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![picture_id, id, upload.kind, name, mime, width, height, ids::now(), data.len() as i64, file],
         )?;
     }
     state.events.changed(&id);
@@ -420,14 +543,38 @@ pub async fn picture(
     Query(seen): Query<Seen>,
 ) -> Result<Response> {
     access::at_table(&state, &id, &Credentials::from(&headers, seen.pass))?;
-    let mime: String = state
-        .db()
-        .query_row("SELECT mime FROM assets WHERE id = ?1", [&asset], |row| {
-            row.get(0)
-        })
-        .optional()?
-        .ok_or_else(|| AppError::not_found("That picture is gone"))?;
-    send(library_file(&state, &asset)?, &mime)
+    let (mime, path) = {
+        let db = state.db();
+        let mime: String = db
+            .query_row("SELECT mime FROM assets WHERE id = ?1", [&asset], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| AppError::not_found("That picture is gone"))?;
+        (mime, library_path(&db, &state.config.data_dir, &asset)?)
+    };
+    send(path, &mime)
+}
+
+/// Takes a deleted picture off every map, handout, track and background, and says which tables
+/// it was at.
+pub fn forget_everywhere(db: &rusqlite::Connection, asset_id: &str) -> Result<Vec<String>> {
+    let mut rows = db.prepare("SELECT id FROM tables")?;
+    let tables = rows
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for table in &tables {
+        maps::forget_picture(db, table, asset_id)?;
+    }
+    for column in ["handout", "music", "background"] {
+        db.execute(
+            &format!(
+                "UPDATE tables SET {column} = NULL WHERE json_extract({column}, '$.assetId') = ?1"
+            ),
+            [asset_id],
+        )?;
+    }
+    Ok(tables)
 }
 
 // A co-DM looks after what was uploaded at their table; the DM looks after the whole library.
@@ -511,6 +658,20 @@ pub async fn change(
                 "UPDATE assets SET name = ?2 WHERE id = ?1",
                 params![asset, name],
             )?;
+            // The picture's folder takes the new name, so the library folder reads the same.
+            let (kind, mime, file): (String, String, Option<String>) = db.query_row(
+                "SELECT kind, mime, file FROM assets WHERE id = ?1",
+                [&asset],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if let Some(moved) = file
+                .and_then(|file| library::rehome(&state.config.data_dir, &file, &kind, name, &mime))
+            {
+                db.execute(
+                    "UPDATE assets SET file = ?2 WHERE id = ?1",
+                    params![asset, moved],
+                )?;
+            }
         }
         if let Some(folder) = &folder {
             db.execute(
@@ -570,23 +731,16 @@ pub async fn remove(
                 "Only the DM deletes pictures from their other tables",
             ));
         }
-        let mut rows = db.prepare("SELECT id FROM tables")?;
-        let tables = rows
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let file: Option<String> =
+            db.query_row("SELECT file FROM assets WHERE id = ?1", [&asset], |row| {
+                row.get(0)
+            })?;
         db.execute("DELETE FROM assets WHERE id = ?1", [&asset])?;
-        for table in &tables {
-            maps::forget_picture(&db, table, &asset)?;
+        if let Some(file) = file {
+            library::drop_file(&state.config.data_dir, &file);
         }
-        for column in ["handout", "music", "background"] {
-            db.execute(
-                &format!("UPDATE tables SET {column} = NULL WHERE json_extract({column}, '$.assetId') = ?1"),
-                [&asset],
-            )?;
-        }
-        tables
+        forget_everywhere(&db, &asset)?
     };
-    let _ = std::fs::remove_file(library_file(&state, &asset)?);
     for table in &tables {
         state.events.changed(table);
     }

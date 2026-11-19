@@ -156,12 +156,17 @@ pub async fn delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
     access::owner(&state, &credentials(&headers))?;
-    found(
-        state
-            .db()
-            .execute("DELETE FROM tables WHERE id = ?1", [&id])?,
-    )?;
-    crate::pictures::forget_table(&state, &id);
+    let files = {
+        let db = state.db();
+        let mut rows =
+            db.prepare("SELECT file FROM scenes WHERE table_id = ?1 AND file IS NOT NULL")?;
+        let files = rows
+            .query_map([&id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        found(db.execute("DELETE FROM tables WHERE id = ?1", [&id])?)?;
+        files
+    };
+    crate::pictures::forget_table(&state, files);
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }

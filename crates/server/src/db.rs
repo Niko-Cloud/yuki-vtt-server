@@ -147,6 +147,11 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE assets ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
 "#,
+    // Where each picture lives in the readable library folder (`Tokens/Goblin/goblin.png`).
+    r#"
+    ALTER TABLE assets ADD COLUMN file TEXT;
+    ALTER TABLE scenes ADD COLUMN file TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

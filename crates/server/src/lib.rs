@@ -12,6 +12,7 @@ pub mod events;
 pub mod fog;
 pub mod host;
 pub mod ids;
+pub mod library;
 pub mod limits;
 pub mod maps;
 pub mod pictures;
