@@ -201,3 +201,111 @@ async fn answers_a_screen_that_has_the_table_with_only_what_changed() {
     .await;
     assert_eq!(theirs["you"]["role"], "player");
 }
+
+// Bytes on the DM's upload for one change, on a table set up like a real night: 150 walls,
+// 10 tokens, a full log, 12 players and the DM all looking.
+#[tokio::test]
+async fn keeps_a_change_to_a_few_hundred_bytes_per_screen() {
+    let app = host();
+    let t = table(&app).await;
+    let mut seats = vec![];
+    for i in 0..12 {
+        seats.push(
+            join(
+                &app,
+                &t.invite,
+                &format!("Player {i}"),
+                &format!("user-{i}"),
+            )
+            .await
+            .1,
+        );
+    }
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(serde_json::json!({ "name": "Dungeon", "setup": { "width": 2100, "height": 1400, "grid": { "size": 70, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true } } })),
+    )
+    .await;
+    let scene = made["id"].as_str().unwrap();
+    let walls: Vec<_> = (0..150)
+        .map(|w| serde_json::json!({ "id": format!("w{w}"), "a": [(w * 13) % 2100, (w * 7) % 1400], "b": [(w * 13) % 2100 + 70, (w * 7) % 1400 + 35] }))
+        .collect();
+    let lighting = serde_json::json!({ "fog": { "mode": "dynamic", "light": "bright", "remember": false }, "walls": walls, "lights": [] });
+    let at = format!("/tables/{}/scenes/{scene}", t.id);
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting),
+    )
+    .await;
+    for i in 0..10 {
+        let goblin = serde_json::json!({ "name": format!("Goblin {i}"), "x": 2 + i, "y": 3 });
+        call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(goblin)).await;
+    }
+    for i in 0..40 {
+        let roll = serde_json::json!({ "label": format!("Attack {i}"), "expression": "1d20+5" });
+        call(
+            &app,
+            As::Dm,
+            "POST",
+            &format!("/tables/{}/roll", t.id),
+            Some(roll),
+        )
+        .await;
+    }
+
+    // Every screen has the table; then the DM moves a goblin and rolls.
+    let path = format!("/tables/{}", t.id);
+    let mut whole_bytes = 0;
+    let mut versions = vec![];
+    for who in std::iter::once(None).chain(seats.iter().map(Some)) {
+        let as_who = who.map(|s| As::Seat(s)).unwrap_or(As::Dm);
+        let (_, view) = call(&app, as_who, "GET", &path, None).await;
+        whole_bytes += view.to_string().len();
+        versions.push(view["version"].as_str().unwrap().to_string());
+    }
+    let (_, view) = call(&app, As::Dm, "GET", &path, None).await;
+    let goblin = view["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let x = serde_json::json!({ "x": 9 });
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{at}/tokens/{goblin}"),
+        Some(x),
+    )
+    .await;
+    let roll = serde_json::json!({ "label": "Fireball", "expression": "8d6" });
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/roll", t.id),
+        Some(roll),
+    )
+    .await;
+
+    let mut delta_bytes = 0;
+    for (who, version) in std::iter::once(None)
+        .chain(seats.iter().map(Some))
+        .zip(&versions)
+    {
+        let as_who = who.map(|s| As::Seat(s)).unwrap_or(As::Dm);
+        let (_, changed) = call(&app, as_who, "GET", &format!("{path}?base={version}"), None).await;
+        assert!(changed.get("party").is_none(), "only what changed");
+        delta_bytes += changed.to_string().len();
+    }
+    println!(
+        "13 screens: whole table {whole_bytes} bytes, one move and a roll {delta_bytes} bytes"
+    );
+    assert!(delta_bytes < 13 * 1024, "under 1 KB per screen");
+    assert!(delta_bytes * 20 < whole_bytes);
+}
