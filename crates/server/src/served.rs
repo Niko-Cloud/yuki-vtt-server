@@ -16,6 +16,9 @@ fn longest_side(kind: &str) -> u32 {
     }
 }
 const QUALITY: f32 = 82.0;
+// A map's first look: small enough to arrive at once, sharp enough to play on for a moment.
+const PREVIEW_SIDE: u32 = 512;
+const PREVIEW_QUALITY: f32 = 60.0;
 
 fn cache(data_dir: &Path) -> PathBuf {
     data_dir.join("cache")
@@ -95,7 +98,7 @@ pub fn served(data_dir: &Path, id: &str, path: &Path, kind: &str, mime: &str) ->
     }
     match make_copy(&data, side) {
         Some(webp) if webp.len() < data.len() || has_notes(&data) || too_wide => {
-            forget(data_dir, id);
+            forget_copies(data_dir, id, |name| !name.ends_with("-preview.webp"));
             let part = copy.with_extension("part");
             let written = std::fs::create_dir_all(cache(data_dir))
                 .and_then(|()| std::fs::write(&part, &webp))
@@ -112,6 +115,29 @@ pub fn served(data_dir: &Path, id: &str, path: &Path, kind: &str, mime: &str) ->
     }
 }
 
+/// A small first look at a map, sent before the whole picture. A clip has none.
+pub fn preview(data_dir: &Path, id: &str, path: &Path, mime: &str) -> Option<PathBuf> {
+    if !matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    let stamp = hex::encode(Sha256::digest(&data));
+    let copy = cache(data_dir).join(format!("{id}-{}-preview.webp", &stamp[..16]));
+    if copy.is_file() {
+        return Some(copy);
+    }
+    let picture = image::load_from_memory(&data).ok()?;
+    let small = picture.thumbnail(PREVIEW_SIDE, PREVIEW_SIDE).to_rgba8();
+    let webp = webp::Encoder::from_rgba(&small, small.width(), small.height())
+        .encode(PREVIEW_QUALITY)
+        .to_vec();
+    let part = copy.with_extension("part");
+    std::fs::create_dir_all(cache(data_dir)).ok()?;
+    std::fs::write(&part, &webp).ok()?;
+    std::fs::rename(&part, &copy).ok()?;
+    Some(copy)
+}
+
 fn make_copy(data: &[u8], side: u32) -> Option<Vec<u8>> {
     let picture = image::load_from_memory(data).ok()?;
     let picture = if picture.width().max(picture.height()) > side {
@@ -126,13 +152,18 @@ fn make_copy(data: &[u8], side: u32) -> Option<Vec<u8>> {
 
 /// Takes away the kept copies of a picture or map that changed or went.
 pub fn forget(data_dir: &Path, id: &str) {
+    forget_copies(data_dir, id, |_| true);
+}
+
+fn forget_copies(data_dir: &Path, id: &str, which: impl Fn(&str) -> bool) {
     let prefix = format!("{id}-");
     for entry in std::fs::read_dir(cache(data_dir))
         .into_iter()
         .flatten()
         .flatten()
     {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) && which(&name) {
             let _ = std::fs::remove_file(entry.path());
         }
     }

@@ -677,3 +677,41 @@ async fn sends_players_a_small_clean_copy_of_a_picture_copied_in_by_hand() {
         "the DM's file stays"
     );
 }
+
+#[tokio::test]
+async fn sends_a_small_first_look_at_a_map() {
+    let data = tempfile::tempdir().unwrap();
+    let app = host_in(data.path());
+    let t = table(&app).await;
+    let picture = image::RgbaImage::from_fn(1400, 1000, |x, y| {
+        image::Rgba([(x / 6) as u8, (y / 4) as u8, 90, 255])
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(picture)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let scene = cave(&app, &t).await;
+    let at = format!("/tables/{}/scenes/{scene}/image", t.id);
+    upload(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}?width=1400&height=1000"),
+        &png,
+    )
+    .await;
+    let (_, given) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/media-token", t.id),
+        None,
+    )
+    .await;
+    let pass = given["pass"].as_str().unwrap();
+
+    let (status, kind, small) = fetch(&app, &format!("{at}?v=1&preview=1&pass={pass}")).await;
+    assert_eq!((status, kind.as_str()), (StatusCode::OK, "image/webp"));
+    let (_, _, whole) = fetch(&app, &format!("{at}?v=1&pass={pass}")).await;
+    assert!(small * 4 < whole, "{small} against {whole}");
+}

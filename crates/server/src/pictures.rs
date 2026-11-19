@@ -400,6 +400,8 @@ pub async fn set_map(
 #[derive(Deserialize)]
 pub struct Seen {
     pass: Option<String>,
+    // A map's small first look instead of the whole picture.
+    preview: Option<String>,
 }
 
 /// `GET /api/tables/{id}/scenes/{scene}/image`: the map's picture, for anyone at the table.
@@ -420,6 +422,19 @@ pub async fn map(
     let path = file
         .and_then(|file| library::resolve(&state.config.data_dir, &file))
         .ok_or_else(|| AppError::not_found("This map has no picture"))?;
+    if seen.preview.is_some() {
+        let data_dir = state.config.data_dir.clone();
+        let (id, mime, full) = (scene.clone(), picture.mime.clone(), path.clone());
+        let small = tokio::task::spawn_blocking(move || {
+            crate::served::preview(&data_dir, &id, &full, &mime)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(small) = small {
+            return send(small, "image/webp");
+        }
+    }
     send_served(&state, scene, path, "map", picture.mime).await
 }
 
