@@ -2024,3 +2024,162 @@ async fn never_sends_a_player_a_token_they_cant_see_with_dynamic_fog() {
     .await;
     assert!(names(view(&app, As::Seat(&token), &t).await).contains(&"Ogre".to_string()));
 }
+
+// Everything the DM keeps to themself carries the word SECRET, as on the website; a player's
+// copy of the table, whole, as a delta and as older log pages, must never hold it.
+#[tokio::test]
+async fn never_lets_a_dm_only_thing_reach_a_player() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (wren, _) = join(&app, &t.invite, "Wren", "user-2").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    let table_at = format!("/tables/{}", t.id);
+    let before = view(&app, As::Seat(&tam), &t).await["version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let dm = |method: &'static str, path: String, body: Value| {
+        let app = app.clone();
+        async move { call(&app, As::Dm, method, &path, Some(body)).await }
+    };
+
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    for (name, x, hidden) in [
+        ("SECRET-hidden", 2, true),
+        ("SECRET-named", 3, false),
+        ("Ogre", 4, false),
+        ("SECRET-fogged", 9, false),
+    ] {
+        let token =
+            json!({ "name": name, "x": x, "y": if x == 9 { 1 } else { x }, "hidden": hidden });
+        dm("POST", format!("{at}/tokens"), token).await;
+    }
+    let tokens = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    let id_of = |name: &str| {
+        tokens
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    dm(
+        "PATCH",
+        format!("{at}/tokens/{}", id_of("SECRET-named")),
+        json!({ "nameHidden": true }),
+    )
+    .await;
+    dm(
+        "PATCH",
+        format!("{at}/tokens/{}", id_of("Ogre")),
+        json!({ "description": "SECRET-description" }),
+    )
+    .await;
+    dm(
+        "PATCH",
+        format!("{at}/tokens/{}", id_of("Tam")),
+        json!({ "x": 1, "y": 1 }),
+    )
+    .await;
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "bright", "remember": false },
+        "walls": [
+            { "id": "w-wall", "a": [500, 0], "b": [500, 490] },
+            { "id": "w-door", "a": [0, 300], "b": [200, 300], "door": { "open": false, "secret": true } }
+        ],
+        "lights": []
+    });
+    dm("PUT", format!("{at}/lighting"), lighting).await;
+    dm(
+        "POST",
+        format!("{at}/notes"),
+        json!({ "x": 10, "y": 10, "text": "SECRET-note" }),
+    )
+    .await;
+    let area = json!({ "shape": "sphere", "x": 70, "y": 70, "size": 10, "color": "#ff9090", "label": "SECRET-area", "hidden": true });
+    dm("POST", format!("{at}/templates"), area).await;
+    dm(
+        "POST",
+        format!("{table_at}/roll"),
+        json!({ "label": "SECRET-roll", "expression": "1d20", "hidden": true }),
+    )
+    .await;
+    dm(
+        "POST",
+        format!("{table_at}/log"),
+        json!({ "kind": "chat", "text": "SECRET-whisper", "to": wren }),
+    )
+    .await;
+    let handout = format!("{table_at}/assets?kind=handout&name=SECRET-handout&width=64&height=64");
+    upload(&app, As::Dm, "POST", &handout, PNG).await;
+    let prefab = json!({ "name": "SECRET-prefab", "anchor": { "x": 0, "y": 0 }, "tokens": [], "props": [], "drawings": [], "lights": [] });
+    dm("POST", format!("{table_at}/prefabs"), prefab).await;
+    let other = table(&app).await;
+    let elsewhere = format!(
+        "/tables/{}/assets?kind=token&name=SECRET-elsewhere&width=64&height=64",
+        other.id
+    );
+    upload(&app, As::Dm, "POST", &elsewhere, PNG).await;
+    call(&app, As::Dm, "POST", &format!("{table_at}/encounter"), None).await;
+    dm(
+        "POST",
+        format!("{table_at}/encounter/combatants"),
+        json!({ "name": "Goblin", "bonus": 2, "hp": 7, "ac": 15 }),
+    )
+    .await;
+
+    let whole = view(&app, As::Seat(&tam), &t).await;
+    let (_, delta) = call(
+        &app,
+        As::Seat(&tam),
+        "GET",
+        &format!("{table_at}?base={before}"),
+        None,
+    )
+    .await;
+    let last = whole["log"].as_array().unwrap().last().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, older) = call(
+        &app,
+        As::Seat(&tam),
+        "GET",
+        &format!("{table_at}/log?before={last}"),
+        None,
+    )
+    .await;
+    for copy in [&whole, &delta, &older] {
+        assert!(!copy.to_string().contains("SECRET"), "{copy}");
+    }
+    let goblin = whole["encounter"]["combatants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Goblin")
+        .unwrap()
+        .clone();
+    assert_eq!((goblin.get("hp"), goblin.get("ac")), (None, None));
+    // The DM still has all of it, so each secret really was set.
+    let theirs = view(&app, As::Dm, &t).await.to_string();
+    for secret in [
+        "hidden",
+        "named",
+        "description",
+        "fogged",
+        "note",
+        "area",
+        "roll",
+        "whisper",
+        "handout",
+        "prefab",
+        "elsewhere",
+    ] {
+        assert!(theirs.contains(&format!("SECRET-{secret}")), "{secret}");
+    }
+}
