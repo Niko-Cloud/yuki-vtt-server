@@ -992,6 +992,49 @@ pub async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/tables/{id}/scenes/{scene}/copy`: a copy of a map with everything on it. What
+/// the players explored stays with the first one; the copy starts unexplored.
+pub async fn copy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene)): Path<(String, String)>,
+) -> Result<Json<Value>> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    let copy_id = ids::id();
+    let (name, folder) = {
+        let db = state.db();
+        let row: Option<(String, Option<String>, String)> = db
+            .query_row(
+                "SELECT name, folder, data FROM scenes WHERE table_id = ?1 AND id = ?2",
+                [&id, &scene],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (name, folder, data) = row.ok_or_else(|| AppError::not_found("That map is gone"))?;
+        let count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM scenes WHERE table_id = ?1",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if count >= MOST_SCENES {
+            return Err(AppError::bad(format!("A table keeps {MOST_SCENES} maps")));
+        }
+        let name = format!("{} (copy)", name.chars().take(53).collect::<String>());
+        crate::pictures::copy_map(&state, &id, &scene, &copy_id)?;
+        db.execute(
+            "INSERT INTO scenes (id, table_id, name, folder, position, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![copy_id, id, name, folder, count, data, ids::now()],
+        )?;
+        (name, folder)
+    };
+    state.events.changed(&id);
+    let mut made = json!({ "id": copy_id, "name": name });
+    if let Some(folder) = folder {
+        made["folder"] = json!(folder);
+    }
+    Ok(Json(made))
+}
+
 /// `POST /api/tables/{id}/scenes/{scene}/show`: the map the players see from now on.
 pub async fn show(
     State(state): State<AppState>,

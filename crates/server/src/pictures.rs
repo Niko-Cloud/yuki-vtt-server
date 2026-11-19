@@ -211,6 +211,17 @@ pub fn forget_map(state: &AppState, table_id: &str, scene_id: &str) {
     }
 }
 
+/// A map was copied: the copy gets its own copy of the picture, if there is one.
+pub fn copy_map(state: &AppState, table_id: &str, from: &str, to: &str) -> Result<()> {
+    let picture = map_file(state, table_id, from)?;
+    if picture.exists() {
+        let data = std::fs::read(&picture)
+            .map_err(|_| AppError::not_found("This map's picture couldn't be read"))?;
+        write(&map_file(state, table_id, to)?, &data)?;
+    }
+    Ok(())
+}
+
 /// A table was deleted: its map pictures go. The library keeps what was uploaded there.
 pub fn forget_table(state: &AppState, table_id: &str) {
     if safe(table_id).is_ok() {

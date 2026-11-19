@@ -1908,3 +1908,58 @@ async fn shares_the_dms_view_only_for_those_who_run_the_table() {
         StatusCode::NO_CONTENT
     );
 }
+
+#[tokio::test]
+async fn copies_a_map_with_everything_on_it() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    upload(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/image?width=1000&height=700"),
+        PNG,
+    )
+    .await;
+    let ogre = json!({ "name": "Ogre", "x": 2, "y": 2 });
+    call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(ogre)).await;
+    let folder = json!({ "folder": "Act one" });
+    call(&app, As::Dm, "PATCH", &at, Some(folder)).await;
+
+    let (status, _) = call(&app, As::Seat(&token), "POST", &format!("{at}/copy"), None).await;
+    assert!(status.is_client_error());
+    let (status, copy) = call(&app, As::Dm, "POST", &format!("{at}/copy"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (&copy["name"], &copy["folder"]),
+        (&json!("Cave (copy)"), &json!("Act one"))
+    );
+    let copy = copy["id"].as_str().unwrap();
+    let (_, shown) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={copy}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(shown["scene"]["tokens"][0]["name"], "Ogre");
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}/scenes/{copy}/image", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The copy is its own map: deleting it leaves the first and its picture alone.
+    let gone = format!("/tables/{}/scenes/{copy}", t.id);
+    call(&app, As::Dm, "DELETE", &gone, None).await;
+    let (status, _) = call(&app, As::Dm, "GET", &format!("{at}/image"), None).await;
+    assert_eq!(status, StatusCode::OK);
+}

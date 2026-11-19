@@ -88,6 +88,7 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes", post(maps::create))
         .route("/tables/{id}/scenes/{scene}", patch(maps::update).delete(maps::remove))
         .route("/tables/{id}/scenes/{scene}/show", post(maps::show))
+        .route("/tables/{id}/scenes/{scene}/copy", post(maps::copy))
         .route("/tables/{id}/prefabs", post(maps::add_prefab))
         .route("/tables/{id}/prefabs/{prefab}", axum::routing::delete(maps::remove_prefab))
         .route(
