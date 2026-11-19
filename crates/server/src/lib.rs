@@ -32,10 +32,22 @@ use axum::http::{HeaderName, HeaderValue, Method};
 use axum::routing::{get, patch, post};
 use serde_json::json;
 use state::AppState;
+use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 // A character snapshot with its sheet is the biggest thing sent as JSON.
 const BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+// Answers go out over the DM's home upload, so the table's JSON is squeezed first. Pictures,
+// clips, tracks and backups are compressed already and go as they are.
+fn compression() -> CompressionLayer<impl Predicate> {
+    let predicate = DefaultPredicate::new()
+        .and(NotForContentType::const_new("video/"))
+        .and(NotForContentType::const_new("audio/"))
+        .and(NotForContentType::const_new("application/gzip"));
+    CompressionLayer::new().compress_when(predicate)
+}
 
 pub fn app(state: AppState) -> Router {
     let origins: Vec<HeaderValue> = state
@@ -144,5 +156,6 @@ pub fn app(state: AppState) -> Router {
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(cors)
+        .layer(compression())
         .with_state(state)
 }

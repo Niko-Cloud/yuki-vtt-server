@@ -9,7 +9,7 @@ license.workspace = true
 yuki-vtt-rules = { path = "../rules" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "limit"] }
+tower-http = { version = "0.6", features = ["cors", "limit", "compression-br", "compression-gzip"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
