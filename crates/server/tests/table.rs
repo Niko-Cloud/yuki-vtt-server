@@ -144,7 +144,7 @@ async fn a_tv_screen_sits_down_with_no_character() {
 }
 
 #[tokio::test]
-async fn anyone_presses_the_x_card_and_no_name_is_shown() {
+async fn anyone_presses_the_x_card_no_name_shown_until_the_dm_goes_on() {
     let app = host();
     let t = table(&app).await;
     let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
@@ -164,6 +164,38 @@ async fn anyone_presses_the_x_card_and_no_name_is_shown() {
     assert_eq!(last["kind"], "xcard");
     assert_eq!(last["author"], "");
     assert_eq!(last["data"]["text"], "X-card");
+
+    // It stays up for everyone until the DM goes on; a player can't take it down.
+    assert_eq!(view["xcard"], true);
+    let (_, theirs) = call(
+        &app,
+        As::Seat(&token),
+        "GET",
+        &format!("/tables/{}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(theirs["xcard"], true);
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "DELETE",
+        &format!("/tables/{}/xcard", t.id),
+        None,
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!("/tables/{}/xcard", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, view) = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None).await;
+    assert_eq!(view["xcard"], false);
 
     // A stranger cannot press it.
     let (status, _) = call(

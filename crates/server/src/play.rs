@@ -106,6 +106,10 @@ pub async fn view(
         db.query_row("SELECT timer FROM tables WHERE id = ?1", [&id], |row| {
             row.get(0)
         })?;
+    let xcard_at: Option<i64> =
+        db.query_row("SELECT xcard_at FROM tables WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })?;
     let music: Option<String> =
         db.query_row("SELECT music FROM tables WHERE id = ?1", [&id], |row| {
             row.get(0)
@@ -188,6 +192,8 @@ pub async fn view(
         "background": background.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         // The countdown the DM started, for everyone to watch.
         "timer": timer.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // The X-card is up: every screen shows it until whoever runs the table goes on.
+        "xcard": xcard_at.is_some(),
         // The party's shared loot list and session journal; everyone at the table reads them.
         "loot": loot.map(|text| serde_json::from_str::<Value>(&text)).transpose()?.unwrap_or_else(|| json!([])),
         "journal": journal.map(|text| serde_json::from_str::<Value>(&text)).transpose()?.unwrap_or_else(|| json!([])),
@@ -545,7 +551,8 @@ pub async fn post(
 }
 
 /// `POST /api/tables/{id}/xcard`: anyone presses the X-card; everyone sees it at once, and no
-/// name is shown. The live event raises the banner on every screen; the log keeps an anonymous line.
+/// name is shown. It stays up on every screen until whoever runs the table goes on; the log
+/// keeps an anonymous line.
 pub async fn xcard(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -554,9 +561,28 @@ pub async fn xcard(
     access::at_table(&state, &id, &credentials(&headers))?;
     {
         let db = state.db();
+        db.execute(
+            "UPDATE tables SET xcard_at = ?2 WHERE id = ?1",
+            params![&id, ids::now()],
+        )?;
         log(&db, &id, "xcard", "", json!({ "text": "X-card" }), &[])?;
     }
     state.events.xcard(&id);
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/xcard`: whoever runs the table goes on after an X-card; it comes off
+/// every screen.
+pub async fn resume_after_xcard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    state
+        .db()
+        .execute("UPDATE tables SET xcard_at = NULL WHERE id = ?1", [&id])?;
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }

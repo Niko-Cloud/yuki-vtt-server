@@ -156,6 +156,10 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE tables ADD COLUMN guests INTEGER NOT NULL DEFAULT 1;
 "#,
+    // When the X-card went up; null while the game goes on.
+    r#"
+    ALTER TABLE tables ADD COLUMN xcard_at INTEGER;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

@@ -125,7 +125,10 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/ping", post(maps::ping))
         .route("/tables/{id}/mark", post(maps::mark))
         .route("/tables/{id}/view", post(maps::view))
-        .route("/tables/{id}/xcard", post(play::xcard))
+        .route(
+            "/tables/{id}/xcard",
+            post(play::xcard).delete(play::resume_after_xcard),
+        )
         .route("/tables/{id}/timer", axum::routing::put(play::set_timer).delete(play::clear_timer))
         .route("/tables/{id}/loot", axum::routing::put(play::set_loot))
         .route("/tables/{id}/journal", axum::routing::put(play::set_journal))
