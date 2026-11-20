@@ -67,6 +67,9 @@ pub struct Token {
     /// Seats that see through it too (a familiar), beside its own player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_with: Option<Vec<String>>,
+    /// Seats whose players may move it too (a familiar, a summon, a mount), beside its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_by: Option<Vec<String>>,
     /// Which way it faces, in degrees, for cones of light and sight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facing: Option<f64>,
@@ -1153,6 +1156,7 @@ pub async fn add_token(
         vision: None,
         light: None,
         shared_with: None,
+        moved_by: None,
         facing: None,
         attached_to: None,
         follow: None,
@@ -1229,6 +1233,7 @@ pub async fn place_party(
                 vision: None,
                 light: None,
                 shared_with: None,
+                moved_by: None,
                 facing: None,
                 attached_to: None,
                 follow: None,
@@ -1267,6 +1272,7 @@ pub struct TokenChange {
     #[serde(default, deserialize_with = "present")]
     light: Option<Value>,
     shared_with: Option<Vec<String>>,
+    moved_by: Option<Vec<String>>,
     facing: Option<f64>,
     /// The token it is attached to, or null to let go.
     #[serde(default, deserialize_with = "present")]
@@ -1354,6 +1360,11 @@ pub async fn change_token(
     {
         return Err(AppError::bad("A token is shared with up to 20 seats"));
     }
+    if let Some(seats) = &body.moved_by
+        && (seats.len() > 20 || seats.iter().any(|s| s.len() > 40))
+    {
+        return Err(AppError::bad("Up to 20 seats may move a token"));
+    }
     let counter = match &body.counter {
         None => None,
         Some(Value::Null) => Some(None),
@@ -1405,10 +1416,12 @@ pub async fn change_token(
             || body.rotation.is_some()
             || body.flip.is_some()
             || counter.is_some();
+        // Its own player's, or one the DM lets a player move.
         let mine = token
             .seat_id
-            .as_ref()
-            .is_some_and(|seat| access.seat_ids.contains(seat));
+            .iter()
+            .chain(token.moved_by.iter().flatten())
+            .any(|seat| access.seat_ids.contains(seat));
         if moving {
             allow(
                 access.may("move-any") || (mine && access.may("move-own")),
@@ -1433,6 +1446,9 @@ pub async fn change_token(
         if vision.is_some() || light.is_some() || body.shared_with.is_some() {
             allow(access.runs(), "change a token's sight")?;
         }
+        if body.moved_by.is_some() {
+            allow(access.runs(), "choose who moves a token")?;
+        }
         if let Some(vision) = vision {
             token.vision = vision;
         }
@@ -1441,6 +1457,9 @@ pub async fn change_token(
         }
         if let Some(seats) = &body.shared_with {
             token.shared_with = (!seats.is_empty()).then(|| seats.clone());
+        }
+        if let Some(seats) = &body.moved_by {
+            token.moved_by = (!seats.is_empty()).then(|| seats.clone());
         }
         if let Some(facing) = body.facing {
             token.facing = Some(facing.round());

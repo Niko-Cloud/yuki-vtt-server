@@ -226,6 +226,50 @@ async fn moves_tokens_as_far_as_the_dm_lets_players() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // The DM lets Tam's player move the ogre too (a summon, a mount), and takes it back.
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "movedBy": [seat] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "movedBy": [seat] })),
+    )
+    .await;
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "x": 6 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "movedBy": [], "x": 5 })),
+    )
+    .await;
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "x": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     call(
         &app,
         As::Dm,
