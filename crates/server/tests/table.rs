@@ -1447,6 +1447,34 @@ async fn everyone_adds_finds_and_entries_and_takes_away_their_own() {
     .await;
     assert!(status.is_client_error());
 
+    // Someone with a character takes one of a find; the last one leaves the list.
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path("/loot/items"),
+        Some(json!({ "name": "Arrow", "quantity": 2 })),
+    )
+    .await;
+    let (_, view) = call(&app, As::Dm, "GET", &path(""), None).await;
+    let arrows = view["loot"][1]["id"].as_str().unwrap().to_string();
+    let take = path(&format!("/loot/items/{arrows}/take"));
+    let (status, taken) = call(&app, As::Seat(&token), "POST", &take, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(taken["quantity"], 1);
+    call(&app, As::Seat(&token), "POST", &take, None).await;
+    let (status, _) = call(&app, As::Seat(&token), "POST", &take, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &path(&format!("/loot/items/{rope_id}/take")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
     let (_, view) = call(&app, As::Dm, "GET", &path(""), None).await;
     assert_eq!(view["loot"].as_array().unwrap().len(), 1);
     assert_eq!(view["journal"], json!([]));

@@ -849,6 +849,36 @@ pub async fn remove_loot(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/tables/{id}/loot/items/{item}/take`: someone with a character takes one of a find
+/// for their own bag; the last one leaves the list. Answers with what was taken.
+pub async fn take_loot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, item)): Path<(String, String)>,
+) -> Result<Json<Value>> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    if access.screen || access.seat_ids.is_empty() {
+        return Err(AppError::forbidden(
+            "Only someone with a character takes things",
+        ));
+    }
+    let mut loot = list_of(&state, &id, "loot")?;
+    let at = loot
+        .iter()
+        .position(|found| found["id"] == item.as_str())
+        .ok_or_else(|| AppError::not_found("Someone took that already"))?;
+    let mut taken = loot[at].clone();
+    let quantity = taken["quantity"].as_i64().unwrap_or(1);
+    if quantity > 1 {
+        loot[at]["quantity"] = json!(quantity - 1);
+    } else {
+        loot.remove(at);
+    }
+    save_list(&state, &id, "loot", &loot)?;
+    taken["quantity"] = json!(1);
+    Ok(Json(taken))
+}
+
 /// `POST /api/tables/{id}/journal/entries`: anyone at the table writes an entry, newest first.
 pub async fn add_journal(
     State(state): State<AppState>,

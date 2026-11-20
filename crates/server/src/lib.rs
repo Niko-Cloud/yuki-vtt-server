@@ -137,6 +137,7 @@ pub fn app(state: AppState) -> Router {
             "/tables/{id}/loot/items/{item}",
             axum::routing::delete(play::remove_loot),
         )
+        .route("/tables/{id}/loot/items/{item}/take", post(play::take_loot))
         .route("/tables/{id}/journal/entries", post(play::add_journal))
         .route(
             "/tables/{id}/journal/entries/{entry}",
