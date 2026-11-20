@@ -132,6 +132,16 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/timer", axum::routing::put(play::set_timer).delete(play::clear_timer))
         .route("/tables/{id}/loot", axum::routing::put(play::set_loot))
         .route("/tables/{id}/journal", axum::routing::put(play::set_journal))
+        .route("/tables/{id}/loot/items", post(play::add_loot))
+        .route(
+            "/tables/{id}/loot/items/{item}",
+            axum::routing::delete(play::remove_loot),
+        )
+        .route("/tables/{id}/journal/entries", post(play::add_journal))
+        .route(
+            "/tables/{id}/journal/entries/{entry}",
+            axum::routing::delete(play::remove_journal),
+        )
         // Spell areas, placed by those the DM lets.
         .route("/tables/{id}/scenes/{scene}/templates", post(areas::add).delete(areas::clear))
         .route("/tables/{id}/scenes/{scene}/templates/{area}", patch(areas::change).delete(areas::remove))

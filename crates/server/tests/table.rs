@@ -1357,3 +1357,97 @@ async fn lets_the_dm_keep_guests_out_as_on_the_website() {
     let (status, _) = call(&app, As::Nobody, "POST", &join_path, Some(guest())).await;
     assert_eq!(status, StatusCode::CREATED);
 }
+
+#[tokio::test]
+async fn everyone_adds_finds_and_entries_and_takes_away_their_own() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let path = |rest: &str| format!("/tables/{}{rest}", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path("/loot/items"),
+        Some(json!({ "name": "Rope" })),
+    )
+    .await;
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "POST",
+        &path("/loot/items"),
+        Some(json!({
+            "name": "Potion of Healing",
+            "quantity": 2,
+            "item": { "pack": "srd", "key": "potion of healing" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    call(
+        &app,
+        As::Seat(&token),
+        "POST",
+        &path("/journal/entries"),
+        Some(json!({ "title": "We met Wren" })),
+    )
+    .await;
+
+    let (_, view) = call(&app, As::Seat(&token), "GET", &path(""), None).await;
+    let rope = view["loot"][0].clone();
+    let potion = view["loot"][1].clone();
+    assert!(rope.get("by").is_none());
+    assert_eq!(potion["author"], "Tam");
+    assert_eq!(potion["quantity"], 2);
+    assert_eq!(
+        potion["item"],
+        json!({ "pack": "srd", "key": "potion of healing" })
+    );
+    assert_eq!(view["journal"][0]["author"], "Tam");
+
+    // A player takes away their own find, not the DM's; the DM takes away any.
+    let rope_id = rope["id"].as_str().unwrap();
+    let potion_id = potion["id"].as_str().unwrap();
+    let entry_id = view["journal"][0]["id"].as_str().unwrap().to_string();
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "DELETE",
+        &path(&format!("/loot/items/{rope_id}")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "DELETE",
+        &path(&format!("/loot/items/{potion_id}")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &path(&format!("/journal/entries/{entry_id}")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        As::Nobody,
+        "POST",
+        &path("/loot/items"),
+        Some(json!({ "name": "Gold" })),
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    let (_, view) = call(&app, As::Dm, "GET", &path(""), None).await;
+    assert_eq!(view["loot"].as_array().unwrap().len(), 1);
+    assert_eq!(view["journal"], json!([]));
+}

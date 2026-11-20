@@ -654,9 +654,40 @@ fn loot_items(value: &Value) -> Result<Vec<Value>> {
                     "A loot item needs a name and a count from 1 to 999",
                 ));
             }
-            Ok(json!({ "id": id, "name": name, "quantity": quantity, "note": note }))
+            let mut tidy = json!({ "id": id, "name": name, "quantity": quantity, "note": note });
+            if let Some(item) = book_item(&item["item"])? {
+                tidy["item"] = item;
+            }
+            keep_author(item, &mut tidy)?;
+            Ok(tidy)
         })
         .collect()
+}
+
+/// The book entry a find was picked from, as `{ pack, key }`, when it has one.
+fn book_item(value: &Value) -> Result<Option<Value>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let pack = value["pack"].as_str().unwrap_or("");
+    let key = value["key"].as_str().unwrap_or("");
+    if pack.is_empty() || key.is_empty() || pack.len() > 100 || key.len() > 200 {
+        return Err(AppError::bad("That isn't an item from the books"));
+    }
+    Ok(Some(json!({ "pack": pack, "key": key })))
+}
+
+/// Who added a find or an entry (a player's seat and name), kept as it was sent back.
+fn keep_author(from: &Value, into: &mut Value) -> Result<()> {
+    for (field, longest) in [("by", 40), ("author", 60)] {
+        if let Some(text) = from[field].as_str() {
+            if text.chars().count() > longest {
+                return Err(AppError::bad("That name is too long"));
+            }
+            into[field] = json!(text);
+        }
+    }
+    Ok(())
 }
 
 /// The session journal, checked and tidied: a title, optional text, and the moment it was written.
@@ -686,7 +717,9 @@ fn journal_entries(value: &Value) -> Result<Vec<Value>> {
             {
                 return Err(AppError::bad("A journal entry needs a title"));
             }
-            Ok(json!({ "id": id, "title": title, "text": text, "at": at }))
+            let mut tidy = json!({ "id": id, "title": title, "text": text, "at": at });
+            keep_author(entry, &mut tidy)?;
+            Ok(tidy)
         })
         .collect()
 }
@@ -722,6 +755,132 @@ pub async fn set_journal(
         .db()
         .execute("UPDATE tables SET journal = ?2 WHERE id = ?1", [&id, &text])?;
     state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The loot list or the journal as kept, in the order kept.
+fn list_of(state: &AppState, id: &str, list: &str) -> Result<Vec<Value>> {
+    let text: Option<String> = state.db().query_row(
+        &format!("SELECT {list} FROM tables WHERE id = ?1"),
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(text
+        .map(|text| serde_json::from_str::<Vec<Value>>(&text))
+        .transpose()?
+        .unwrap_or_default())
+}
+
+fn save_list(state: &AppState, id: &str, list: &str, items: &[Value]) -> Result<()> {
+    let text = serde_json::to_string(items)?;
+    state.db().execute(
+        &format!("UPDATE tables SET {list} = ?2 WHERE id = ?1"),
+        [id, &text],
+    )?;
+    state.events.changed(id);
+    Ok(())
+}
+
+/// A player's additions carry their seat and name; the DM's carry neither. A screen only watches.
+fn added_by(access: &Access, into: &mut Value) -> Result<()> {
+    if access.screen {
+        return Err(AppError::forbidden("A screen only watches"));
+    }
+    if !access.runs()
+        && let Some(seat) = access.seat_ids.first()
+    {
+        into["by"] = json!(seat);
+        into["author"] = json!(access.name);
+    }
+    Ok(())
+}
+
+/// Whoever runs the table takes anything away; a player only what they added.
+fn take_away(access: &Access, items: &mut Vec<Value>, what: &str) -> Result<()> {
+    let at = items
+        .iter()
+        .position(|item| item["id"] == what)
+        .ok_or_else(|| AppError::not_found("That is gone already"))?;
+    let own = items[at]["by"]
+        .as_str()
+        .is_some_and(|by| access.seat_ids.iter().any(|seat| seat == by));
+    if !access.runs() && !own {
+        return Err(AppError::forbidden(
+            "Only the DM takes away what someone else added",
+        ));
+    }
+    items.remove(at);
+    Ok(())
+}
+
+/// `POST /api/tables/{id}/loot/items`: anyone at the table adds a find, under their name.
+pub async fn add_loot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let mut loot = list_of(&state, &id, "loot")?;
+    let mut item = json!({
+        "id": ids::id(),
+        "name": body["name"],
+        "quantity": body["quantity"].as_i64().unwrap_or(1),
+        "note": body["note"].as_str().unwrap_or(""),
+        "item": body["item"],
+    });
+    added_by(&access, &mut item)?;
+    loot.push(item);
+    let loot = loot_items(&json!(loot))?;
+    save_list(&state, &id, "loot", &loot)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/loot/items/{item}`: a player's own find, or any for the DM.
+pub async fn remove_loot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, item)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let mut loot = list_of(&state, &id, "loot")?;
+    take_away(&access, &mut loot, &item)?;
+    save_list(&state, &id, "loot", &loot)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/tables/{id}/journal/entries`: anyone at the table writes an entry, newest first.
+pub async fn add_journal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let journal = list_of(&state, &id, "journal")?;
+    let mut entry = json!({
+        "id": ids::id(),
+        "title": body["title"],
+        "text": body["text"].as_str().unwrap_or(""),
+        "at": ids::now(),
+    });
+    added_by(&access, &mut entry)?;
+    let all: Vec<Value> = std::iter::once(entry).chain(journal).collect();
+    let journal = journal_entries(&json!(all))?;
+    save_list(&state, &id, "journal", &journal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/journal/entries/{entry}`: a player's own entry, or any for the DM.
+pub async fn remove_journal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, entry)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let mut journal = list_of(&state, &id, "journal")?;
+    take_away(&access, &mut journal, &entry)?;
+    save_list(&state, &id, "journal", &journal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
