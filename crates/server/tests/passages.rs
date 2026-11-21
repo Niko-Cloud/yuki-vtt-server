@@ -243,9 +243,25 @@ async fn takes_a_token_through_a_passage_on_its_map_or_to_another_its_player_see
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    // Showing a map brings everyone back to it.
+    // The DM sees where Tam went.
+    let away = |app: axum::Router, path: String| async move {
+        call(&app, As::Dm, "GET", &path, None).await.1["away"].clone()
+    };
+    let table_at = format!("/tables/{}", t.id);
+    assert_eq!(
+        away(app.clone(), table_at.clone()).await,
+        json!({ tam_seat.clone(): attic })
+    );
+    // Showing a map brings everyone back to it, Tam's token too: by the stairs that led there.
     call(&app, As::Dm, "POST", &format!("{}/show", at(&cave)), None).await;
     assert_eq!(scene_of(player, None).await["id"], cave.as_str());
+    assert!(token_of(&scene_of(As::Dm, Some(attic.clone())).await, &tam_seat).is_none());
+    let back = token_of(&scene_of(As::Dm, Some(cave.clone())).await, &tam_seat).unwrap();
+    assert_eq!(
+        (back["x"].as_f64(), back["y"].as_f64()),
+        (Some(1.0), Some(1.0))
+    );
+    assert_eq!(away(app.clone(), table_at).await, json!({}));
     // The attic goes: the stairs lead nowhere.
     call(&app, As::Dm, "DELETE", &at(&attic), None).await;
     assert!(

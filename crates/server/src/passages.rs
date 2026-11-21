@@ -498,3 +498,72 @@ fn go_through(
     state.events.changed(table_id);
     Ok(())
 }
+
+/// Characters a passage took to another map come back with their players when the DM shows a
+/// map: by the passage here that leads where they were, else in the top corner. One already
+/// on this map stays where it is.
+pub fn bring_back(db: &Connection, table_id: &str, scene_id: &str) -> Result<()> {
+    let away: Vec<(String, String)> = db
+        .prepare(
+            "SELECT id, scene_id FROM seats WHERE table_id = ?1 AND scene_id IS NOT NULL AND scene_id != ?2",
+        )?
+        .query_map([table_id, scene_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (seat, went) in away {
+        let (Ok(mut there), Ok(mut here)) =
+            (load(db, table_id, &went), load(db, table_id, scene_id))
+        else {
+            continue;
+        };
+        let Some(at) = there
+            .tokens
+            .iter()
+            .position(|t| t.seat_id.as_deref() == Some(seat.as_str()))
+        else {
+            continue;
+        };
+        if here
+            .tokens
+            .iter()
+            .any(|t| t.seat_id.as_deref() == Some(seat.as_str()))
+        {
+            continue;
+        }
+        let mut token = there.tokens.remove(at);
+        let (x, y) = match here
+            .passages
+            .iter()
+            .find(|p| p.to.as_ref().is_some_and(|to| to.map == went))
+        {
+            Some(door) => {
+                let cell = |at: f64, offset: u32| {
+                    ((at - f64::from(offset)) / f64::from(here.grid.size) - token.size / 2.0)
+                        .round()
+                        .max(0.0)
+                };
+                (
+                    cell(door.x, here.grid.offset_x),
+                    cell(door.y, here.grid.offset_y),
+                )
+            }
+            None => (0.0, 0.0),
+        };
+        (token.x, token.y) = (x, y);
+        here.tokens.push(here.keep_token(token));
+        store(db, &went, &there)?;
+        store(db, scene_id, &here)?;
+    }
+    Ok(())
+}
+
+/// Where passages took players, seat to map, for whoever runs the table.
+pub fn away(db: &Connection, table_id: &str) -> Result<serde_json::Map<String, Value>> {
+    let found: Vec<(String, String)> = db
+        .prepare("SELECT id, scene_id FROM seats WHERE table_id = ?1 AND scene_id IS NOT NULL")?
+        .query_map([table_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(found
+        .into_iter()
+        .map(|(seat, map)| (seat, json!(map)))
+        .collect())
+}

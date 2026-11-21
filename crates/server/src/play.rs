@@ -207,6 +207,8 @@ pub async fn view(
         "scene": shown,
         "scenes": if access.runs() { maps::list(&db, &id)? } else { vec![] },
         "activeSceneId": active_scene,
+        // Whoever runs the table sees where passages took players: seat to map.
+        "away": if access.runs() { Some(crate::passages::away(&db, &id)?) } else { None },
         "assets": pictures::list(&db, &id, access.runs(), shown.as_ref())?,
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
         // The track the DM plays to everyone, looping; null when the table is quiet.

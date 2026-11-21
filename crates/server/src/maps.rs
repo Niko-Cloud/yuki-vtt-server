@@ -1243,6 +1243,7 @@ pub async fn show(
     {
         let db = state.db();
         load(&db, &id, &scene)?;
+        crate::passages::bring_back(&db, &id, &scene)?;
         db.execute(
             "UPDATE tables SET active_scene_id = ?2 WHERE id = ?1",
             [&id, &scene],
