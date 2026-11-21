@@ -500,11 +500,14 @@ const ROOM_EDGE: &str = "room-edge:";
 // How far off an edge a wall may lie and still be taken as lying along it, in pixels.
 const ALONG: f64 = 3.0;
 
-/// The walls a map's painted rooms make: one along each edge of each room, less any stretch
-/// where a stored wall, door or window already lies along it (the website's `roomEdgeWalls`).
+/// The walls a map's painted rooms make: their outline (the website's `roomEdgeWalls`). Each
+/// room's edges count only where one side is inside the rooms and the other outside them all,
+/// so rooms that overlap or touch have no wall between them; a stretch where a stored wall,
+/// door or window lies along an edge is left out too.
 pub fn room_edge_walls(areas: &[FogArea], walls: &[Wall]) -> Vec<Wall> {
+    let inside_any = |p: (f64, f64)| areas.iter().any(|a| inside_shape(&a.points, p));
     let mut made = Vec::new();
-    for area in areas {
+    for (index, area) in areas.iter().enumerate() {
         let n = area.points.len();
         for i in 0..n {
             let [px, py] = area.points[i];
@@ -516,7 +519,7 @@ pub fn room_edge_walls(areas: &[FogArea], walls: &[Wall]) -> Vec<Wall> {
             let (ux, uy) = ((qx - px) / length, (qy - py) / length);
             let off = |[x, y]: [f64; 2]| ((x - px) * uy - (y - py) * ux).abs();
             let along = |[x, y]: [f64; 2]| (x - px) * ux + (y - py) * uy;
-            let mut covered: Vec<(f64, f64)> = walls
+            let covered: Vec<(f64, f64)> = walls
                 .iter()
                 .filter(|w| off(w.a) <= ALONG && off(w.b) <= ALONG)
                 .map(|w| {
@@ -525,33 +528,78 @@ pub fn room_edge_walls(areas: &[FogArea], walls: &[Wall]) -> Vec<Wall> {
                 })
                 .filter(|(t0, t1)| t1 - t0 > ALONG)
                 .collect();
-            covered.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let mut k = 0;
-            let mut piece = |t0: f64, t1: f64, made: &mut Vec<Wall>| {
-                if t1 - t0 < 1.0 {
-                    return;
+            let mut cuts = vec![0.0, length];
+            cuts.extend(covered.iter().flat_map(|&(a, b)| [a, b]));
+            for (j, other) in areas.iter().enumerate() {
+                if j == index {
+                    continue;
                 }
-                made.push(Wall {
-                    id: format!("{ROOM_EDGE}{}:{i}:{k}", area.id),
-                    a: [px + ux * t0, py + uy * t0],
-                    b: [px + ux * t1, py + uy * t1],
-                    door: None,
-                    window: false,
-                    kind: None,
-                });
-                k += 1;
-            };
-            let mut from = 0.0;
-            for (t0, t1) in covered {
-                if t0 > from {
-                    piece(from, t0, &mut made);
+                let m = other.points.len();
+                for e in 0..m {
+                    let (a, b) = (other.points[e], other.points[(e + 1) % m]);
+                    for end in [a, b] {
+                        if off(end) <= ALONG {
+                            cuts.push(along(end));
+                        }
+                    }
+                    if let Some(t) = crossing((px, py), (ux, uy), length, a, b) {
+                        cuts.push(t);
+                    }
                 }
-                from = f64::max(from, t1);
             }
-            piece(from, length, &mut made);
+            cuts.retain(|t| (0.0..=length).contains(t));
+            cuts.sort_by(f64::total_cmp);
+            cuts.dedup();
+            let mut k = 0;
+            let mut run: Option<(f64, f64)> = None;
+            let mut flush = |run: &mut Option<(f64, f64)>, made: &mut Vec<Wall>| {
+                if let Some((t0, t1)) = run.take()
+                    && t1 - t0 >= 1.0
+                {
+                    made.push(Wall {
+                        id: format!("{ROOM_EDGE}{}:{i}:{k}", area.id),
+                        a: [px + ux * t0, py + uy * t0],
+                        b: [px + ux * t1, py + uy * t1],
+                        door: None,
+                        window: false,
+                        kind: None,
+                    });
+                    k += 1;
+                }
+            };
+            for pair in cuts.windows(2) {
+                let (t0, t1) = (pair[0], pair[1]);
+                let mid = (t0 + t1) / 2.0;
+                let at = (px + ux * mid, py + uy * mid);
+                let side = |d: f64| (at.0 - uy * d, at.1 + ux * d);
+                let wall = t1 - t0 >= 0.5
+                    && !covered.iter().any(|&(c0, c1)| mid > c0 && mid < c1)
+                    && inside_any(side(SIDE)) != inside_any(side(-SIDE));
+                if wall {
+                    run = Some((run.map_or(t0, |(s, _)| s), t1));
+                } else {
+                    flush(&mut run, &mut made);
+                }
+            }
+            flush(&mut run, &mut made);
         }
     }
     made
+}
+
+// How far to each side of an edge to look, in pixels, to tell outline from inside.
+const SIDE: f64 = 1.5;
+
+// Where a segment from a to b crosses an edge from p along u, as a distance along the edge.
+fn crossing(p: (f64, f64), u: (f64, f64), length: f64, a: [f64; 2], b: [f64; 2]) -> Option<f64> {
+    let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+    let across = u.0 * ey - u.1 * ex;
+    if across.abs() < 1e-9 {
+        return None;
+    }
+    let t = ((a[0] - p.0) * ey - (a[1] - p.1) * ex) / across;
+    let v = ((a[0] - p.0) * u.1 - (a[1] - p.1) * u.0) / across;
+    ((0.0..=length).contains(&t) && (0.0..=1.0).contains(&v)).then_some(t)
 }
 
 impl TableMap {

@@ -357,6 +357,26 @@ mod tests {
     }
 
     #[test]
+    fn walls_only_the_outline_where_rooms_overlap_or_touch() {
+        use crate::maps::{FogArea, room_edge_walls};
+        let room = |id: &str, x0: f64, y0: f64, x1: f64, y1: f64| FogArea {
+            id: id.into(),
+            reveal: None,
+            points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        };
+        // As room-walls.test.ts: a hall, a corridor into it, a room sharing its right edge.
+        let rooms = [
+            room("hall", 0.0, 0.0, 140.0, 140.0),
+            room("c", 100.0, 50.0, 300.0, 90.0),
+            room("s", 140.0, 100.0, 200.0, 140.0),
+        ];
+        let walls = blocking(&room_edge_walls(&rooms, &[]));
+        assert!(line_of_sight(&walls, (70.0, 70.0), (280.0, 70.0)));
+        assert!(line_of_sight(&walls, (70.0, 120.0), (180.0, 120.0)));
+        assert!(!line_of_sight(&walls, (70.0, 70.0), (70.0, 300.0)));
+    }
+
+    #[test]
     fn sees_through_a_one_way_wall_from_one_side_only() {
         // As vision.test.ts: going from top to bottom, the blind side is the right on the map.
         let walls = blocking(&[Wall {
