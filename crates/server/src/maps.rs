@@ -205,6 +205,10 @@ pub struct Fog {
     /// Painted fog: the whole map starts hidden, and the DM reveals it area by area.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<bool>,
+    /// Whether painted fog shows at all: false hides it (fog Off, or By sight without it).
+    /// Unset, it shows whenever some is painted, as before this was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand: Option<bool>,
     /// The fog's colour; none means the default dark.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
@@ -221,6 +225,7 @@ fn no_fog() -> Fog {
         remember: true,
         collide: None,
         cover: None,
+        hand: None,
         color: None,
         layer: None,
     }
@@ -477,6 +482,9 @@ pub fn inside_shape(points: &[[f64; 2]], (x, y): (f64, f64)) -> bool {
 impl TableMap {
     /// Whether the DM's painted fog hides a spot from players.
     pub fn hand_fogged(&self, at: (f64, f64)) -> bool {
+        if self.fog.hand == Some(false) {
+            return false;
+        }
         let mut hidden = self.fog.cover == Some(true);
         for area in &self.fog_areas {
             if inside_shape(&area.points, at) {

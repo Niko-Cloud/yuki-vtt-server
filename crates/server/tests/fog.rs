@@ -493,6 +493,19 @@ async fn hides_monsters_under_painted_fog_from_players() {
     assert!(theirs.contains(&"Rat".to_string()) && theirs.contains(&"Tam".to_string()));
     assert!(!theirs.contains(&"Ogre".to_string()));
     assert!(names(As::Dm).await.contains(&"Ogre".to_string()));
+    // With painted fog switched off, nothing painted hides: the ogre is sent, the switch kept.
+    let mut off = lighting.clone();
+    off["fog"]["hand"] = json!(false);
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(off)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(names(As::Seat(&tam)).await.contains(&"Ogre".to_string()));
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["fog"]["hand"],
+        json!(false)
+    );
+    call(&app, As::Dm, "PUT", &lit, Some(lighting.clone())).await;
     // Lighting sent without the painted areas keeps them; odd areas are refused.
     let mut without = lighting.clone();
     without.as_object_mut().unwrap().remove("fogAreas");
