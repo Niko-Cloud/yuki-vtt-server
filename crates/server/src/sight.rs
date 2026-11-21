@@ -185,7 +185,7 @@ fn sight(map: &TableMap, viewers: &[&Token], looking: &Looking, carriers: &[&Tok
         bright,
         viewers,
         lights,
-        walls: blocking(&map.walls),
+        walls: blocking(&map.walls_with_rooms()),
     }
 }
 
@@ -244,6 +244,34 @@ pub fn shown_ids(map: &TableMap, looking: &Looking) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn room_edges_are_walls_less_a_door_along_one() {
+        use crate::maps::{Door, FogArea, room_edge_walls};
+        let hall = FogArea {
+            id: "hall".into(),
+            reveal: None,
+            points: vec![[0.0, 0.0], [140.0, 0.0], [140.0, 140.0], [0.0, 140.0]],
+        };
+        assert_eq!(room_edge_walls(std::slice::from_ref(&hall), &[]).len(), 4);
+        let door = Wall {
+            id: "d".into(),
+            a: [50.0, 140.0],
+            b: [90.0, 140.0],
+            door: Some(Door {
+                open: true,
+                locked: false,
+                secret: false,
+            }),
+            window: false,
+        };
+        let bottom: Vec<(f64, f64)> = room_edge_walls(&[hall], &[door])
+            .into_iter()
+            .filter(|w| w.a[1] == 140.0 && w.b[1] == 140.0)
+            .map(|w| (w.a[0], w.b[0]))
+            .collect();
+        assert_eq!(bottom, vec![(140.0, 90.0), (50.0, 0.0)]);
+    }
 
     // The website's cases (vision.test.ts): ten by ten cells of 50 pixels, 5 feet each, with a
     // wall down the middle and a door in it.

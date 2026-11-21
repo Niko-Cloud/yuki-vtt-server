@@ -446,6 +446,29 @@ async fn stops_players_tokens_at_walls_unless_the_dm_lets_them_through() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::NO_CONTENT);
+    // With fog by sight, a painted room's edge is a wall too (Tam is back inside the room),
+    // unless the DM turns that off.
+    assert_eq!(go(As::Dm, x + 1).await, StatusCode::NO_CONTENT);
+    let roomed = |room_walls: Option<bool>| {
+        let (app, lit) = (app.clone(), lit.clone());
+        let mut fog = json!({ "mode": "dynamic", "light": "bright", "remember": true });
+        if let Some(on) = room_walls {
+            fog["roomWalls"] = json!(on);
+        }
+        let room = json!([{ "id": "hall", "points": [[0, 0], [edge, 0], [edge, 700], [0, 700]] }]);
+        async move {
+            let body = json!({ "fog": fog, "walls": [], "lights": [], "fogAreas": room });
+            call(&app, As::Dm, "PUT", &lit, Some(body)).await.0
+        }
+    };
+    assert_eq!(roomed(None).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::BAD_REQUEST);
+    assert_eq!(roomed(Some(false)).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["fog"]["roomWalls"],
+        json!(false)
+    );
 }
 
 #[tokio::test]

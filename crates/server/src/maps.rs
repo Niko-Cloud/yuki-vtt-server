@@ -209,6 +209,10 @@ pub struct Fog {
     /// Unset, it shows whenever some is painted, as before this was asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hand: Option<bool>,
+    /// With fog by sight, the painted rooms' edges stop sight and movement like walls; on
+    /// unless turned off.
+    #[serde(default, rename = "roomWalls", skip_serializing_if = "Option::is_none")]
+    pub room_walls: Option<bool>,
     /// The fog's colour; none means the default dark.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
@@ -226,6 +230,7 @@ fn no_fog() -> Fog {
         collide: None,
         cover: None,
         hand: None,
+        room_walls: None,
         color: None,
         layer: None,
     }
@@ -479,7 +484,79 @@ pub fn inside_shape(points: &[[f64; 2]], (x, y): (f64, f64)) -> bool {
     inside
 }
 
+/// The id every wall made from a room's edge starts with, as on the website.
+const ROOM_EDGE: &str = "room-edge:";
+// How far off an edge a wall may lie and still be taken as lying along it, in pixels.
+const ALONG: f64 = 3.0;
+
+/// The walls a map's painted rooms make: one along each edge of each room, less any stretch
+/// where a stored wall, door or window already lies along it (the website's `roomEdgeWalls`).
+pub fn room_edge_walls(areas: &[FogArea], walls: &[Wall]) -> Vec<Wall> {
+    let mut made = Vec::new();
+    for area in areas {
+        let n = area.points.len();
+        for i in 0..n {
+            let [px, py] = area.points[i];
+            let [qx, qy] = area.points[(i + 1) % n];
+            let length = (qx - px).hypot(qy - py);
+            if length < 1.0 {
+                continue;
+            }
+            let (ux, uy) = ((qx - px) / length, (qy - py) / length);
+            let off = |[x, y]: [f64; 2]| ((x - px) * uy - (y - py) * ux).abs();
+            let along = |[x, y]: [f64; 2]| (x - px) * ux + (y - py) * uy;
+            let mut covered: Vec<(f64, f64)> = walls
+                .iter()
+                .filter(|w| off(w.a) <= ALONG && off(w.b) <= ALONG)
+                .map(|w| {
+                    let (a, b) = (along(w.a), along(w.b));
+                    (a.min(b).max(0.0), a.max(b).min(length))
+                })
+                .filter(|(t0, t1)| t1 - t0 > ALONG)
+                .collect();
+            covered.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut k = 0;
+            let mut piece = |t0: f64, t1: f64, made: &mut Vec<Wall>| {
+                if t1 - t0 < 1.0 {
+                    return;
+                }
+                made.push(Wall {
+                    id: format!("{ROOM_EDGE}{}:{i}:{k}", area.id),
+                    a: [px + ux * t0, py + uy * t0],
+                    b: [px + ux * t1, py + uy * t1],
+                    door: None,
+                    window: false,
+                });
+                k += 1;
+            };
+            let mut from = 0.0;
+            for (t0, t1) in covered {
+                if t0 > from {
+                    piece(from, t0, &mut made);
+                }
+                from = f64::max(from, t1);
+            }
+            piece(from, length, &mut made);
+        }
+    }
+    made
+}
+
 impl TableMap {
+    /// Whether the painted rooms count as walls: with fog by sight, unless turned off.
+    pub fn room_walls_on(&self) -> bool {
+        self.fog.mode == "dynamic" && self.fog.room_walls != Some(false)
+    }
+
+    /// The map's walls, with its rooms' edges when they count as walls.
+    pub fn walls_with_rooms(&self) -> Vec<Wall> {
+        let mut walls = self.walls.clone();
+        if self.room_walls_on() {
+            walls.extend(room_edge_walls(&self.fog_areas, &self.walls));
+        }
+        walls
+    }
+
     /// Whether the DM's painted fog hides a spot from players.
     pub fn hand_fogged(&self, at: (f64, f64)) -> bool {
         if self.fog.hand == Some(false) {
@@ -1545,11 +1622,13 @@ pub async fn change_token(
         let stack = layer(body.layer.as_deref())?.map(str::to_string);
         let placed = map.keep_token(token);
         let before = map.tokens[at].clone();
-        // Walls stop players' tokens (whoever runs the table goes anywhere).
-        let walled = !access.runs() && map.fog.collide != Some(false) && !map.walls.is_empty();
+        // Walls stop players' tokens (whoever runs the table goes anywhere); with fog by sight,
+        // the painted rooms' edges too.
+        let walls = map.walls_with_rooms();
+        let walled = !access.runs() && map.fog.collide != Some(false) && !walls.is_empty();
         if walled && (placed.x, placed.y) != (before.x, before.y) {
             let from = crate::fog::middle_of(&map, &before);
-            if wall_in_the_way(&map.walls, from, crate::fog::middle_of(&map, &placed)) {
+            if wall_in_the_way(&walls, from, crate::fog::middle_of(&map, &placed)) {
                 return Err(AppError::bad("A wall is in the way"));
             }
         }
