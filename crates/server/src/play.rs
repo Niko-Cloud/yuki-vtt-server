@@ -186,7 +186,13 @@ pub async fn view(
     };
     let (log, log_more) = log_page(&db, &id, &access, None, LOG_SHOWN)?;
     let view = json!({
-        "party": { "id": id, "name": name, "edition": edition, "sharedSight": crate::fog::shared_sight(&db, &id)? },
+        "party": {
+            "id": id,
+            "name": name,
+            "edition": edition,
+            "sharedSight": crate::fog::shared_sight(&db, &id)?,
+            "dragSight": crate::fog::drag_sight(&db, &id)?,
+        },
         "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "screen": access.screen, "characters": characters },
         // Player characters' health is everyone's to see, as at a real table.
         "members": seated.iter().map(|seat| seat.snapshot.member(&seat.id, &seat.permissions)).collect::<Vec<_>>(),

@@ -812,3 +812,123 @@ async fn keeps_trimmed_and_joined_fog_shapes_like_the_website() {
     assert!(!theirs.contains(&"Rat".to_string()));
     assert!(names(As::Dm).await.contains(&"Rat".to_string()));
 }
+
+#[tokio::test]
+async fn shows_a_player_what_their_dragged_token_would_see_as_far_as_the_table_allows() {
+    let app = host();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (wren_seat, _) = join(&app, &t.invite, "Wren", "user-2").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{at}/tokens"),
+        Some(json!({ "name": "Ogre", "x": 8, "y": 3 })),
+    )
+    .await;
+    let tokens = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    let id_of = |seat: &str| {
+        tokens
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["seatId"] == seat)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (tam_token, wren_token) = (id_of(&tam_seat), id_of(&wren_seat));
+    for (token, x) in [(&tam_token, 1), (&wren_token, 8)] {
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &format!("{at}/tokens/{token}"),
+            Some(json!({ "x": x, "y": 1 })),
+        )
+        .await;
+    }
+    // Daylight by sight, a wall between Tam and the far side where Wren and the Ogre are.
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "bright", "remember": true },
+        "walls": [{ "id": "w", "a": [350, 0], "b": [350, 700] }],
+        "lights": []
+    });
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting),
+    )
+    .await;
+    let mark = format!("/tables/{}/mark", t.id);
+    let dragged = |token: String| {
+        let (app, mark, tam) = (app.clone(), mark.clone(), tam.clone());
+        async move {
+            let body =
+                json!({ "kind": "drag", "points": [[455, 105]], "tab": "tab-1", "token": token });
+            let (status, answer) = call(&app, As::Seat(&tam), "POST", &mark, Some(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let mut names: Vec<String> = answer["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect();
+            names.sort();
+            names
+        }
+    };
+    let sight = format!("/tables/{}/sight", t.id);
+    let rule = |mode: &'static str, outside_fights: bool| {
+        let (app, sight) = (app.clone(), sight.clone());
+        async move {
+            let body = json!({ "drag": { "mode": mode, "outsideFights": outside_fights, "remember": false } });
+            call(&app, As::Dm, "PATCH", &sight, Some(body)).await.0
+        }
+    };
+    // By default nothing more until it is dropped.
+    assert_eq!(
+        view(&app, As::Dm, &t).await["party"]["dragSight"],
+        json!({ "mode": "drop", "outsideFights": true, "remember": false })
+    );
+    assert!(dragged(tam_token.clone()).await.is_empty());
+    // Allies live: Wren shows on the way, the Ogre waits for the drop.
+    assert_eq!(rule("allies", true).await, StatusCode::NO_CONTENT);
+    assert_eq!(dragged(tam_token.clone()).await, ["Wren"]);
+    // Everything live: the Ogre too, but not in a fight unless the DM allows it there.
+    assert_eq!(rule("live", true).await, StatusCode::NO_CONTENT);
+    assert_eq!(dragged(tam_token.clone()).await, ["Ogre", "Wren"]);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/encounter", t.id),
+        None,
+    )
+    .await;
+    assert!(dragged(tam_token.clone()).await.is_empty());
+    assert_eq!(rule("live", false).await, StatusCode::NO_CONTENT);
+    assert_eq!(dragged(tam_token.clone()).await, ["Ogre", "Wren"]);
+    // Only for a token of their own, and only whoever runs the table sets the rule.
+    assert!(dragged(wren_token.clone()).await.is_empty());
+    let body = json!({ "drag": { "mode": "live", "outsideFights": false, "remember": true } });
+    let refused = call(&app, As::Seat(&tam), "PATCH", &sight, Some(body))
+        .await
+        .0;
+    assert_ne!(refused, StatusCode::NO_CONTENT);
+    assert_eq!(rule("peek", false).await, StatusCode::BAD_REQUEST);
+}

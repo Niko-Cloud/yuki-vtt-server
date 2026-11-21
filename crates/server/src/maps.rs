@@ -2382,7 +2382,7 @@ pub async fn mark(
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Mark>,
-) -> Result<StatusCode> {
+) -> Result<Json<Value>> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     match body.kind.as_str() {
         "ruler" => {}
@@ -2433,10 +2433,84 @@ pub async fn mark(
             mark["look"] = look;
         }
         state.events.mark_for(&id, mark, &seats);
+        // A player's own drag answers with the tokens it would see there, as far as the
+        // table's rule allows.
+        if let (Some(&[x, y]), false) = (points.first(), access.runs()) {
+            let tokens = drag_view(&state.db(), &id, &scene, &token, (x, y), &access)?;
+            return Ok(Json(json!({ "tokens": tokens })));
+        }
     } else {
         state.events.mark(&id, mark);
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({})))
+}
+
+/// What a player sees from where they are dragging their own token, by the table's rule (the
+/// website's `dragView`): nothing more until it is dropped, the party's tokens coming into
+/// view, or every token it would see there (in a fight, only if the DM allows it there). Only
+/// tokens they would get with it dropped there.
+fn drag_view(
+    db: &rusqlite::Connection,
+    table_id: &str,
+    scene_id: &str,
+    token_id: &str,
+    at: (f64, f64),
+    access: &access::Access,
+) -> Result<Vec<Value>> {
+    let rule = crate::fog::drag_sight(db, table_id)?;
+    let fighting = db
+        .query_row(
+            "SELECT encounter FROM tables WHERE id = ?1",
+            [table_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .is_some();
+    let live = rule.mode == "live" && !(rule.outside_fights && fighting);
+    if rule.mode == "drop" || (rule.mode == "live" && !live) {
+        return Ok(Vec::new());
+    }
+    let Some(mut there) = scene(db, table_id, scene_id)? else {
+        return Ok(Vec::new());
+    };
+    let Ok(map) = serde_json::from_value::<TableMap>(there.clone()) else {
+        return Ok(Vec::new());
+    };
+    let Some(token) = map.tokens.iter().find(|t| t.id == token_id) else {
+        return Ok(Vec::new());
+    };
+    let mine = token
+        .seat_id
+        .iter()
+        .chain(token.moved_by.iter().flatten())
+        .any(|seat| access.seat_ids.contains(seat));
+    if map.fog.mode != "dynamic" || token.hidden == Some(true) || !mine {
+        return Ok(Vec::new());
+    }
+    // The token put where it is being dragged, by its middle.
+    let cell = f64::from(map.grid.size);
+    let half = token.size / 2.0;
+    if let Some(moving) = there["tokens"]
+        .as_array_mut()
+        .and_then(|tokens| tokens.iter_mut().find(|t| t["id"] == token_id))
+    {
+        moving["x"] = json!(((at.0 - f64::from(map.grid.offset_x)) / cell - half).max(0.0));
+        moving["y"] = json!(((at.1 - f64::from(map.grid.offset_y)) / cell - half).max(0.0));
+    }
+    let looking = crate::sight::Looking {
+        seat_ids: &access.seat_ids,
+        shared: crate::fog::shared_sight(db, table_id)?,
+        darkvision: crate::play::darkvision_by_seat(db, table_id)?,
+    };
+    crate::fog::for_players(&mut there, &looking);
+    Ok(there["tokens"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["id"] != token_id && (live || t["seatId"].is_string()))
+        .cloned()
+        .collect())
 }
 
 /// The seats whose players would see a token at a spot on the shown map right now, so they

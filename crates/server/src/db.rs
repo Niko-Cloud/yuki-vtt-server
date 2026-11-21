@@ -160,6 +160,11 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE tables ADD COLUMN xcard_at INTEGER;
 "#,
+    // What players see while dragging their token, with fog (the website's DragSight); null
+    // is the default.
+    r#"
+    ALTER TABLE tables ADD COLUMN drag_sight TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

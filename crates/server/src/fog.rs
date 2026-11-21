@@ -226,12 +226,36 @@ pub async fn remove_note(
     })
 }
 
+/// The table's sight rules; only what is sent changes.
 #[derive(Deserialize)]
 pub struct Sight {
-    shared: bool,
+    shared: Option<bool>,
+    drag: Option<DragSight>,
 }
 
-/// With fog, whether each player sees through every party token or only their own.
+/// What players see while dragging their token (the website's DragSight): only once it is
+/// dropped ("drop"), allies coming into view ("allies"), or all its sight as it goes ("live");
+/// live only outside a fight if `outside_fights`, and what is glimpsed explored if `remember`.
+#[derive(Deserialize, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DragSight {
+    pub mode: String,
+    pub outside_fights: bool,
+    pub remember: bool,
+}
+
+impl Default for DragSight {
+    fn default() -> Self {
+        Self {
+            mode: "drop".into(),
+            outside_fights: true,
+            remember: false,
+        }
+    }
+}
+
+/// With fog, whether each player sees through every party token or only their own, and what
+/// they see while dragging their token.
 pub async fn set_sight(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -239,12 +263,39 @@ pub async fn set_sight(
     Json(body): Json<Sight>,
 ) -> Result<StatusCode> {
     access::runner(&state, &id, &credentials(&headers))?;
-    state.db().execute(
-        "UPDATE tables SET shared_sight = ?2 WHERE id = ?1",
-        params![id, body.shared],
-    )?;
+    let db = state.db();
+    if let Some(shared) = body.shared {
+        db.execute(
+            "UPDATE tables SET shared_sight = ?2 WHERE id = ?1",
+            params![id, shared],
+        )?;
+    }
+    if let Some(drag) = body.drag {
+        if !["drop", "allies", "live"].contains(&drag.mode.as_str()) {
+            return Err(AppError::bad(
+                "Sight while dragging is drop, allies or live",
+            ));
+        }
+        db.execute(
+            "UPDATE tables SET drag_sight = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(&drag)?],
+        )?;
+    }
+    drop(db);
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The table's rule for sight while dragging (the default when none is set, or it can't be read).
+pub fn drag_sight(db: &Connection, table_id: &str) -> Result<DragSight> {
+    let stored: Option<String> = db.query_row(
+        "SELECT drag_sight FROM tables WHERE id = ?1",
+        [table_id],
+        |row| row.get(0),
+    )?;
+    Ok(stored
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default())
 }
 
 /// Whether the table shares the party's sight.

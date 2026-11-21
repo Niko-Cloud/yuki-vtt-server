@@ -1882,12 +1882,12 @@ async fn shares_rulers_with_anyone_and_trails_with_those_who_draw() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     scene(&app, &t, "Cave").await;
     let (status, _) = call(&app, As::Seat(&tam), "POST", &path, Some(ruler)).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let trail = json!({ "kind": "trail", "points": [[10, 10], [20, 20]], "tab": "tab-1" });
     let (status, _) = call(&app, As::Seat(&tam), "POST", &path, Some(trail.clone())).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = call(&app, As::Dm, "POST", &path, Some(trail)).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let many: Vec<[i32; 2]> = (0..60).map(|i| [i, i]).collect();
     let long = json!({ "kind": "ruler", "points": many, "tab": "tab-1" });
     let (status, _) = call(&app, As::Dm, "POST", &path, Some(long)).await;
