@@ -65,6 +65,13 @@ impl Events {
             .send(json!({ "type": "mark", "mark": mark }).to_string());
     }
 
+    /// A token being dragged, as it goes, for those who run the table only (a player's token
+    /// in the dark is no one else's to see).
+    pub fn mark_for_runners(&self, table_id: &str, mark: Value) {
+        let text = json!({ "type": "mark", "mark": mark }).to_string();
+        let _ = self.channel(table_id).send(format!("{FOR_RUNNERS}{text}"));
+    }
+
     /// The DM's view while "Follow me" is on, for players' maps to follow, not kept.
     pub fn view(&self, table_id: &str, view: Value) {
         let _ = self
@@ -119,12 +126,15 @@ pub async fn open(
         return Err(AppError::forbidden("This website may not use this host"));
     }
     let credentials = Credentials::from(&headers, query.pass);
-    access::at_table(&state, &table_id, &credentials)?;
+    let runs = access::at_table(&state, &table_id, &credentials)?.runs();
     let events = state.events.listen(&table_id);
-    Ok(upgrade.on_upgrade(move |socket| stream(socket, events)))
+    Ok(upgrade.on_upgrade(move |socket| stream(socket, events, runs)))
 }
 
-async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>) {
+// Put before an event only those who run the table get; never sent on as it is.
+const FOR_RUNNERS: char = '\u{1}';
+
+async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>, runs: bool) {
     let (mut out, mut incoming) = socket.split();
     let mut alive = tokio::time::interval(KEEP_ALIVE);
     alive.tick().await;
@@ -132,6 +142,11 @@ async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>) {
         tokio::select! {
             event = events.recv() => match event {
                 Ok(text) => {
+                    let text = match text.strip_prefix(FOR_RUNNERS) {
+                        Some(_) if !runs => continue,
+                        Some(rest) => rest.to_string(),
+                        None => text,
+                    };
                     if out.send(Message::Text(text.into())).await.is_err() { break; }
                 }
                 // Too far behind to tell what was missed: one "change" covers it all.

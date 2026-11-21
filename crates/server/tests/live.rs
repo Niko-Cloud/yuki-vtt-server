@@ -190,3 +190,44 @@ mod reqwest_like {
         }
     }
 }
+
+#[tokio::test]
+async fn shows_a_token_being_dragged_to_whoever_runs_the_table() {
+    let host = serve().await;
+    let client = reqwest_like::Client::new(KEY);
+    let table = new_table(&client, &host).await;
+    client
+        .post(
+            &format!("http://{host}/api/tables/{table}/scenes"),
+            json!({ "name": "Cave" }),
+        )
+        .await;
+    let pass = media_pass(&client, &host, &table).await;
+
+    let mut request = format!("ws://{host}/api/tables/{table}/events?pass={pass}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", SITE.parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    client
+        .post(
+            &format!("http://{host}/api/tables/{table}/mark"),
+            json!({ "kind": "drag", "points": [[105.4, 175.0]], "tab": "tab-1", "token": "t1" }),
+        )
+        .await;
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("an event in time")
+        .unwrap()
+        .unwrap();
+    // As a plain event: the marker that keeps it to runners never goes out.
+    let value: serde_json::Value =
+        serde_json::from_str(message.into_text().unwrap().as_str()).unwrap();
+    assert_eq!(value["type"], "mark");
+    assert_eq!(value["mark"]["kind"], "drag");
+    assert_eq!(value["mark"]["token"], "t1");
+    assert_eq!(value["mark"]["points"], json!([[105.0, 175.0]]));
+}

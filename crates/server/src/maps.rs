@@ -2372,6 +2372,8 @@ pub struct Mark {
     kind: String,
     points: Vec<[f64; 2]>,
     tab: String,
+    /// The token a drag mark is for.
+    token: Option<String>,
 }
 
 /// A ruler or pointer trail on the map shown: anyone measures, those who may draw point.
@@ -2385,7 +2387,16 @@ pub async fn mark(
     match body.kind.as_str() {
         "ruler" => {}
         "trail" => allow(access.may("draw"), "point")?,
-        _ => return Err(AppError::bad("A mark is a ruler or a trail")),
+        "drag" => {
+            if !body
+                .token
+                .as_ref()
+                .is_some_and(|t| !t.is_empty() && t.len() <= 40)
+            {
+                return Err(AppError::bad("A drag mark says which token"));
+            }
+        }
+        _ => return Err(AppError::bad("A mark is a ruler, a trail or a drag")),
     }
     let fine = body.points.len() <= 50
         && body.points.iter().flatten().all(|n| n.is_finite())
@@ -2406,10 +2417,13 @@ pub async fn mark(
         .iter()
         .map(|[x, y]| [x.round(), y.round()])
         .collect();
-    state.events.mark(
-        &id,
-        json!({ "sceneId": scene, "kind": body.kind, "points": points, "by": access.name, "color": color, "tab": body.tab }),
-    );
+    let mut mark = json!({ "sceneId": scene, "kind": body.kind, "points": points, "by": access.name, "color": color, "tab": body.tab });
+    if body.kind == "drag" {
+        mark["token"] = json!(body.token);
+        state.events.mark_for_runners(&id, mark);
+    } else {
+        state.events.mark(&id, mark);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
