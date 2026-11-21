@@ -209,7 +209,7 @@ pub async fn web_picture(
     Json(body): Json<WebPicture>,
 ) -> Result<Response> {
     let access = access::at_table(&state, &id, &Credentials::from(&headers, None))?;
-    if !access.may("tokens") {
+    if !access.may("upload") {
         return Err(AppError::not_found("The DM hasn't let you add pictures"));
     }
     if body.url.len() > 2000 {

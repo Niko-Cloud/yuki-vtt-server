@@ -6,7 +6,7 @@ use crate::access::{self, Access};
 use crate::error::{AppError, Result};
 use crate::ids;
 use crate::maps::{
-    self, Fog, Light, Note, TableMap, Wall, active_scene, credentials, edit, not_allowed,
+    self, Fog, Light, Note, TableMap, Wall, active_scene, allow, credentials, edit, not_allowed,
 };
 use crate::state::AppState;
 use axum::Json;
@@ -194,7 +194,20 @@ pub async fn add_note(
     Path((id, scene)): Path<(String, String)>,
     Json(body): Json<NewNote>,
 ) -> Result<StatusCode> {
-    let access = access::runner(&state, &id, &credentials(&headers))?;
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    allow(access.may("notes"), "pin notes")?;
+    // A player's note is for everyone, and says whose it is.
+    let by = if access.runs() {
+        None
+    } else {
+        Some(
+            access
+                .seat_ids
+                .first()
+                .cloned()
+                .ok_or_else(|| AppError::forbidden("Only a seat pins notes"))?,
+        )
+    };
     let text = body.text.trim().to_string();
     if text.is_empty() || text.chars().count() > 500 || !on_map(body.x, body.y) {
         return Err(AppError::bad("A note is 1 to 500 letters, on the map"));
@@ -204,7 +217,8 @@ pub async fn add_note(
         x: body.x,
         y: body.y,
         text,
-        shared: body.shared,
+        shared: body.shared || by.is_some(),
+        by,
     };
     edit(&state, &access, &id, &scene, |mut map| {
         map.notes.push(note);
@@ -219,8 +233,15 @@ pub async fn remove_note(
     headers: HeaderMap,
     Path((id, scene, note)): Path<(String, String, String)>,
 ) -> Result<StatusCode> {
-    let access = access::runner(&state, &id, &credentials(&headers))?;
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
     edit(&state, &access, &id, &scene, |mut map| {
+        // Whoever runs the table takes any off; a player only one they pinned.
+        if !access.runs() {
+            let theirs = map.notes.iter().any(|n| {
+                n.id == note && n.by.as_ref().is_some_and(|by| access.seat_ids.contains(by))
+            });
+            allow(theirs, "take that note off")?;
+        }
         map.notes.retain(|n| n.id != note);
         Ok(map)
     })

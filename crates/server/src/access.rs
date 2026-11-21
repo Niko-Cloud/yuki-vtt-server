@@ -10,7 +10,55 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use sha2::Sha256;
 
-pub const PERMISSIONS: [&str; 5] = ["move-own", "move-any", "tokens", "draw", "templates"];
+/// What the DM lets a player do on the map (the website's SEAT_PERMISSIONS, in its order). A
+/// token's edit, resize, arrange and remove go for the player's own tokens unless "token-any".
+pub const PERMISSIONS: [&str; 16] = [
+    "move-own",
+    "move-any",
+    "token-add",
+    "token-edit",
+    "token-resize",
+    "token-arrange",
+    "token-remove",
+    "token-any",
+    "prop-add",
+    "prop-edit",
+    "prop-remove",
+    "upload",
+    "drawings",
+    "ping",
+    "templates",
+    "notes",
+];
+
+/// A seat's permissions as stored, older broader ones read as what they became ("tokens",
+/// "draw"), each once, in the usual order.
+pub fn upgraded(stored: &[String]) -> Vec<String> {
+    fn wider(p: &str) -> Vec<&str> {
+        match p {
+            "tokens" => vec![
+                "token-add",
+                "token-edit",
+                "token-resize",
+                "token-arrange",
+                "token-remove",
+                "token-any",
+                "prop-add",
+                "prop-edit",
+                "prop-remove",
+                "upload",
+            ],
+            "draw" => vec!["drawings", "ping"],
+            other => vec![other],
+        }
+    }
+    let all: Vec<&str> = stored.iter().flat_map(|p| wider(p)).collect();
+    PERMISSIONS
+        .iter()
+        .filter(|p| all.contains(p))
+        .map(|p| p.to_string())
+        .collect()
+}
 
 /// How long a media pass lets a page load pictures and the live channel.
 pub const MEDIA_PASS_SECONDS: i64 = 60 * 60;
@@ -190,7 +238,7 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
         permissions: if screen {
             vec![]
         } else {
-            serde_json::from_str(&permissions)?
+            upgraded(&serde_json::from_str::<Vec<String>>(&permissions)?)
         },
         screen,
     })

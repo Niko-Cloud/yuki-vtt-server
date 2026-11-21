@@ -26,7 +26,7 @@ pub async fn pin(
     Json(body): Json<NewRuler>,
 ) -> Result<Json<Value>> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    allow(access.may("draw"), "pin rulers")?;
+    allow(access.may("ping"), "pin rulers")?;
     let on_map = |&[x, y]: &[f64; 2]| {
         x.is_finite()
             && y.is_finite()

@@ -71,7 +71,9 @@ fn seats(db: &Connection, table_id: &str) -> Result<Vec<Seat>> {
         .map(|(id, permissions, snapshot)| {
             Ok(Seat {
                 id,
-                permissions: serde_json::from_str(&permissions)?,
+                permissions: serde_json::to_value(crate::access::upgraded(
+                    &serde_json::from_str::<Vec<String>>(&permissions)?,
+                ))?,
                 snapshot: serde_json::from_str(&snapshot)?,
             })
         })

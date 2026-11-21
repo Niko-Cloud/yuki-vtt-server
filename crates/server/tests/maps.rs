@@ -287,7 +287,7 @@ async fn moves_tokens_as_far_as_the_dm_lets_players() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    // Renaming still takes "tokens"; locking is the DM's.
+    // Renaming takes "token-edit"; locking is the DM's.
     let (status, _) = call(
         &app,
         As::Seat(&token),
@@ -345,7 +345,7 @@ async fn keeps_players_off_the_dms_other_maps() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{seat}/permissions", t.id),
-        Some(json!({ "permissions": ["tokens", "draw"] })),
+        Some(json!({ "permissions": ["token-add", "token-edit", "token-resize", "token-arrange", "token-remove", "token-any", "prop-add", "prop-edit", "prop-remove", "upload", "drawings", "ping"] })),
     )
     .await;
     let (status, _) = call(
@@ -374,7 +374,7 @@ async fn draws_and_erases_by_permission() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{seat}/permissions", t.id),
-        Some(json!({ "permissions": ["draw"] })),
+        Some(json!({ "permissions": ["drawings", "ping"] })),
     )
     .await;
     call(&app, As::Seat(&token), "POST", &path, Some(line.clone())).await;
@@ -767,7 +767,7 @@ async fn keeps_a_picture_library_and_shows_handouts() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{seat}/permissions", t.id),
-        Some(json!({ "permissions": ["tokens"] })),
+        Some(json!({ "permissions": ["token-add", "token-edit", "token-resize", "token-arrange", "token-remove", "token-any", "prop-add", "prop-edit", "prop-remove", "upload"] })),
     )
     .await;
     let (status, portrait) = upload(&app, As::Seat(&token), "POST", &add("token"), PNG).await;
@@ -939,7 +939,7 @@ async fn a_co_dm_changes_anything_on_the_board() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{wren_seat}/permissions", t.id),
-        Some(json!({ "permissions": ["draw"] })),
+        Some(json!({ "permissions": ["drawings", "ping"] })),
     )
     .await;
     let made = call(
@@ -1013,7 +1013,7 @@ async fn only_whoever_runs_the_table_adds_hidden_tokens() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{seat}/permissions", t.id),
-        Some(json!({ "permissions": ["tokens"] })),
+        Some(json!({ "permissions": ["token-add", "token-edit", "token-resize", "token-arrange", "token-remove", "token-any", "prop-add", "prop-edit", "prop-remove", "upload"] })),
     )
     .await;
     let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);

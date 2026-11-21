@@ -102,7 +102,7 @@ async fn runs_fog_of_war_like_the_website() {
         Some(json!({ "x": 1, "y": 1, "text": "Mine" })),
     )
     .await;
-    assert_eq!(mine.0, StatusCode::FORBIDDEN);
+    assert_eq!(mine.0, StatusCode::NOT_FOUND);
     let line = json!({ "shape": "rect", "color": "#ff9090", "points": [[0, 0], [70, 70]], "hidden": true });
     let drawn = call(
         &app,

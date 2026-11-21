@@ -462,7 +462,9 @@ pub async fn add(
             "A picture is a token, a prop, a handout or a track",
         ));
     }
-    if !(access.runs() || (upload.kind == "token" && access.may("tokens"))) {
+    // A player uploads token pictures, and pictures for the map if they may place them.
+    let theirs = upload.kind == "token" || (upload.kind == "prop" && access.may("prop-add"));
+    if !(access.runs() || (access.may("upload") && theirs)) {
         return Err(AppError::not_found("The DM hasn't let you add pictures"));
     }
     let audio = upload.kind == "audio";

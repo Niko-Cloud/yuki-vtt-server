@@ -301,6 +301,9 @@ pub struct Note {
     /// Players can read it too; otherwise it is the DM's alone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared: bool,
+    /// The seat of the player who pinned it, who may take it off again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 /// A spell's area: a cone or line from where it starts, a sphere around a point, a cube with
@@ -1282,7 +1285,7 @@ pub async fn add_token(
     Json(body): Json<NewToken>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    allow(access.may("tokens"), "add tokens")?;
+    allow(access.may("token-add"), "add tokens")?;
     if body.hidden {
         allow(access.runs(), "put tokens on the DM's layer")?;
     }
@@ -1301,7 +1304,8 @@ pub async fn add_token(
         vision: None,
         light: None,
         shared_with: None,
-        moved_by: None,
+        // A player's summon or familiar is theirs to move and change.
+        moved_by: (!access.runs() && !access.seat_ids.is_empty()).then(|| access.seat_ids.clone()),
         facing: None,
         attached_to: None,
         follow: None,
@@ -1563,14 +1567,12 @@ pub async fn change_token(
         // Turning a token is moving it, as far as who may.
         let moving = body.x.is_some() || body.y.is_some() || body.facing.is_some();
         let restyling = body.name.is_some()
-            || body.size.is_some()
             || body.color.is_some()
             || picture.is_some()
             || body.name_hidden.is_some()
             || body.marks.is_some()
-            || body.rotation.is_some()
-            || body.flip.is_some()
             || counter.is_some();
+        let resizing = body.size.is_some() || body.rotation.is_some() || body.flip.is_some();
         // Its own player's, or one the DM lets a player move.
         let mine = token
             .seat_id
@@ -1589,8 +1591,13 @@ pub async fn change_token(
             token.y = body.y.unwrap_or(token.y);
             cell(token.x, token.y)?;
         }
+        // Changing a token goes for the player's own unless they may change any.
+        let theirs = mine || access.may("token-any");
         if restyling {
-            allow(access.may("tokens"), "change tokens")?;
+            allow(access.may("token-edit") && theirs, "change that token")?;
+        }
+        if resizing {
+            allow(access.may("token-resize") && theirs, "resize that token")?;
         }
         if body.hidden.is_some() || body.locked.is_some() {
             allow(access.runs(), "hide or lock tokens")?;
@@ -1663,7 +1670,7 @@ pub async fn change_token(
         }
         // Attaching it to another: one that is there, and never round in a loop.
         if body.attached_to.is_some() || body.follow.is_some() || body.layer.is_some() {
-            allow(access.may("tokens"), "arrange tokens")?;
+            allow(access.may("token-arrange") && theirs, "arrange that token")?;
         }
         match &body.attached_to {
             Some(Value::Null) => token.attached_to = None,
@@ -1845,8 +1852,16 @@ pub async fn remove_token(
     Path((id, scene, token_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    allow(access.may("tokens"), "remove tokens")?;
+    allow(access.may("token-remove"), "remove tokens")?;
     edit(&state, &access, &id, &scene, |mut map| {
+        let mine = map.tokens.iter().any(|t| {
+            t.id == token_id
+                && t.seat_id
+                    .iter()
+                    .chain(t.moved_by.iter().flatten())
+                    .any(|seat| access.seat_ids.contains(seat))
+        });
+        allow(mine || access.may("token-any"), "remove that token")?;
         // What it carried goes with it.
         let mut gone = carried_by(&map.tokens, &token_id);
         gone.insert(token_id.clone());
@@ -1884,7 +1899,7 @@ pub async fn add_prop(
     Json(body): Json<NewProp>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    allow(access.may("tokens"), "place pictures")?;
+    allow(access.may("prop-add"), "place pictures")?;
     cell(f64::from(body.x), f64::from(body.y))?;
     prop_size(body.w, body.h)?;
     picture_exists(&state.db(), &body.asset_id)?;
@@ -1934,7 +1949,7 @@ pub async fn change_prop(
     Json(body): Json<PropChange>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    allow(access.may("tokens"), "move pictures")?;
+    allow(access.may("prop-edit"), "move pictures")?;
     if body.locked.is_some() {
         allow(access.runs(), "lock pictures")?;
     }
@@ -1995,7 +2010,7 @@ pub async fn remove_prop(
     Path((id, scene, prop_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    allow(access.may("tokens"), "remove pictures")?;
+    allow(access.may("prop-remove"), "remove pictures")?;
     edit(&state, &access, &id, &scene, |mut map| {
         map.props.retain(|p| p.id != prop_id);
         Ok(map)
@@ -2128,7 +2143,7 @@ pub async fn add_drawing(
     Json(body): Json<NewDrawing>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    allow(access.may("draw"), "draw")?;
+    allow(access.may("drawings"), "draw")?;
     if body.hidden {
         allow(access.runs(), "draw on the DM's layer")?;
     }
@@ -2344,7 +2359,7 @@ pub async fn ping(
     Json(at): Json<Ping>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    allow(access.may("draw"), "ping")?;
+    allow(access.may("ping"), "ping")?;
     if at.bring {
         allow(access.runs(), "move everyone's view")?;
     }
@@ -2386,7 +2401,7 @@ pub async fn mark(
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     match body.kind.as_str() {
         "ruler" => {}
-        "trail" => allow(access.may("draw"), "point")?,
+        "trail" => allow(access.may("ping"), "point")?,
         "drag" => {
             if !body
                 .token
