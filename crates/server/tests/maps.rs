@@ -1849,6 +1849,25 @@ async fn replaces_a_pictures_image() {
         .0,
         StatusCode::NOT_FOUND
     );
+    // A picture gives off light (a brazier), all around only; null puts it out.
+    let lit = json!({ "light": { "bright": 10, "dim": 20, "edge": "sharp" } });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(lit)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let shown = view(&app, As::Dm, &t).await["scene"]["props"][0].clone();
+    assert_eq!(
+        shown["light"],
+        json!({ "bright": 10, "dim": 20, "edge": "sharp" })
+    );
+    let cone = json!({ "light": { "bright": 10, "dim": 20, "shape": "cone" } });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(cone)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let out = json!({ "light": null });
+    call(&app, As::Dm, "PATCH", &at, Some(out)).await;
+    assert!(view(&app, As::Dm, &t).await["scene"]["props"][0]["light"].is_null());
 }
 
 #[tokio::test]

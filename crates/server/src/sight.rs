@@ -181,6 +181,16 @@ fn sight(
             cone_of(l.shape.as_deref(), l.width, l.angle),
         )
     });
+    // A picture giving off light shines all around its middle.
+    let glowing = map.props.iter().filter_map(|p| {
+        let light = p.light.as_ref()?;
+        let size = f64::from(map.grid.size);
+        let at = (
+            f64::from(map.grid.offset_x) + (f64::from(p.x) + p.w / 2.0) * size,
+            f64::from(map.grid.offset_y) + (f64::from(p.y) + p.h / 2.0) * size,
+        );
+        Some((at, f64::from(light.bright.max(light.dim)), None))
+    });
     let carried = carriers.iter().filter_map(|t| {
         let light = t.light.as_ref()?;
         let reach = f64::from(light.bright.max(light.dim));
@@ -191,6 +201,7 @@ fn sight(
         ))
     });
     let lights = placed
+        .chain(glowing)
         .chain(carried)
         .filter(|(_, reach, _)| *reach > 0.0)
         .map(|(at, reach, cone)| Shine {
@@ -358,6 +369,28 @@ mod tests {
         }]);
         assert!(!line_of_sight(&walls, (100.0, 250.0), (400.0, 250.0)));
         assert!(line_of_sight(&walls, (400.0, 250.0), (100.0, 250.0)));
+    }
+
+    #[test]
+    fn lets_a_picture_give_off_light_all_around_its_middle() {
+        // As vision.test.ts: a dark map, a brazier picture, an ogre beside it.
+        let dark = |light: serde_json::Value| {
+            let mut brazier = json!({ "id": "b", "assetId": "a", "x": 6, "y": 1, "w": 1, "h": 1 });
+            if !light.is_null() {
+                brazier["light"] = light;
+            }
+            map(json!({
+                "fog": { "mode": "dynamic", "light": "dark", "remember": false },
+                "walls": [],
+                "props": [brazier],
+                "tokens": [
+                    { "id": "t", "name": "Tam", "x": 1, "y": 1, "size": 1, "color": "#86d5ed", "seatId": "s1" },
+                    { "id": "g", "name": "Ogre", "x": 6, "y": 2, "size": 1, "color": "#ff9090" }
+                ]
+            }))
+        };
+        assert!(!ids(&dark(json!(null)), &[]).contains(&"g".to_string()));
+        assert!(ids(&dark(json!({ "bright": 5, "dim": 10 })), &[]).contains(&"g".to_string()));
     }
 
     #[test]

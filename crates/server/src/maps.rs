@@ -348,6 +348,9 @@ pub struct Prop {
     pub rotation: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip: Option<bool>,
+    /// A light it gives off, all around its middle: a sconce, a brazier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<Carried>,
 }
 
 /// A line by hand, or a shape from its first point to its last, in the picture's pixels.
@@ -1824,6 +1827,7 @@ pub async fn add_prop(
             locked,
             rotation: None,
             flip: None,
+            light: None,
         });
         map.props.push(prop);
         Ok(map)
@@ -1842,6 +1846,9 @@ pub struct PropChange {
     layer: Option<String>,
     rotation: Option<u32>,
     flip: Option<bool>,
+    /// The light it gives off; null puts it out.
+    #[serde(default, deserialize_with = "present")]
+    light: Option<Value>,
 }
 
 pub async fn change_prop(
@@ -1854,6 +1861,16 @@ pub async fn change_prop(
     allow(access.may("tokens"), "move pictures")?;
     if body.locked.is_some() {
         allow(access.runs(), "lock pictures")?;
+    }
+    let light = sight_part::<Carried>(&body.light, "light")?;
+    if let Some(Some(l)) = &light {
+        feet(l.bright)?;
+        feet(l.dim)?;
+        if l.shape.is_some() || l.width.is_some() || !spread_ok(&None, None, &l.edge) {
+            return Err(AppError::bad(
+                "A picture's light is all around, soft or sharp",
+            ));
+        }
     }
     if let Some(asset) = &body.asset_id {
         picture_exists(&state.db(), asset)?;
@@ -1884,6 +1901,9 @@ pub async fn change_prop(
         }
         if let Some(asset) = &body.asset_id {
             prop.asset_id = asset.clone();
+        }
+        if let Some(light) = &light {
+            prop.light = light.clone();
         }
         map.props[at] = map.keep_prop(prop);
         if let Some(stack) = layer(body.layer.as_deref())? {
