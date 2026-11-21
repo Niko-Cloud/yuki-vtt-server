@@ -932,3 +932,84 @@ async fn shows_a_player_what_their_dragged_token_would_see_as_far_as_the_table_a
     assert_ne!(refused, StatusCode::NO_CONTENT);
     assert_eq!(rule("peek", false).await, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn tells_a_player_who_loses_sight_of_a_dragged_token_that_it_went() {
+    let (app, state) = host_and_state();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (wren_seat, _) = join(&app, &t.invite, "Wren", "user-2").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    let tokens = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    let tam_token = tokens
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["seatId"] == tam_seat.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Both on the near side of a wall in daylight, so Wren sees Tam where Tam stands.
+    for token in tokens.as_array().unwrap() {
+        let id = token["id"].as_str().unwrap();
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &format!("{at}/tokens/{id}"),
+            Some(json!({ "x": 1, "y": 1 })),
+        )
+        .await;
+    }
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "bright", "remember": false },
+        "walls": [{ "id": "w", "a": [350, 0], "b": [350, 700] }],
+        "lights": []
+    });
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting),
+    )
+    .await;
+    // Each sees only through their own token.
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/sight", t.id),
+        Some(json!({ "shared": false })),
+    )
+    .await;
+    let mut events = state.events.listen(&t.id);
+    let wren = [wren_seat.clone()];
+    let drag = |x: i64| json!({ "kind": "drag", "points": [[x, 105]], "tab": "tab-1", "token": tam_token });
+    let seen_by_wren = |text: String| {
+        let text = yuki_vtt_server::events::for_me(text, false, &wren).expect("an event for Wren");
+        serde_json::from_str::<Value>(&text).unwrap()["mark"].clone()
+    };
+    // On the near side Wren watches it go.
+    let mark = format!("/tables/{}/mark", t.id);
+    call(&app, As::Seat(&tam), "POST", &mark, Some(drag(175))).await;
+    let near = seen_by_wren(events.recv().await.unwrap());
+    assert_eq!(near["points"], json!([[175.0, 105.0]]));
+    // Past the wall Wren hears only that it went out of sight, not where.
+    call(&app, As::Seat(&tam), "POST", &mark, Some(drag(455))).await;
+    let far = seen_by_wren(events.recv().await.unwrap());
+    assert_eq!(far["out"], true);
+    assert_eq!(far["points"], json!([]));
+    assert!(far.get("look").is_none());
+    assert_eq!(far["token"], tam_token.as_str());
+}

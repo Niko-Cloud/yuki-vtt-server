@@ -2424,15 +2424,15 @@ pub async fn mark(
         state.events.mark(&id, mark);
     } else if body.kind == "drag" {
         let token = body.token.clone().unwrap_or_default();
-        let (seats, look) = match points.first() {
+        let (seats, lost, look) = match points.first() {
             Some(&[x, y]) => seats_seeing(&state.db(), &id, &scene, &token, (x, y))?,
-            None => (Vec::new(), None),
+            None => (Vec::new(), Vec::new(), None),
         };
         mark["token"] = json!(token);
         if let Some(look) = look {
             mark["look"] = look;
         }
-        state.events.mark_for(&id, mark, &seats);
+        state.events.mark_for(&id, mark, &seats, &lost);
         // A player's own drag answers with the tokens it would see there, as far as the
         // table's rule allows.
         if let (Some(&[x, y]), false) = (points.first(), access.runs()) {
@@ -2516,15 +2516,18 @@ fn drag_view(
 /// The seats whose players would see a token at a spot on the shown map right now, so they
 /// watch it as it is dragged (the website's `seatsSeeing`): everyone's without fog by sight,
 /// else theirs who would see it there. None for a hidden token. With them, how the token
-/// looks, for a screen that had it out of sight until now.
+/// looks, for a screen that had it out of sight until now, and the seats that see it where it
+/// stands but not there (lost: told only that it went out of their sight).
+type Seeing = (Vec<String>, Vec<String>, Option<Value>);
+
 fn seats_seeing(
     db: &rusqlite::Connection,
     table_id: &str,
     scene_id: &str,
     token_id: &str,
     at: (f64, f64),
-) -> Result<(Vec<String>, Option<Value>)> {
-    let none = || Ok((Vec::new(), None));
+) -> Result<Seeing> {
+    let none = || Ok((Vec::new(), Vec::new(), None));
     let Some(stored) = scene(db, table_id, scene_id)? else {
         return none();
     };
@@ -2558,7 +2561,7 @@ fn seats_seeing(
     let darkvision = crate::play::darkvision_by_seat(db, table_id)?;
     let mut seats: Vec<String> = darkvision.keys().cloned().collect();
     if map.fog.mode != "dynamic" {
-        return Ok((seats, look));
+        return Ok((seats, Vec::new(), look));
     }
     // The token put where it is being dragged, by its middle.
     let mut moved = map.clone();
@@ -2567,17 +2570,27 @@ fn seats_seeing(
     token.x = (at.0 - f64::from(map.grid.offset_x)) / cell - token.size / 2.0;
     token.y = (at.1 - f64::from(map.grid.offset_y)) / cell - token.size / 2.0;
     let shared = crate::fog::shared_sight(db, table_id)?;
+    let mut lost = Vec::new();
     seats.retain(|seat| {
         let looking = crate::sight::Looking {
             seat_ids: std::slice::from_ref(seat),
             shared,
             darkvision: darkvision.clone(),
         };
-        crate::sight::shown_ids(&moved, &looking)
-            .iter()
-            .any(|id| id == token_id)
+        let sees = |map: &TableMap| {
+            crate::sight::shown_ids(map, &looking)
+                .iter()
+                .any(|id| id == token_id)
+        };
+        if sees(&moved) {
+            return true;
+        }
+        if sees(&map) {
+            lost.push(seat.clone());
+        }
+        false
     });
-    Ok((seats, look))
+    Ok((seats, lost, look))
 }
 
 #[derive(Deserialize)]

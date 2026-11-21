@@ -17,6 +17,11 @@ pub const SECRET: &[u8] = b"shared-with-the-website";
 pub const SITE: &str = "https://yuki.test";
 
 pub fn host() -> Router {
+    host_and_state().0
+}
+
+/// A host, with its state to listen on its live channel.
+pub fn host_and_state() -> (Router, AppState) {
     let config = Config {
         owner_key_hash: ids::hash(KEY),
         website_secret: Some(SECRET.to_vec()),
@@ -24,7 +29,8 @@ pub fn host() -> Router {
         // Its own folder, kept until the test run ends.
         data_dir: tempfile::tempdir().unwrap().keep(),
     };
-    app(AppState::new(db::in_memory().unwrap(), config))
+    let state = AppState::new(db::in_memory().unwrap(), config);
+    (app(state.clone()), state)
 }
 
 /// Who is calling: the DM, a seat, or nobody.
