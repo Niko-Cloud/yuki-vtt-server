@@ -1397,11 +1397,21 @@ pub async fn place_party(
     })
 }
 
+/// A square on a token's way.
+#[derive(Deserialize)]
+pub struct Spot {
+    x: f64,
+    y: f64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenChange {
     x: Option<f64>,
     y: Option<f64>,
+    /// The squares a move turned at on its way, in order: each straight step is checked for
+    /// walls (the website's `via`).
+    via: Option<Vec<Spot>>,
     name: Option<String>,
     size: Option<f64>,
     color: Option<String>,
@@ -1686,10 +1696,29 @@ pub async fn change_token(
         // the painted rooms' edges too.
         let walls = map.walls_with_rooms();
         let walled = !access.runs() && map.fog.collide != Some(false) && !walls.is_empty();
+        // Its way: where it was, each square it turned at, where it lands.
+        let via = body.via.as_deref().unwrap_or_default();
+        if via.len() > 40 {
+            return Err(AppError::bad("Too many turns on the way"));
+        }
+        let mut way = vec![before.clone()];
+        for spot in via {
+            if !(0.0..=1000.0).contains(&spot.x) || !(0.0..=1000.0).contains(&spot.y) {
+                return Err(AppError::bad("That square is off the map"));
+            }
+            way.push(Token {
+                x: spot.x,
+                y: spot.y,
+                ..before.clone()
+            });
+        }
+        way.push(placed.clone());
         if walled && (placed.x, placed.y) != (before.x, before.y) {
-            let from = crate::fog::middle_of(&map, &before);
-            if wall_in_the_way(&walls, from, crate::fog::middle_of(&map, &placed)) {
-                return Err(AppError::bad("A wall is in the way"));
+            for step in way.windows(2) {
+                let from = crate::fog::middle_of(&map, &step[0]);
+                if wall_in_the_way(&walls, from, crate::fog::middle_of(&map, &step[1])) {
+                    return Err(AppError::bad("A wall is in the way"));
+                }
             }
         }
         // Feet it moved this turn, counted up against its fighter when a fight is going.
@@ -1698,11 +1727,10 @@ pub async fn change_token(
                 x: x.round().max(0.0) as u32,
                 y: y.round().max(0.0) as u32,
             };
-            moved_feet = map::distance(
-                &map.grid,
-                cell(before.x, before.y),
-                cell(placed.x, placed.y),
-            );
+            moved_feet = way
+                .windows(2)
+                .map(|s| map::distance(&map.grid, cell(s[0].x, s[0].y), cell(s[1].x, s[1].y)))
+                .sum();
             mover = Some((placed.seat_id.clone(), placed.name.clone()));
         }
         // What it carries takes from it what each rider chooses to follow.

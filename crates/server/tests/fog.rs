@@ -431,6 +431,32 @@ async fn stops_players_tokens_at_walls_unless_the_dm_lets_them_through() {
     assert_eq!(put(json!([wall]), None).await, StatusCode::NO_CONTENT);
     assert_eq!(go(As::Seat(&tam), x + 1).await, StatusCode::NO_CONTENT);
     assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::BAD_REQUEST);
+    // A move round the end of a wall, by the squares it turned at: each step is checked.
+    let short = json!({ "id": "w", "a": [edge, 0], "b": [edge, (y + 1) * 70] });
+    assert_eq!(put(json!([short]), None).await, StatusCode::NO_CONTENT);
+    let round = |to: i64, via: Value| {
+        let (app, path, tam) = (app.clone(), path.clone(), tam.clone());
+        async move {
+            let body = json!({ "x": to, "y": y, "via": via });
+            call(&app, As::Seat(&tam), "PATCH", &path, Some(body))
+                .await
+                .0
+        }
+    };
+    let below = |x: i64| json!({ "x": x, "y": y + 1 });
+    assert_eq!(
+        round(x + 3, json!([below(x + 3)])).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        round(x + 3, json!([below(x + 1), below(x + 3)])).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        round(x + 1, json!([below(x + 3), below(x + 1)])).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(put(json!([wall]), None).await, StatusCode::NO_CONTENT);
     // An open door lets them through; the DM goes anywhere.
     let mut door = wall.clone();
     door["door"] = json!({ "open": true });
