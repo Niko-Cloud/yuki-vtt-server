@@ -2420,11 +2420,14 @@ pub async fn mark(
     let mut mark = json!({ "sceneId": scene, "kind": body.kind, "points": points, "by": access.name, "color": color, "tab": body.tab });
     if body.kind == "drag" {
         let token = body.token.clone().unwrap_or_default();
-        let seats = match points.first() {
+        let (seats, look) = match points.first() {
             Some(&[x, y]) => seats_seeing(&state.db(), &id, &scene, &token, (x, y))?,
-            None => Vec::new(),
+            None => (Vec::new(), None),
         };
         mark["token"] = json!(token);
+        if let Some(look) = look {
+            mark["look"] = look;
+        }
         state.events.mark_for(&id, mark, &seats);
     } else {
         state.events.mark(&id, mark);
@@ -2434,29 +2437,50 @@ pub async fn mark(
 
 /// The seats whose players would see a token at a spot on the shown map right now, so they
 /// watch it as it is dragged (the website's `seatsSeeing`): everyone's without fog by sight,
-/// else theirs who would see it there. None for a hidden token.
+/// else theirs who would see it there. None for a hidden token. With them, how the token
+/// looks, for a screen that had it out of sight until now.
 fn seats_seeing(
     db: &rusqlite::Connection,
     table_id: &str,
     scene_id: &str,
     token_id: &str,
     at: (f64, f64),
-) -> Result<Vec<String>> {
-    let Some(map) = scene(db, table_id, scene_id)?
-        .and_then(|value| serde_json::from_value::<TableMap>(value).ok())
-    else {
-        return Ok(Vec::new());
+) -> Result<(Vec<String>, Option<Value>)> {
+    let none = || Ok((Vec::new(), None));
+    let Some(stored) = scene(db, table_id, scene_id)? else {
+        return none();
+    };
+    let Ok(map) = serde_json::from_value::<TableMap>(stored.clone()) else {
+        return none();
     };
     let Some(index) = map.tokens.iter().position(|t| t.id == token_id) else {
-        return Ok(Vec::new());
+        return none();
     };
     if map.tokens[index].hidden == Some(true) {
-        return Ok(Vec::new());
+        return none();
     }
+    let look = stored["tokens"]
+        .as_array()
+        .and_then(|tokens| tokens.iter().find(|t| t["id"] == token_id))
+        .map(|t| {
+            // As players get it: a name the DM keeps off the map isn't sent.
+            let name = if t["nameHidden"] == true {
+                json!("Unknown")
+            } else {
+                t["name"].clone()
+            };
+            let mut look = json!({ "name": name, "size": t["size"], "color": t["color"] });
+            for key in ["imageId", "seatId"] {
+                if t[key].is_string() {
+                    look[key] = t[key].clone();
+                }
+            }
+            look
+        });
     let darkvision = crate::play::darkvision_by_seat(db, table_id)?;
     let mut seats: Vec<String> = darkvision.keys().cloned().collect();
     if map.fog.mode != "dynamic" {
-        return Ok(seats);
+        return Ok((seats, look));
     }
     // The token put where it is being dragged, by its middle.
     let mut moved = map.clone();
@@ -2475,7 +2499,7 @@ fn seats_seeing(
             .iter()
             .any(|id| id == token_id)
     });
-    Ok(seats)
+    Ok((seats, look))
 }
 
 #[derive(Deserialize)]

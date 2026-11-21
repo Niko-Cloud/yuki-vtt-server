@@ -173,12 +173,19 @@ mod reqwest_like {
         }
 
         pub async fn post(&self, url: &str, body: Value) -> Value {
+            self.send("POST", url, &body.to_string()).await
+        }
+
+        pub async fn get(&self, url: &str) -> Value {
+            self.send("GET", url, "").await
+        }
+
+        async fn send(&self, method: &str, url: &str, body: &str) -> Value {
             let rest = url.strip_prefix("http://").unwrap();
             let (host, path) = rest.split_once('/').unwrap();
-            let body = body.to_string();
             let mut stream = tokio::net::TcpStream::connect(host).await.unwrap();
             let request = format!(
-                "POST /{path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "{method} /{path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 self.key,
                 body.len()
             );
@@ -230,4 +237,57 @@ async fn shows_a_token_being_dragged_to_whoever_runs_the_table() {
     assert_eq!(value["mark"]["kind"], "drag");
     assert_eq!(value["mark"]["token"], "t1");
     assert_eq!(value["mark"]["points"], json!([[105.0, 175.0]]));
+}
+
+#[tokio::test]
+async fn a_drag_carries_how_its_token_looks() {
+    let host = serve().await;
+    let client = reqwest_like::Client::new(KEY);
+    let table = new_table(&client, &host).await;
+    let scene = client
+        .post(
+            &format!("http://{host}/api/tables/{table}/scenes"),
+            json!({ "name": "Cave" }),
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client
+        .post(
+            &format!("http://{host}/api/tables/{table}/scenes/{scene}/tokens"),
+            json!({ "name": "Ogre", "x": 1, "y": 1 }),
+        )
+        .await;
+    let view = client
+        .get(&format!("http://{host}/api/tables/{table}"))
+        .await;
+    let ogre = view["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pass = media_pass(&client, &host, &table).await;
+    let mut request = format!("ws://{host}/api/tables/{table}/events?pass={pass}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", SITE.parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    client
+        .post(
+            &format!("http://{host}/api/tables/{table}/mark"),
+            json!({ "kind": "drag", "points": [[175, 175]], "tab": "tab-1", "token": ogre }),
+        )
+        .await;
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("an event in time")
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(message.into_text().unwrap().as_str()).unwrap();
+    assert_eq!(value["mark"]["look"]["name"], "Ogre");
+    assert!(value["mark"]["look"]["color"].is_string());
 }
