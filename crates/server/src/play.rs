@@ -39,6 +39,20 @@ struct Seat {
     snapshot: Snapshot,
 }
 
+/// Each seat at the table, with its character's darkvision (none when it has none).
+pub fn darkvision_by_seat(
+    db: &Connection,
+    table_id: &str,
+) -> Result<std::collections::HashMap<String, Option<f64>>> {
+    Ok(seats(db, table_id)?
+        .iter()
+        .map(|seat| {
+            let member = seat.snapshot.member(&seat.id, &seat.permissions);
+            (seat.id.clone(), member["darkvision"].as_f64())
+        })
+        .collect())
+}
+
 fn seats(db: &Connection, table_id: &str) -> Result<Vec<Seat>> {
     let mut rows = db.prepare(
         "SELECT id, permissions, snapshot FROM seats WHERE table_id = ?1 AND kind != 'screen' ORDER BY created_at",

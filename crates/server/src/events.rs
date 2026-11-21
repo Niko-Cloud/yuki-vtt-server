@@ -65,11 +65,14 @@ impl Events {
             .send(json!({ "type": "mark", "mark": mark }).to_string());
     }
 
-    /// A token being dragged, as it goes, for those who run the table only (a player's token
-    /// in the dark is no one else's to see).
-    pub fn mark_for_runners(&self, table_id: &str, mark: Value) {
+    /// A token being dragged, as it goes: for those who run the table, and the players of the
+    /// seats given (those who would see it there).
+    pub fn mark_for(&self, table_id: &str, mark: Value, seats: &[String]) {
         let text = json!({ "type": "mark", "mark": mark }).to_string();
-        let _ = self.channel(table_id).send(format!("{FOR_RUNNERS}{text}"));
+        let seats = seats.join(",");
+        let _ = self
+            .channel(table_id)
+            .send(format!("{FOR_SOME}{seats}{FOR_SOME}{text}"));
     }
 
     /// The DM's view while "Follow me" is on, for players' maps to follow, not kept.
@@ -126,15 +129,32 @@ pub async fn open(
         return Err(AppError::forbidden("This website may not use this host"));
     }
     let credentials = Credentials::from(&headers, query.pass);
-    let runs = access::at_table(&state, &table_id, &credentials)?.runs();
+    let access = access::at_table(&state, &table_id, &credentials)?;
+    let (runs, seats) = (access.runs(), access.seat_ids);
     let events = state.events.listen(&table_id);
-    Ok(upgrade.on_upgrade(move |socket| stream(socket, events, runs)))
+    Ok(upgrade.on_upgrade(move |socket| stream(socket, events, runs, seats)))
 }
 
-// Put before an event only those who run the table get; never sent on as it is.
-const FOR_RUNNERS: char = '\u{1}';
+// Around the seats an event is for (whoever runs the table gets it too), before the event;
+// never sent on as it is.
+const FOR_SOME: char = '\u{1}';
 
-async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>, runs: bool) {
+// The event as this person gets it, or none when it isn't for them.
+fn for_me(text: String, runs: bool, mine: &[String]) -> Option<String> {
+    let Some(rest) = text.strip_prefix(FOR_SOME) else {
+        return Some(text);
+    };
+    let (seats, event) = rest.split_once(FOR_SOME)?;
+    let theirs = runs || seats.split(',').any(|s| mine.iter().any(|m| m == s));
+    theirs.then(|| event.to_string())
+}
+
+async fn stream(
+    socket: WebSocket,
+    mut events: broadcast::Receiver<String>,
+    runs: bool,
+    seats: Vec<String>,
+) {
     let (mut out, mut incoming) = socket.split();
     let mut alive = tokio::time::interval(KEEP_ALIVE);
     alive.tick().await;
@@ -142,11 +162,7 @@ async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>, runs
         tokio::select! {
             event = events.recv() => match event {
                 Ok(text) => {
-                    let text = match text.strip_prefix(FOR_RUNNERS) {
-                        Some(_) if !runs => continue,
-                        Some(rest) => rest.to_string(),
-                        None => text,
-                    };
+                    let Some(text) = for_me(text, runs, &seats) else { continue };
                     if out.send(Message::Text(text.into())).await.is_err() { break; }
                 }
                 // Too far behind to tell what was missed: one "change" covers it all.
@@ -165,5 +181,26 @@ async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>, runs
                 Some(Ok(_)) => {}
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod for_some_tests {
+    use super::*;
+
+    #[test]
+    fn sends_an_event_for_some_seats_to_them_and_whoever_runs_the_table_only() {
+        let event = format!("{FOR_SOME}s1,s2{FOR_SOME}{{\"type\":\"mark\"}}");
+        let mine = |seats: &[&str]| seats.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let plain = Some("{\"type\":\"mark\"}".to_string());
+        assert_eq!(for_me(event.clone(), true, &[]), plain);
+        assert_eq!(for_me(event.clone(), false, &mine(&["s2"])), plain);
+        assert_eq!(for_me(event.clone(), false, &mine(&["s3"])), None);
+        // For no seats: whoever runs the table only.
+        let none = format!("{FOR_SOME}{FOR_SOME}{{}}");
+        assert_eq!(for_me(none.clone(), false, &mine(&["s1"])), None);
+        assert_eq!(for_me(none, true, &[]), Some("{}".to_string()));
+        // Any other event goes to everyone as it is.
+        assert_eq!(for_me("{}".into(), false, &[]), Some("{}".to_string()));
     }
 }
