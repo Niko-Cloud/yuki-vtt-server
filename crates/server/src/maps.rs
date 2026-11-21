@@ -2421,6 +2421,8 @@ pub struct Mark {
     tab: String,
     /// The token a drag mark is for.
     token: Option<String>,
+    /// The map it is on, for whoever runs the table (a player's is the map they are on).
+    scene: Option<String>,
 }
 
 /// A ruler or pointer trail on the map shown: anyone measures, those who may draw point.
@@ -2452,8 +2454,15 @@ pub async fn mark(
     if !fine {
         return Err(AppError::bad("A mark has up to 50 points"));
     }
-    let scene = crate::passages::scene_for(&state.db(), &access, &id)?
-        .ok_or_else(|| AppError::bad("There is no map to mark"))?;
+    let named = body
+        .scene
+        .clone()
+        .filter(|scene| access.runs() && load(&state.db(), &id, scene).is_ok());
+    let scene = match named {
+        Some(scene) => scene,
+        None => crate::passages::scene_for(&state.db(), &access, &id)?
+            .ok_or_else(|| AppError::bad("There is no map to mark"))?,
+    };
     let color = if access.runs() {
         TOKEN_COLORS[3]
     } else {
@@ -2606,7 +2615,22 @@ fn seats_seeing(
             look
         });
     let darkvision = crate::play::darkvision_by_seat(db, table_id)?;
-    let mut seats: Vec<String> = darkvision.keys().cloned().collect();
+    // Only the seats on this map: a passage may have taken some to another.
+    let shown = active_scene(db, table_id)?;
+    let mut seats: Vec<String> = Vec::new();
+    for seat in darkvision.keys() {
+        let went: Option<String> = db
+            .query_row(
+                "SELECT scene_id FROM seats WHERE table_id = ?1 AND id = ?2",
+                [table_id, seat],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if went.or(shown.clone()).as_deref() == Some(scene_id) {
+            seats.push(seat.clone());
+        }
+    }
     if map.fog.mode != "dynamic" {
         return Ok((seats, Vec::new(), look));
     }

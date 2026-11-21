@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 #[tokio::test]
 async fn takes_a_token_through_a_passage_on_its_map_or_to_another_its_player_sees() {
-    let app = host();
+    let (app, state) = host_and_state();
     let t = table(&app).await;
     let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
     // Kept for the whole test, so the closures below can take Tam's seat as who calls.
@@ -213,6 +213,26 @@ async fn takes_a_token_through_a_passage_on_its_map_or_to_another_its_player_see
     let up = token_of(&scene_of(As::Dm, Some(attic.clone())).await, &tam_seat).unwrap();
     assert_eq!((up["x"].as_f64(), up["y"].as_f64()), (Some(6.0), Some(4.0)));
     assert_eq!(scene_of(player, None).await["id"], attic.as_str());
+    // A drag up there goes live to those on the attic only, not to Wren in the cave.
+    let mut events = state.events.listen(&t.id);
+    let drag =
+        json!({ "kind": "drag", "points": [[455, 315]], "tab": "tab-1", "token": tam_token });
+    let (status, _) = call(
+        &app,
+        player,
+        "POST",
+        &format!("/tables/{}/mark", t.id),
+        Some(drag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let sent = events.recv().await.unwrap();
+    let to = |seat: &str| yuki_vtt_server::events::for_me(sent.clone(), false, &[seat.to_string()]);
+    assert!(
+        to(&tam_seat).unwrap().contains("\"sceneId\":\"")
+            && to(&tam_seat).unwrap().contains(&attic)
+    );
+    assert_eq!(to(&wren_seat), None);
     // The cave is out of Tam's reach now.
     let (status, _) = call(
         &app,
