@@ -30,6 +30,9 @@ const TOKEN_COLORS: [&str; 6] = [
 pub struct Image {
     pub mime: String,
     pub version: i64,
+    /// A big picture's tiles, sent only where a screen looks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiles: Option<crate::tiles::Tiles>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -816,7 +819,7 @@ pub fn load(db: &Connection, table_id: &str, scene_id: &str) -> Result<TableMap>
     Ok(serde_json::from_str(&text)?)
 }
 
-fn store(db: &Connection, scene_id: &str, map: &TableMap) -> Result<()> {
+pub(crate) fn store(db: &Connection, scene_id: &str, map: &TableMap) -> Result<()> {
     db.execute(
         "UPDATE scenes SET data = ?2 WHERE id = ?1",
         params![scene_id, serde_json::to_string(map)?],
@@ -1207,7 +1210,10 @@ pub async fn preload(
     access::runner(&state, &id, &credentials(&headers))?;
     let image = load(&state.db(), &id, &scene)?.image;
     if let Some(image) = image {
-        let preload = json!({ "sceneId": scene, "version": image.version, "mime": image.mime });
+        let mut preload = json!({ "sceneId": scene, "version": image.version, "mime": image.mime });
+        if let Some(tiles) = image.tiles {
+            preload["tiles"] = json!(tiles);
+        }
         state.events.preload(&id, preload);
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1245,6 +1251,7 @@ pub fn set_picture(
     let image = Some(Image {
         mime: mime.into(),
         version: ids::now(),
+        tiles: crate::tiles::tiles_for(width, height, mime),
     });
     store(
         db,

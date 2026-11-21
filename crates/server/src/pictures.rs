@@ -144,6 +144,33 @@ pub fn map_file(
 /// Brings pictures kept the old way (by id, beside their table or in `library/`) into the
 /// readable library folder, and notes the size of any picture that lacks one. Runs at start;
 /// a picture already in place is left alone.
+/// Notes the tiles of maps whose picture is big, kept before maps had them. Runs at start.
+pub fn note_map_tiles(data_dir: &FilePath, db: &rusqlite::Connection) -> Result<()> {
+    let found: Vec<(String, String, String)> = db
+        .prepare("SELECT table_id, id, file FROM scenes WHERE file IS NOT NULL")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (table_id, scene_id, file) in found {
+        let Ok(mut map) = maps::load(db, &table_id, &scene_id) else {
+            continue;
+        };
+        let Some(image) = map.image.as_mut().filter(|image| image.tiles.is_none()) else {
+            continue;
+        };
+        let Some(size) =
+            library::resolve(data_dir, &file).and_then(|path| imagesize::size(path).ok())
+        else {
+            continue;
+        };
+        let (width, height) = (size.width as u32, size.height as u32);
+        if let Some(tiles) = crate::tiles::tiles_for(width, height, &image.mime) {
+            image.tiles = Some(tiles);
+            maps::store(db, &scene_id, &map)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn gather_library(data_dir: &FilePath, db: &rusqlite::Connection) -> rusqlite::Result<()> {
     let mut rows =
         db.prepare("SELECT id, table_id, kind, name, mime, size FROM assets WHERE file IS NULL")?;
@@ -402,6 +429,8 @@ pub struct Seen {
     pass: Option<String>,
     // A map's small first look instead of the whole picture.
     preview: Option<String>,
+    // One tile of a big map ("level-column-row").
+    tile: Option<String>,
 }
 
 /// `GET /api/tables/{id}/scenes/{scene}/image`: the map's picture, for anyone at the table.
@@ -422,6 +451,20 @@ pub async fn map(
     let path = file
         .and_then(|file| library::resolve(&state.config.data_dir, &file))
         .ok_or_else(|| AppError::not_found("This map has no picture"))?;
+    if let Some(key) = seen.tile {
+        let tiles = picture
+            .tiles
+            .ok_or_else(|| AppError::not_found("This map has no tiles"))?;
+        let data_dir = state.config.data_dir.clone();
+        let cut = tokio::task::spawn_blocking(move || {
+            crate::tiles::tile(&data_dir, &scene, &path, &tiles, &key)
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| AppError::not_found("No such tile"))?;
+        return send(cut, "image/webp");
+    }
     if seen.preview.is_some() {
         let data_dir = state.config.data_dir.clone();
         let (id, mime, full) = (scene.clone(), picture.mime.clone(), path.clone());

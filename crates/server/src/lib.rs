@@ -28,6 +28,7 @@ pub mod sight;
 pub mod snapshot;
 pub mod state;
 pub mod tables;
+pub mod tiles;
 pub mod tunnel;
 pub mod web_picture;
 pub mod website;

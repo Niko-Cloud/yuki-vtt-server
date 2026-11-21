@@ -747,6 +747,55 @@ async fn keeps_map_pictures_for_those_at_the_table() {
 }
 
 #[tokio::test]
+async fn sends_a_big_map_in_tiles_where_the_screen_looks() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/image", t.id);
+    let picture = image::RgbaImage::from_fn(4200, 300, |x, _| {
+        image::Rgba([(x % 256) as u8, 40, 90, 255])
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(picture)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let (status, _) = upload(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{path}?width=4200&height=300"),
+        &png,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let map = view(&app, As::Seat(&token), &t).await["scene"].clone();
+    assert_eq!(
+        map["image"]["tiles"],
+        json!({ "width": 4200, "height": 300, "levels": 4 })
+    );
+    let pass = seat_pass(&app, &t.id, &token).await;
+    let (status, kind, _) = fetch(&app, &format!("{path}?v=1&pass={pass}&tile=0-4-0")).await;
+    assert_eq!((status, kind.as_str()), (StatusCode::OK, "image/webp"));
+    let (status, _, _) = fetch(&app, &format!("{path}?v=1&pass={pass}&tile=0-5-0")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = fetch(&app, &format!("{path}?v=1&tile=0-0-0")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // A small map goes whole, with no tiles.
+    let (status, _) = upload(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{path}?width=1000&height=700"),
+        PNG,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let map = view(&app, As::Dm, &t).await["scene"].clone();
+    assert!(map["image"].get("tiles").is_none());
+}
+
+#[tokio::test]
 async fn keeps_a_picture_library_and_shows_handouts() {
     let app = host();
     let t = table(&app).await;
