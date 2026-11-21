@@ -4,7 +4,7 @@
 //! sees all it has a line to, on a dark one only within its vision or where a light shines.
 //! Deciding what shows needs only lines of sight, not the outlines the browser draws.
 
-use crate::maps::{TableMap, Token, Wall};
+use crate::maps::{Light, TableMap, Token, Wall};
 use std::collections::HashMap;
 
 /// Who is looking: their seats, whether the table shares sight, and each seat's darkvision.
@@ -125,7 +125,13 @@ fn viewers_for<'m>(map: &'m TableMap, looking: &Looking) -> Vec<&'m Token> {
         .collect()
 }
 
-fn sight(map: &TableMap, viewers: &[&Token], looking: &Looking, carriers: &[&Token]) -> Sight {
+fn sight(
+    map: &TableMap,
+    viewers: &[&Token],
+    looking: &Looking,
+    carriers: &[&Token],
+    placed: &[&Light],
+) -> Sight {
     let bright = map.fog.light == "bright";
     let viewers = viewers
         .iter()
@@ -155,7 +161,7 @@ fn sight(map: &TableMap, viewers: &[&Token], looking: &Looking, carriers: &[&Tok
             }
         })
         .collect();
-    let placed = map.lights.iter().map(|l| {
+    let placed = placed.iter().map(|l| {
         let reach = f64::from(l.bright.max(l.dim));
         (
             (l.x, l.y),
@@ -187,6 +193,13 @@ fn sight(map: &TableMap, viewers: &[&Token], looking: &Looking, carriers: &[&Tok
         lights,
         walls: blocking(&map.walls_with_rooms()),
     }
+}
+
+// Whether one of this sight's tokens has a line of sight to a spot, however dark it is.
+fn in_view(sight: &Sight, p: Point) -> bool {
+    sight.viewers.iter().any(|v| {
+        v.cone.is_none_or(|c| within_cone(v.at, c, p)) && line_of_sight(&sight.walls, v.at, p)
+    })
 }
 
 fn seen(sight: &Sight, p: Point) -> bool {
@@ -224,7 +237,9 @@ pub fn shown_ids(map: &TableMap, looking: &Looking) -> Vec<String> {
                 .any(|s| looking.seat_ids.contains(s))
             || viewers.iter().any(|v| v.id == t.id)
     };
-    let base = sight(map, &viewers, looking, &viewers);
+    // First without the secondary lights: they count only once a token has them in view.
+    let primary: Vec<&Light> = map.lights.iter().filter(|l| !l.secondary).collect();
+    let base = sight(map, &viewers, looking, &viewers, &primary);
     let lit: Vec<&Token> = map
         .tokens
         .iter()
@@ -232,7 +247,12 @@ pub fn shown_ids(map: &TableMap, looking: &Looking) -> Vec<String> {
             t.light.is_some() && t.hidden != Some(true) && (own(t) || seen(&base, center(map, t)))
         })
         .collect();
-    let full = sight(map, &viewers, looking, &lit);
+    let lights: Vec<&Light> = map
+        .lights
+        .iter()
+        .filter(|l| !l.secondary || in_view(&base, (l.x, l.y)))
+        .collect();
+    let full = sight(map, &viewers, looking, &lit, &lights);
     map.tokens
         .iter()
         .filter(|t| own(t) || seen(&full, center(map, t)))
@@ -310,6 +330,26 @@ mod tests {
                 .collect(),
         };
         shown_ids(map, &looking)
+    }
+
+    #[test]
+    fn counts_a_secondary_light_only_once_a_token_has_it_in_view() {
+        // As vision.test.ts: a wall from the top down most of the way, Tam bottom left, a
+        // campfire top right whose light spills round the wall's end to an ogre by Tam.
+        let cave = |secondary: bool| {
+            map(json!({
+                "fog": { "mode": "dynamic", "light": "dark", "remember": false },
+                "walls": [{ "id": "w", "a": [250, 0], "b": [250, 400] }],
+                "lights": [{ "id": "fire", "x": 350, "y": 100, "bright": 20, "dim": 60,
+                             "secondary": secondary }],
+                "tokens": [
+                    { "id": "t", "name": "Tam", "x": 0, "y": 8, "size": 1, "color": "#86d5ed", "seatId": "s1" },
+                    { "id": "g", "name": "Ogre", "x": 5, "y": 8, "size": 1, "color": "#ff9090" }
+                ]
+            }))
+        };
+        assert!(ids(&cave(false), &[]).contains(&"g".to_string()));
+        assert!(!ids(&cave(true), &[]).contains(&"g".to_string()));
     }
     fn dark(tokens: serde_json::Value, lights: serde_json::Value) -> TableMap {
         map(json!({

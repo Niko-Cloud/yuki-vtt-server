@@ -281,6 +281,10 @@ pub struct Light {
     /// Where a cone points, in degrees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<f64>,
+    /// Seen only once someone sees it: it lights a player's view only while one of their
+    /// tokens has a line of sight to the light itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secondary: bool,
 }
 
 /// A note pinned on the map for the DM alone.
