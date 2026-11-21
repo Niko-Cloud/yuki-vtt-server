@@ -2418,7 +2418,11 @@ pub async fn mark(
         .map(|[x, y]| [x.round(), y.round()])
         .collect();
     let mut mark = json!({ "sceneId": scene, "kind": body.kind, "points": points, "by": access.name, "color": color, "tab": body.tab });
-    if body.kind == "drag" {
+    // A drag let go says nothing of where the token is: everyone gets it.
+    if body.kind == "drag" && points.is_empty() {
+        mark["token"] = json!(body.token);
+        state.events.mark(&id, mark);
+    } else if body.kind == "drag" {
         let token = body.token.clone().unwrap_or_default();
         let (seats, look) = match points.first() {
             Some(&[x, y]) => seats_seeing(&state.db(), &id, &scene, &token, (x, y))?,
