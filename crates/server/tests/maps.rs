@@ -796,6 +796,97 @@ async fn sends_a_big_map_in_tiles_where_the_screen_looks() {
 }
 
 #[tokio::test]
+async fn lays_other_maps_on_a_board_as_pieces_lined_up_with_its_grid() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let board = scene(&app, &t, "Board").await;
+    let room = scene(&app, &t, "Room").await;
+    // The room: 1400 by 700 pixels on 70-pixel cells, so 20 by 10 cells.
+    let picture = format!("/tables/{}/scenes/{room}/image", t.id);
+    let (status, _) = upload(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{picture}?width=1400&height=700"),
+        PNG,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let pieces = format!("/tables/{}/scenes/{board}/pieces", t.id);
+    let add = json!({ "from": room, "x": 15, "y": 2 });
+    let (refused, _) = call(&app, As::Seat(&token), "POST", &pieces, Some(add.clone())).await;
+    assert_ne!(refused, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, As::Dm, "POST", &pieces, Some(add)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let shown_at = format!("/tables/{}?scene={board}", t.id);
+    let map = |who| {
+        let (app, at) = (app.clone(), shown_at.clone());
+        async move { call(&app, who, "GET", &at, None).await.1["scene"].clone() }
+    };
+    let shown = map(As::Dm).await;
+    let piece = shown["pieces"][0].clone();
+    assert_eq!(
+        (piece["w"].as_f64(), piece["h"].as_f64()),
+        (Some(20.0), Some(10.0))
+    );
+    assert_eq!(piece["image"]["mime"], "image/png");
+    // The blank board grew to hold it: 35 cells across, 12 down.
+    assert_eq!(
+        (shown["width"].as_u64(), shown["height"].as_u64()),
+        (Some(2450), Some(980))
+    );
+    // Turned a quarter, locked, and then it stays put.
+    let one = format!("{pieces}/{}", piece["id"].as_str().unwrap());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &one,
+        Some(json!({ "rotation": 90, "locked": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 0 }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &one,
+        Some(json!({ "rotation": 45, "locked": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // The room gets a new picture: the piece shows it, at its size.
+    let (status, _) = upload(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{picture}?width=700&height=700"),
+        PNG,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let piece = map(As::Dm).await["pieces"][0].clone();
+    assert_eq!(
+        (piece["w"].as_f64(), piece["rotation"].as_u64()),
+        (Some(10.0), Some(90))
+    );
+    // The room goes: so does its piece.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "DELETE",
+        &format!("/tables/{}/scenes/{room}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(map(As::Dm).await["pieces"], json!([]));
+}
+
+#[tokio::test]
 async fn keeps_a_picture_library_and_shows_handouts() {
     let app = host();
     let t = table(&app).await;

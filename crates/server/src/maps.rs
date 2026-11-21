@@ -413,6 +413,9 @@ pub struct TableMap {
     pub height: u32,
     pub grid: MapGrid,
     pub image: Option<Image>,
+    /// Other maps' pictures laid on this one, as pieces of a bigger board.
+    #[serde(default)]
+    pub pieces: Vec<crate::pieces::Piece>,
     #[serde(default)]
     pub tokens: Vec<Token>,
     #[serde(default)]
@@ -696,6 +699,7 @@ fn blank() -> TableMap {
             style: None,
         },
         image: None,
+        pieces: Vec::new(),
         tokens: vec![],
         props: vec![],
         drawings: vec![],
@@ -1139,6 +1143,8 @@ pub async fn remove(
         {
             return Err(AppError::not_found("That map is gone"));
         }
+        // Pieces of other maps that showed its picture go with it.
+        crate::pieces::follow_source(&db, &id, &scene)?;
         if active_scene(&db, &id)?.as_deref() == Some(scene.as_str()) {
             let next = list(&db, &id)?
                 .first()
@@ -1263,7 +1269,8 @@ pub fn set_picture(
             ..current
         }
         .keep_all(),
-    )
+    )?;
+    crate::pieces::follow_source(db, table_id, scene_id)
 }
 
 #[derive(Deserialize)]
