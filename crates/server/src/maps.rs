@@ -251,6 +251,10 @@ pub struct Wall {
     /// A window: sight and light go through it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub window: bool,
+    /// A curtain stops sight but not tokens; a one-way wall stops sight only for those on its
+    /// blind side (the right going from a to b on the map) and tokens both ways.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// A door: a locked one stays shut until the DM unlocks it; a secret one is a plain wall to
@@ -530,6 +534,7 @@ pub fn room_edge_walls(areas: &[FogArea], walls: &[Wall]) -> Vec<Wall> {
                     b: [px + ux * t1, py + uy * t1],
                     door: None,
                     window: false,
+                    kind: None,
                 });
                 k += 1;
             };
@@ -1739,7 +1744,8 @@ pub fn wall_in_the_way(walls: &[Wall], from: (f64, f64), to: (f64, f64)) -> bool
         return false;
     }
     walls.iter().any(|wall| {
-        if wall.door.as_ref().is_some_and(|d| d.open) {
+        // A curtain stops sight, not tokens.
+        if wall.door.as_ref().is_some_and(|d| d.open) || wall.kind.as_deref() == Some("curtain") {
             return false;
         }
         let (ex, ey) = (wall.b[0] - wall.a[0], wall.b[1] - wall.a[1]);

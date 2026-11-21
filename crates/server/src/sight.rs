@@ -38,12 +38,24 @@ fn within_cone(from: Point, (angle, width): Cone, p: Point) -> bool {
     off <= width / 2.0
 }
 
-fn blocking(walls: &[Wall]) -> Vec<(Point, Point)> {
+// A wall as sight meets it: its ends, and whether it is one-way.
+type Segment = (Point, Point, bool);
+
+fn blocking(walls: &[Wall]) -> Vec<Segment> {
     walls
         .iter()
         .filter(|w| !w.window && !w.door.as_ref().is_some_and(|d| d.open))
-        .map(|w| ((w.a[0], w.a[1]), (w.b[0], w.b[1])))
+        .map(|w| {
+            let one_way = w.kind.as_deref() == Some("one-way");
+            ((w.a[0], w.a[1]), (w.b[0], w.b[1]), one_way)
+        })
         .collect()
+}
+
+// Whether a one-way wall is on the blind side for someone looking from a point: the right
+// of the wall going from its first end to its second, on the map (y down), as on the website.
+fn blind_side(a: Point, b: Point, from: Point) -> bool {
+    (b.0 - a.0) * (from.1 - a.1) - (b.1 - a.1) * (from.0 - a.0) > 0.0
 }
 
 // Where a ray from `from` along (dx, dy) first meets the segment, as a distance along it.
@@ -63,16 +75,16 @@ fn hit(from: Point, dx: f64, dy: f64, (p, q): (Point, Point)) -> f64 {
 }
 
 // Whether nothing stops sight between two points; a wall a token stands against doesn't.
-fn line_of_sight(walls: &[(Point, Point)], from: Point, to: Point) -> bool {
+fn line_of_sight(walls: &[Segment], from: Point, to: Point) -> bool {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let length = dx.hypot(dy);
     if length < 1.0 {
         return true;
     }
     let (dx, dy) = (dx / length, dy / length);
-    walls
-        .iter()
-        .all(|wall| hit(from, dx, dy, *wall) > length - 0.5)
+    walls.iter().all(|&(p, q, one_way)| {
+        (one_way && !blind_side(p, q, from)) || hit(from, dx, dy, (p, q)) > length - 0.5
+    })
 }
 
 fn center(map: &TableMap, token: &Token) -> Point {
@@ -100,7 +112,7 @@ struct Sight {
     bright: bool,
     viewers: Vec<Viewer>,
     lights: Vec<Shine>,
-    walls: Vec<(Point, Point)>,
+    walls: Vec<Segment>,
 }
 
 // The tokens a person sees through: their own seats' and those shared with them, or every
@@ -284,6 +296,7 @@ mod tests {
                 secret: false,
             }),
             window: false,
+            kind: None,
         };
         let bottom: Vec<(f64, f64)> = room_edge_walls(&[hall], &[door])
             .into_iter()
@@ -330,6 +343,21 @@ mod tests {
                 .collect(),
         };
         shown_ids(map, &looking)
+    }
+
+    #[test]
+    fn sees_through_a_one_way_wall_from_one_side_only() {
+        // As vision.test.ts: going from top to bottom, the blind side is the right on the map.
+        let walls = blocking(&[Wall {
+            id: "o".into(),
+            a: [250.0, 0.0],
+            b: [250.0, 500.0],
+            door: None,
+            window: false,
+            kind: Some("one-way".into()),
+        }]);
+        assert!(!line_of_sight(&walls, (100.0, 250.0), (400.0, 250.0)));
+        assert!(line_of_sight(&walls, (400.0, 250.0), (100.0, 250.0)));
     }
 
     #[test]

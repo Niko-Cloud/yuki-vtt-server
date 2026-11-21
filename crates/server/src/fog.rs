@@ -61,10 +61,14 @@ impl Lighting {
                 .as_deref()
                 .is_none_or(|l| l == "single" || l == "stacked");
         let walls = self.walls.len() <= MOST_WALLS
-            && self
-                .walls
-                .iter()
-                .all(|w| short_id(&w.id) && on_map(w.a[0], w.a[1]) && on_map(w.b[0], w.b[1]));
+            && self.walls.iter().all(|w| {
+                short_id(&w.id)
+                    && on_map(w.a[0], w.a[1])
+                    && on_map(w.b[0], w.b[1])
+                    && w.kind
+                        .as_deref()
+                        .is_none_or(|k| k == "curtain" || k == "one-way")
+            });
         let lights = self.lights.len() <= MOST_LIGHTS
             && self.lights.iter().all(|l| {
                 short_id(&l.id)

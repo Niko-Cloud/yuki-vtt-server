@@ -469,6 +469,13 @@ async fn stops_players_tokens_at_walls_unless_the_dm_lets_them_through() {
         view(&app, As::Dm, &t).await["scene"]["fog"]["roomWalls"],
         json!(false)
     );
+    // A curtain stops sight, not tokens; a wall of no known kind is refused.
+    let mut curtain = wall.clone();
+    curtain["kind"] = json!("curtain");
+    assert_eq!(put(json!([curtain]), None).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 1).await, StatusCode::NO_CONTENT);
+    curtain["kind"] = json!("glass");
+    assert_eq!(put(json!([curtain]), None).await, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
