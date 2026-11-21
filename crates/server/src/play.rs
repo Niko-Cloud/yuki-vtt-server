@@ -141,10 +141,11 @@ pub async fn view(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let seated = seats(&db, &id)?;
+    // Players see the map the DM shows, or the one a passage took them to.
     let looking = if access.runs() {
         query.scene.clone().or(active_scene.clone())
     } else {
-        active_scene.clone()
+        crate::passages::scene_for(&db, &access, &id)?
     };
     let mut shown = match &looking {
         Some(scene) => maps::scene(&db, &id, scene)?,

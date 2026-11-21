@@ -5,9 +5,7 @@
 use crate::access::{self, Access};
 use crate::error::{AppError, Result};
 use crate::ids;
-use crate::maps::{
-    self, Fog, Light, Note, TableMap, Wall, active_scene, allow, credentials, edit, not_allowed,
-};
+use crate::maps::{self, Fog, Light, Note, TableMap, Wall, allow, credentials, edit, not_allowed};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -382,6 +380,10 @@ pub fn for_players(scene: &mut Value, looking: &crate::sight::Looking) {
     if let Some(notes) = scene["notes"].as_array_mut() {
         notes.retain(|n| n["shared"] == json!(true));
     }
+    // Hidden passages are the DM's to know of.
+    if let Some(passages) = scene["passages"].as_array_mut() {
+        passages.retain(|p| p["hidden"] != json!(true));
+    }
     // A closed secret door is a wall to players; an open one an open door, its secret kept.
     if let Some(walls) = scene["walls"].as_array_mut() {
         for wall in walls {
@@ -449,7 +451,9 @@ fn pack(cells: &BTreeSet<(u32, u32)>) -> String {
 
 // Players reach only the map everyone sees, never the DM's others.
 fn reach(db: &Connection, access: &Access, table_id: &str, scene_id: &str) -> Result<TableMap> {
-    if !access.runs() && active_scene(db, table_id)?.as_deref() != Some(scene_id) {
+    if !access.runs()
+        && crate::passages::scene_for(db, access, table_id)?.as_deref() != Some(scene_id)
+    {
         return Err(AppError::not_found("That map is gone"));
     }
     maps::load(db, table_id, scene_id)

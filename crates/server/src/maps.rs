@@ -115,7 +115,7 @@ const MARKS: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
 const FOLLOW: [&str; 5] = ["position", "rotation", "size", "visibility", "lock"];
 
 /// What an attachment follows from its holder: position only unless it chooses more.
-fn follows(rider: &Token, what: &str) -> bool {
+pub(crate) fn follows(rider: &Token, what: &str) -> bool {
     match &rider.follow {
         None => what == "position",
         Some(list) => list.iter().any(|f| f == what),
@@ -416,6 +416,9 @@ pub struct TableMap {
     /// Other maps' pictures laid on this one, as pieces of a bigger board.
     #[serde(default)]
     pub pieces: Vec<crate::pieces::Piece>,
+    /// Stairs, ladders and portals.
+    #[serde(default)]
+    pub passages: Vec<crate::passages::Passage>,
     #[serde(default)]
     pub tokens: Vec<Token>,
     #[serde(default)]
@@ -700,6 +703,7 @@ fn blank() -> TableMap {
         },
         image: None,
         pieces: Vec::new(),
+        passages: Vec::new(),
         tokens: vec![],
         props: vec![],
         drawings: vec![],
@@ -721,7 +725,7 @@ impl TableMap {
 
     // A token stays whole on the map, also after the map shrinks.
     // A token kept on the map, where it was put (to a hundredth of a cell).
-    fn keep_token(&self, mut token: Token) -> Token {
+    pub(crate) fn keep_token(&self, mut token: Token) -> Token {
         let (columns, rows) = self.cells();
         let keep = |at: f64, most: u32| {
             ((at * 100.0).round() / 100.0).clamp(0.0, (f64::from(most) - token.size).max(0.0))
@@ -970,7 +974,7 @@ pub async fn remove_prefab(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// Changes a map. Players act on the map everyone sees, never on the DM's others.
+// Changes a map. Players act on the map they are on, never on the DM's others.
 pub(crate) fn edit(
     state: &AppState,
     access: &Access,
@@ -980,7 +984,9 @@ pub(crate) fn edit(
 ) -> Result<StatusCode> {
     {
         let db = state.db();
-        if !access.runs() && active_scene(&db, table_id)?.as_deref() != Some(scene_id) {
+        if !access.runs()
+            && crate::passages::scene_for(&db, access, table_id)?.as_deref() != Some(scene_id)
+        {
             return Err(AppError::not_found("That map is gone"));
         }
         let changed = change(load(&db, table_id, scene_id)?)?;
@@ -1143,8 +1149,10 @@ pub async fn remove(
         {
             return Err(AppError::not_found("That map is gone"));
         }
-        // Pieces of other maps that showed its picture go with it.
+        // Pieces of other maps that showed its picture go with it, and passages there lead
+        // nowhere.
         crate::pieces::follow_source(&db, &id, &scene)?;
+        crate::passages::forget_map(&db, &id, &scene)?;
         if active_scene(&db, &id)?.as_deref() == Some(scene.as_str()) {
             let next = list(&db, &id)?
                 .first()
@@ -1238,6 +1246,11 @@ pub async fn show(
         db.execute(
             "UPDATE tables SET active_scene_id = ?2 WHERE id = ?1",
             [&id, &scene],
+        )?;
+        // Everyone sees it, wherever passages took them.
+        db.execute(
+            "UPDATE seats SET scene_id = NULL WHERE table_id = ?1",
+            [&id],
         )?;
     }
     state.events.changed(&id);
@@ -1466,7 +1479,7 @@ pub struct TokenChange {
 
 // A field that was sent, null included: Option alone reads null as not sent, so "take the
 // picture off" would change nothing. A field left out stays None.
-fn present<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn present<'de, D: serde::Deserializer<'de>>(
     sent: D,
 ) -> std::result::Result<Option<Value>, D::Error> {
     Value::deserialize(sent).map(Some)
@@ -1791,10 +1804,15 @@ pub async fn change_token(
         }
         Ok(map)
     })?;
+    let landed = mover.is_some();
     if moved_feet > 0
         && let Some((seat, name)) = mover
     {
         record_movement(&state, &id, seat.as_deref(), &name, moved_feet)?;
+    }
+    // Stopped on a passage that goes at once (or a hidden one, a trapdoor): through it goes.
+    if landed {
+        crate::passages::fall_through(&state, &access, &id, &scene, &token_id)?;
     }
     Ok(status)
 }
@@ -2380,8 +2398,8 @@ pub async fn ping(
     if !at.x.is_finite() || !at.y.is_finite() {
         return Err(AppError::bad("That's off the map"));
     }
-    let scene =
-        active_scene(&state.db(), &id)?.ok_or_else(|| AppError::bad("There is no map to ping"))?;
+    let scene = crate::passages::scene_for(&state.db(), &access, &id)?
+        .ok_or_else(|| AppError::bad("There is no map to ping"))?;
     let color = if access.runs() {
         TOKEN_COLORS[3]
     } else {
@@ -2434,8 +2452,8 @@ pub async fn mark(
     if !fine {
         return Err(AppError::bad("A mark has up to 50 points"));
     }
-    let scene =
-        active_scene(&state.db(), &id)?.ok_or_else(|| AppError::bad("There is no map to mark"))?;
+    let scene = crate::passages::scene_for(&state.db(), &access, &id)?
+        .ok_or_else(|| AppError::bad("There is no map to mark"))?;
     let color = if access.runs() {
         TOKEN_COLORS[3]
     } else {

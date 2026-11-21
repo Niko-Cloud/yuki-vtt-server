@@ -1,0 +1,236 @@
+//! Stairs and portals, as the website has them: through on one map, or to another map that
+//! the token's player then sees.
+
+mod common;
+
+use axum::http::StatusCode;
+use common::*;
+use serde_json::{Value, json};
+
+#[tokio::test]
+async fn takes_a_token_through_a_passage_on_its_map_or_to_another_its_player_sees() {
+    let app = host();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    // Kept for the whole test, so the closures below can take Tam's seat as who calls.
+    let tam: &'static str = Box::leak(tam.into_boxed_str());
+    let player = As::Seat(tam);
+    let (wren_seat, _) = join(&app, &t.invite, "Wren", "user-2").await;
+    let make = |name: &'static str| {
+        let (app, path) = (app.clone(), format!("/tables/{}/scenes", t.id));
+        async move {
+            call(&app, As::Dm, "POST", &path, Some(json!({ "name": name })))
+                .await
+                .1["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let cave = make("Cave").await;
+    let attic = make("Attic").await;
+    let at = |scene: &str| format!("/tables/{}/scenes/{scene}", t.id);
+    call(&app, As::Dm, "POST", &format!("{}/show", at(&cave)), None).await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{}/tokens/party", at(&cave)),
+        None,
+    )
+    .await;
+    let scene_of = |who: As<'static>, scene: Option<String>| {
+        let (app, path) = (
+            app.clone(),
+            match scene {
+                Some(s) => format!("/tables/{}?scene={s}", t.id),
+                None => format!("/tables/{}", t.id),
+            },
+        );
+        async move { call(&app, who, "GET", &path, None).await.1["scene"].clone() }
+    };
+    let token_of = |scene: &Value, seat: &str| {
+        scene["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["seatId"] == seat)
+            .cloned()
+    };
+    let shown = scene_of(As::Dm, Some(cave.clone())).await;
+    let tam_token = token_of(&shown, &tam_seat).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let wren_token = token_of(&shown, &wren_seat).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (token, x) in [(&tam_token, 1), (&wren_token, 3)] {
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &format!("{}/tokens/{token}", at(&cave)),
+            Some(json!({ "x": x, "y": 1 })),
+        )
+        .await;
+    }
+    let place = |scene: String, x: u32, y: u32, name: &'static str| {
+        let (app, path) = (app.clone(), format!("{}/passages", at(&scene)));
+        async move {
+            let (status, made) = call(
+                &app,
+                As::Dm,
+                "POST",
+                &path,
+                Some(json!({ "x": x, "y": y, "name": name })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            made["id"].as_str().unwrap().to_string()
+        }
+    };
+    let stairs = place(cave.clone(), 105, 105, "Stairs up").await;
+    let landing = place(attic.clone(), 455, 315, "Stairs down").await;
+    let trapdoor = place(cave.clone(), 245, 105, "Trapdoor").await;
+    let corner = place(cave.clone(), 595, 385, "Chute end").await;
+    let (refused, _) = call(
+        &app,
+        player,
+        "POST",
+        &format!("{}/passages", at(&cave)),
+        Some(json!({ "x": 1, "y": 1 })),
+    )
+    .await;
+    assert_ne!(refused, StatusCode::CREATED);
+    let link = |scene: String, passage: String, body: Value| {
+        let (app, path) = (app.clone(), format!("{}/passages/{passage}", at(&scene)));
+        async move { call(&app, As::Dm, "PATCH", &path, Some(body)).await.0 }
+    };
+    assert_eq!(
+        link(
+            cave.clone(),
+            stairs.clone(),
+            json!({ "to": { "map": attic, "passage": landing } })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        link(
+            cave.clone(),
+            trapdoor.clone(),
+            json!({ "to": { "map": cave, "passage": corner }, "oneWay": true, "ask": false, "hidden": true })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    let passages_on = |scene: String| {
+        let scene_at = scene_of(As::Dm, Some(scene));
+        async move { scene_at.await["passages"].clone() }
+    };
+    // Two-way: the landing leads back; the chute end doesn't.
+    assert_eq!(
+        passages_on(attic.clone()).await[0]["to"],
+        json!({ "map": cave, "passage": stairs })
+    );
+    let cave_passages = passages_on(cave.clone()).await;
+    let find = |list: &Value, id: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert!(find(&cave_passages, &corner).get("to").is_none());
+    assert_eq!(find(&cave_passages, &trapdoor)["ask"], false);
+    // Players don't see the hidden trapdoor.
+    let seen = scene_of(player, None).await;
+    assert_eq!(seen["passages"].as_array().unwrap().len(), 2);
+    let through = |who: As<'static>, scene: String, token: String, passage: String| {
+        let (app, path) = (
+            app.clone(),
+            format!("{}/tokens/{token}/through", at(&scene)),
+        );
+        async move {
+            call(
+                &app,
+                who,
+                "POST",
+                &path,
+                Some(json!({ "passage": passage })),
+            )
+            .await
+            .0
+        }
+    };
+    // Not standing on it, not going.
+    assert_eq!(
+        through(player, cave.clone(), tam_token.clone(), trapdoor.clone()).await,
+        StatusCode::BAD_REQUEST
+    );
+    // The DM sends Wren down the trapdoor, across the cave.
+    assert_eq!(
+        through(As::Dm, cave.clone(), wren_token.clone(), trapdoor.clone()).await,
+        StatusCode::NO_CONTENT
+    );
+    let wren_at = |scene: Value| {
+        let w = token_of(&scene, &wren_seat).unwrap();
+        (w["x"].as_f64(), w["y"].as_f64())
+    };
+    assert_eq!(
+        wren_at(scene_of(As::Dm, Some(cave.clone())).await),
+        (Some(8.0), Some(5.0))
+    );
+    // It goes at once: a token that stops on it falls through by itself.
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{}/tokens/{wren_token}", at(&cave)),
+        Some(json!({ "x": 3, "y": 1 })),
+    )
+    .await;
+    assert_eq!(
+        wren_at(scene_of(As::Dm, Some(cave.clone())).await),
+        (Some(8.0), Some(5.0))
+    );
+    // Locked, only the DM sends tokens through.
+    link(cave.clone(), stairs.clone(), json!({ "locked": true })).await;
+    assert_eq!(
+        through(player, cave.clone(), tam_token.clone(), stairs.clone()).await,
+        StatusCode::BAD_REQUEST
+    );
+    link(cave.clone(), stairs.clone(), json!({ "locked": false })).await;
+    // Tam goes up: off the cave, onto the attic by the landing, and Tam's player sees the attic.
+    assert_eq!(
+        through(player, cave.clone(), tam_token.clone(), stairs.clone()).await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(token_of(&scene_of(As::Dm, Some(cave.clone())).await, &tam_seat).is_none());
+    let up = token_of(&scene_of(As::Dm, Some(attic.clone())).await, &tam_seat).unwrap();
+    assert_eq!((up["x"].as_f64(), up["y"].as_f64()), (Some(6.0), Some(4.0)));
+    assert_eq!(scene_of(player, None).await["id"], attic.as_str());
+    // The cave is out of Tam's reach now.
+    let (status, _) = call(
+        &app,
+        player,
+        "PATCH",
+        &format!("{}/tokens/{wren_token}", at(&cave)),
+        Some(json!({ "x": 0 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Showing a map brings everyone back to it.
+    call(&app, As::Dm, "POST", &format!("{}/show", at(&cave)), None).await;
+    assert_eq!(scene_of(player, None).await["id"], cave.as_str());
+    // The attic goes: the stairs lead nowhere.
+    call(&app, As::Dm, "DELETE", &at(&attic), None).await;
+    assert!(
+        find(&passages_on(cave.clone()).await, &stairs)
+            .get("to")
+            .is_none()
+    );
+}

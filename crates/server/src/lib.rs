@@ -17,6 +17,7 @@ pub mod ids;
 pub mod library;
 pub mod limits;
 pub mod maps;
+pub mod passages;
 pub mod pictures;
 pub mod pieces;
 pub mod play;
@@ -121,6 +122,10 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/tokens/party", post(maps::place_party))
         .route("/tables/{id}/scenes/{scene}/tokens/{token}", patch(maps::change_token).delete(maps::remove_token))
         .route("/tables/{id}/scenes/{scene}/props", post(maps::add_prop))
+        .route("/tables/{id}/passages", get(passages::list))
+        .route("/tables/{id}/scenes/{scene}/passages", post(passages::add))
+        .route("/tables/{id}/scenes/{scene}/passages/{passage}", patch(passages::change).delete(passages::remove))
+        .route("/tables/{id}/scenes/{scene}/tokens/{token}/through", post(passages::through))
         .route("/tables/{id}/scenes/{scene}/pieces", post(pieces::add))
         .route("/tables/{id}/scenes/{scene}/pieces/{piece}", patch(pieces::change).delete(pieces::remove))
         .route("/tables/{id}/scenes/{scene}/props/{prop}", patch(maps::change_prop).delete(maps::remove_prop))

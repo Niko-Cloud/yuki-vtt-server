@@ -165,6 +165,10 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE tables ADD COLUMN drag_sight TEXT;
 "#,
+    // The map a seat's character went to through a passage; null follows the shown map.
+    r#"
+    ALTER TABLE seats ADD COLUMN scene_id TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
