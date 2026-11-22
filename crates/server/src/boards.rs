@@ -6,6 +6,7 @@ use crate::attach::{Attached, Named};
 use crate::error::{AppError, Result};
 use crate::ids;
 use crate::maps::{TableMap, credentials, edit, load, store};
+use crate::passages::{End, lead_to};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -364,13 +365,40 @@ pub async fn remove(
         taken = crate::attach::take_off(&mut map, &item_id);
         Ok(map)
     })?;
-    Ok(Json(json!({ "attached": taken })))
+    // Passages that went with it no longer lead anywhere: their far ends stop leading back
+    // (and say which did, to lead back again on undo).
+    let mut led_back = Vec::new();
+    {
+        let db = state.db();
+        for passage in &taken.passages {
+            let Some(to) = &passage.to else { continue };
+            let here = End {
+                map: scene.clone(),
+                passage: passage.id.clone(),
+            };
+            let back = load(&db, &id, &to.map).ok().is_some_and(|far| {
+                far.passages
+                    .iter()
+                    .any(|p| p.id == to.passage && p.to.as_ref() == Some(&here))
+            });
+            if back {
+                led_back.push(passage.id.clone());
+                lead_to(&db, &id, to, |p| p.to.clone().filter(|b| b != &here))?;
+            }
+        }
+    }
+    state.events.changed(&id);
+    Ok(Json(json!({ "attached": taken, "ledBack": led_back })))
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Restore {
     item: MapItem,
     attached: Attached,
+    /// Its passages whose far ends led back to them (until it was taken off).
+    #[serde(default)]
+    led_back: Vec<String>,
 }
 
 /// `POST /api/tables/{id}/scenes/{scene}/maps/restore`: a map picture brought back as it was,
@@ -394,6 +422,28 @@ pub async fn restore(
         return Err(AppError::bad("A map goes on the board"));
     }
     map_picture(&state.db(), &item.asset)?;
+    // A passage comes back leading where it did, if that end is still there.
+    let mut attached = body.attached;
+    {
+        let db = state.db();
+        let ids: Vec<String> = attached.passages.iter().map(|p| p.id.clone()).collect();
+        for passage in &mut attached.passages {
+            let leads = passage.to.as_ref().is_some_and(|to| {
+                (to.map == scene && ids.contains(&to.passage))
+                    || load(&db, &id, &to.map)
+                        .is_ok_and(|far| far.passages.iter().any(|p| p.id == to.passage))
+            });
+            if !leads {
+                passage.to = None;
+            }
+        }
+    }
+    let relink: Vec<(String, End)> = attached
+        .passages
+        .iter()
+        .filter(|p| body.led_back.contains(&p.id))
+        .filter_map(|p| p.to.clone().map(|to| (p.id.clone(), to)))
+        .collect();
     edit(&state, &access, &id, &scene, |mut map| {
         if map.maps.iter().any(|m| m.id == item.id) {
             return Ok(map);
@@ -403,7 +453,7 @@ pub async fn restore(
                 "A board holds {MOST_MAP_ITEMS} maps"
             )));
         }
-        crate::attach::put_back(&mut map, &item.id, body.attached);
+        crate::attach::put_back(&mut map, &item.id, attached);
         let too_many = map.walls.len() > 2000
             || map.lights.len() > 100
             || map.notes.len() > 200
@@ -416,7 +466,20 @@ pub async fn restore(
         }
         map.maps.push(item);
         Ok(grow(map))
-    })
+    })?;
+    // Far ends that led back lead back again, unless made to lead elsewhere since.
+    {
+        let db = state.db();
+        for (passage, to) in &relink {
+            let here = End {
+                map: scene.clone(),
+                passage: passage.clone(),
+            };
+            lead_to(&db, &id, to, |p| p.to.clone().or(Some(here)))?;
+        }
+    }
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

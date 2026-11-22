@@ -411,3 +411,84 @@ async fn things_attached_to_a_map_move_and_go_with_it() {
     assert_eq!(wall["a"], json!([210.0, 70.0]));
     assert!(wall.get("attachedTo").is_none());
 }
+
+#[tokio::test]
+async fn a_passage_going_with_its_map_lets_go_of_its_far_end_until_undone() {
+    let app = host();
+    let t = table(&app).await;
+    let scene = |name: &'static str| {
+        let (app, path) = (app.clone(), format!("/tables/{}/scenes", t.id));
+        async move {
+            let (_, made) = call(&app, As::Dm, "POST", &path, Some(json!({ "name": name }))).await;
+            made["id"].as_str().unwrap().to_string()
+        }
+    };
+    let (cave, attic) = (scene("Cave").await, scene("Attic").await);
+    laid_picture(&app, &t, &cave, PNG, (700, 490)).await;
+    let passage = |board: String| {
+        let (app, path) = (
+            app.clone(),
+            format!("/tables/{}/scenes/{board}/passages", t.id),
+        );
+        async move {
+            let at = Some(json!({ "x": 105, "y": 105 }));
+            let (_, made) = call(&app, As::Dm, "POST", &path, at).await;
+            made["id"].as_str().unwrap().to_string()
+        }
+    };
+    let (down, up) = (passage(cave.clone()).await, passage(attic.clone()).await);
+    let link = Some(json!({ "to": { "map": attic, "passage": up } }));
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{at}/passages/{down}"),
+        link,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let far = || {
+        let (app, path) = (app.clone(), format!("/tables/{}?scene={attic}", t.id));
+        async move {
+            call(&app, As::Dm, "GET", &path, None).await.1["scene"]["passages"][0]["to"].clone()
+        }
+    };
+    assert_eq!(far().await["passage"], down.as_str());
+    let shown = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={cave}", t.id),
+        None,
+    )
+    .await
+    .1;
+    let item = shown["scene"]["maps"][0].clone();
+    let one = format!("{at}/maps/{}", item["id"].as_str().unwrap());
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{one}/attach"),
+        Some(json!({})),
+    )
+    .await;
+    // Taken off with the map: the attic's end no longer leads anywhere.
+    let (status, taken) = call(&app, As::Dm, "DELETE", &one, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(taken["ledBack"], json!([down]));
+    assert_eq!(far().await, Value::Null);
+    // Brought back: it leads to the attic, and the attic back to it.
+    let back = json!({ "item": item, "attached": taken["attached"], "ledBack": taken["ledBack"] });
+    let (status, body) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{at}/maps/restore"),
+        Some(back),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(far().await["passage"], down.as_str());
+}

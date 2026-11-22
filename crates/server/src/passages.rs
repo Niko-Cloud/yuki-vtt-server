@@ -184,7 +184,7 @@ pub struct PassageChange {
 }
 
 // Where the passage at an end leads, changed.
-fn lead_to(
+pub(crate) fn lead_to(
     db: &Connection,
     table_id: &str,
     end: &End,
