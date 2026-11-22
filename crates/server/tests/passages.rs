@@ -262,6 +262,50 @@ async fn takes_a_token_through_a_passage_on_its_map_or_to_another_its_player_see
         (Some(1.0), Some(1.0))
     );
     assert_eq!(away(app.clone(), table_at).await, json!({}));
+    // The DM sends the whole party up: each by the landing, and Tam's player sees the attic.
+    let party = format!("{}/passages/{stairs}/party", at(&cave));
+    let (refused, _) = call(&app, player, "POST", &party, None).await;
+    assert_ne!(refused, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, As::Dm, "POST", &party, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let attic_now = scene_of(As::Dm, Some(attic.clone())).await;
+    let mut spots: Vec<(f64, f64)> = attic_now["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["seatId"].is_string())
+        .map(|t| (t["x"].as_f64().unwrap(), t["y"].as_f64().unwrap()))
+        .collect();
+    spots.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(spots, vec![(6.0, 4.0), (7.0, 4.0)]);
+    assert_eq!(scene_of(player, None).await["id"], attic.as_str());
+    // The log tells who went where; the hidden trapdoor's trips only the DM reads.
+    let texts = |who: As<'static>| {
+        let (app, path) = (app.clone(), format!("/tables/{}", t.id));
+        async move {
+            call(&app, who, "GET", &path, None).await.1["log"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e["data"]["text"].as_str().map(String::from))
+                .collect::<Vec<_>>()
+        }
+    };
+    let dm_reads = texts(As::Dm).await;
+    for line in [
+        "Wren went through Trapdoor.",
+        "Tam went through Stairs up to Attic.",
+        "The party went through Stairs up to Attic.",
+    ] {
+        assert!(dm_reads.iter().any(|t| t == line), "{line} in {dm_reads:?}");
+    }
+    assert!(
+        !texts(player)
+            .await
+            .iter()
+            .any(|t| t == "Wren went through Trapdoor.")
+    );
+    call(&app, As::Dm, "POST", &format!("{}/show", at(&cave)), None).await;
     // The attic goes: the stairs lead nowhere.
     call(&app, As::Dm, "DELETE", &at(&attic), None).await;
     assert!(

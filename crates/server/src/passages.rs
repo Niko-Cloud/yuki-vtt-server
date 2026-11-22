@@ -339,7 +339,7 @@ pub async fn through(
     Json(body): Json<Through>,
 ) -> Result<StatusCode> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
-    go_through(&state, &access, &id, &scene, &token_id, &body.passage)?;
+    go_through(&state, &access, &id, &scene, &token_id, &body.passage, None)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -369,11 +369,13 @@ pub fn fall_through(
             .map(|p| p.id.clone())
     };
     match trap {
-        Some(passage) => go_through(state, access, table_id, scene_id, token_id, &passage),
+        Some(passage) => go_through(state, access, table_id, scene_id, token_id, &passage, None),
         None => Ok(()),
     }
 }
 
+// A token through a passage. `party` is the DM sending the party: from wherever it stands, to
+// its own square by the far end (the nth round it), with one line in the log for them all.
 fn go_through(
     state: &AppState,
     access: &Access,
@@ -381,6 +383,7 @@ fn go_through(
     scene_id: &str,
     token_id: &str,
     passage_id: &str,
+    party: Option<usize>,
 ) -> Result<()> {
     {
         let db = state.db();
@@ -416,7 +419,7 @@ fn go_through(
         if passage.locked == Some(true) && !access.runs() {
             return Err(AppError::bad(format!("{} is locked", passage.name)));
         }
-        if !on_passage(&map, &token, &passage) {
+        if party.is_none() && !on_passage(&map, &token, &passage) {
             return Err(AppError::bad(format!(
                 "{} isn't at {}",
                 token.name, passage.name
@@ -440,8 +443,26 @@ fn go_through(
                 (((at - f64::from(offset)) / f64::from(on.grid.size) - size / 2.0) / step).round()
                     * step
             };
-            (cell(end.x, on.grid.offset_x), cell(end.y, on.grid.offset_y))
+            let (dx, dy) = AROUND[party.unwrap_or(0) % AROUND.len()];
+            (
+                (cell(end.x, on.grid.offset_x) + dx).max(0.0),
+                (cell(end.y, on.grid.offset_y) + dy).max(0.0),
+            )
         };
+        // Who went where, in the log: the DM alone hears of a hidden passage.
+        if party.is_none() {
+            let place = if to.map == scene_id {
+                String::new()
+            } else {
+                format!(" to {}", map_name(&db, table_id, &to.map))
+            };
+            note(
+                &db,
+                table_id,
+                &format!("{} went through {}{place}.", token.name, passage.name),
+                &passage,
+            )?;
+        }
         let riders = crate::maps::carried_by(&map.tokens, token_id);
         let (x, y) = spot(&there, token.size);
         let (dx, dy) = (x - token.x, y - token.y);
@@ -566,4 +587,108 @@ pub fn away(db: &Connection, table_id: &str) -> Result<serde_json::Map<String, V
         .into_iter()
         .map(|(seat, map)| (seat, json!(map)))
         .collect())
+}
+
+// Squares round the far end of a passage, nearest first, for a party going through together.
+const AROUND: [(f64, f64); 13] = [
+    (0.0, 0.0),
+    (1.0, 0.0),
+    (-1.0, 0.0),
+    (0.0, 1.0),
+    (0.0, -1.0),
+    (1.0, 1.0),
+    (-1.0, 1.0),
+    (1.0, -1.0),
+    (-1.0, -1.0),
+    (2.0, 0.0),
+    (-2.0, 0.0),
+    (0.0, 2.0),
+    (0.0, -2.0),
+];
+
+fn map_name(db: &Connection, table_id: &str, scene_id: &str) -> String {
+    db.query_row(
+        "SELECT name FROM scenes WHERE table_id = ?1 AND id = ?2",
+        [table_id, scene_id],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap_or_else(|_| "another map".into())
+}
+
+// A line in the table's log; a hidden passage's for the DM alone.
+fn note(db: &Connection, table_id: &str, text: &str, passage: &Passage) -> Result<()> {
+    let only: Vec<String> = if passage.hidden == Some(true) {
+        vec!["dm".into()]
+    } else {
+        Vec::new()
+    };
+    crate::play::log(
+        db,
+        table_id,
+        "system",
+        "Table",
+        json!({ "text": text }),
+        &only,
+    )
+}
+
+/// `POST /api/tables/{id}/scenes/{scene}/passages/{passage}/party`: the DM sends every
+/// character on the map through a passage together.
+pub async fn party_through(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene, passage_id)): Path<(String, String, String)>,
+) -> Result<StatusCode> {
+    let access = access::runner(&state, &id, &credentials(&headers))?;
+    let (party, passage) = {
+        let db = state.db();
+        let map = load(&db, &id, &scene)?;
+        let passage = map
+            .passages
+            .iter()
+            .find(|p| p.id == passage_id)
+            .cloned()
+            .ok_or_else(|| AppError::not_found("That passage is gone"))?;
+        let party: Vec<String> = map
+            .tokens
+            .iter()
+            .filter(|t| t.seat_id.is_some() && t.attached_to.is_none())
+            .map(|t| t.id.clone())
+            .collect();
+        (party, passage)
+    };
+    let to = passage
+        .to
+        .clone()
+        .ok_or_else(|| AppError::bad("That passage leads nowhere"))?;
+    if party.is_empty() {
+        return Err(AppError::bad("No character is on this map"));
+    }
+    for (place, token) in party.iter().enumerate() {
+        go_through(
+            &state,
+            &access,
+            &id,
+            &scene,
+            token,
+            &passage_id,
+            Some(place),
+        )?;
+    }
+    {
+        let db = state.db();
+        let place = if to.map == scene {
+            String::new()
+        } else {
+            format!(" to {}", map_name(&db, &id, &to.map))
+        };
+        note(
+            &db,
+            &id,
+            &format!("The party went through {}{place}.", passage.name),
+            &passage,
+        )?;
+    }
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
 }
