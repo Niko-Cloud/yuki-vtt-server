@@ -419,6 +419,17 @@ pub async fn set_map(
             params![id, scene, file],
         )?;
         maps::set_picture(&db, &id, &scene, mime, size.width, size.height)?;
+        // A big map's tiles are cut now, beside the requests, so the first screen to look
+        // doesn't wait for them all.
+        if let (Some(tiles), Some(path)) = (
+            crate::tiles::tiles_for(size.width, size.height, mime),
+            library::resolve(data_dir, &file),
+        ) {
+            let (data_dir, scene) = (data_dir.clone(), scene.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::tiles::tile(&data_dir, &scene, &path, &tiles, "0-0-0");
+            });
+        }
     }
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
