@@ -62,11 +62,11 @@ pub fn scene_for(db: &Connection, access: &Access, table_id: &str) -> Result<Opt
     active_scene(db, table_id)
 }
 
-/// Whether a token stands on a passage: its middle within its own half and half a cell.
+/// Whether a token stands on a passage: the passage is under the token.
 pub fn on_passage(map: &TableMap, token: &Token, passage: &Passage) -> bool {
     let (x, y) = crate::fog::middle_of(map, token);
-    let reach = f64::from(map.grid.size) * (0.5 + token.size / 2.0);
-    (x - passage.x).hypot(y - passage.y) <= reach
+    let half = f64::from(map.grid.size) * token.size / 2.0;
+    (x - passage.x).abs() < half && (y - passage.y).abs() < half
 }
 
 fn name_of(value: &str) -> Result<String> {

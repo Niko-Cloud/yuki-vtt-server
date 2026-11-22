@@ -184,6 +184,19 @@ async fn takes_a_token_through_a_passage_on_its_map_or_to_another_its_player_see
         wren_at(scene_of(As::Dm, Some(cave.clone())).await),
         (Some(8.0), Some(5.0))
     );
+    // Next to it is not on it.
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{}/tokens/{wren_token}", at(&cave)),
+        Some(json!({ "x": 4, "y": 1 })),
+    )
+    .await;
+    assert_eq!(
+        wren_at(scene_of(As::Dm, Some(cave.clone())).await),
+        (Some(4.0), Some(1.0))
+    );
     // It goes at once: a token that stops on it falls through by itself.
     call(
         &app,
