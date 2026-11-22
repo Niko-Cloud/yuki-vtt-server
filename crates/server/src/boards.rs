@@ -260,6 +260,132 @@ pub fn refit(db: &Connection, asset: &str) -> Result<()> {
     Ok(())
 }
 
+/// Turns maps made before boards into boards, once, at start: a map's own picture (already in
+/// `Library/Maps`) becomes a map picture in the library, laid on its board where it was, with
+/// the map's grid as its own; pieces of other maps become map pictures on the board too. Each
+/// map turns in one transaction, and a map already turned is left alone. The number changed.
+pub fn convert_old_maps(data_dir: &std::path::Path, db: &Connection) -> Result<usize> {
+    let found: Vec<(String, String, String, String, Option<String>)> = db
+        .prepare("SELECT table_id, id, name, file, folder FROM scenes WHERE file IS NOT NULL")?
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut picture_of = std::collections::HashMap::new();
+    let mut done = 0;
+    for (table_id, scene_id, name, file, folder) in found {
+        let Ok(map) = load(db, &table_id, &scene_id) else {
+            continue;
+        };
+        let Some(image) = map.image.clone() else {
+            continue;
+        };
+        let size = crate::library::resolve(data_dir, &file)
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map_or(0, |meta| meta.len() as i64);
+        let picture = ids::id();
+        let grid = PictureGrid {
+            cell: map.grid.size as f64,
+            offset_x: map.grid.offset_x as f64,
+            offset_y: map.grid.offset_y as f64,
+        };
+        let item = MapItem {
+            id: format!("map-{}", ids::id()),
+            asset: picture.clone(),
+            x: 0.0,
+            y: 0.0,
+            width: map.width as f64,
+            height: map.height as f64,
+            rotation: None,
+            locked: Some(true),
+        };
+        let mut maps = vec![item];
+        maps.extend(map.maps.iter().cloned());
+        let turned = TableMap {
+            image: None,
+            maps,
+            ..map
+        };
+        let tx = db.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at, size, file, folder, grid)
+             VALUES (?1, ?2, 'map', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                picture,
+                table_id,
+                name,
+                image.mime,
+                turned.width,
+                turned.height,
+                ids::now(),
+                size,
+                file,
+                folder,
+                serde_json::to_string(&grid).expect("a grid"),
+            ],
+        )?;
+        store(&tx, &scene_id, &turned)?;
+        tx.execute("UPDATE scenes SET file = NULL WHERE id = ?1", [&scene_id])?;
+        tx.commit()?;
+        picture_of.insert(scene_id, picture);
+        done += 1;
+    }
+    // Then the pieces: each a map picture on the board, as many squares across as before.
+    let boards: Vec<(String, String)> = db
+        .prepare("SELECT table_id, id FROM scenes")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (table_id, scene_id) in boards {
+        let Ok(map) = load(db, &table_id, &scene_id) else {
+            continue;
+        };
+        if map.pieces.is_empty() {
+            continue;
+        }
+        let cell = map.grid.size as f64;
+        let (left, top) = (map.grid.offset_x as f64, map.grid.offset_y as f64);
+        let mut maps = map.maps.clone();
+        for piece in &map.pieces {
+            // A map turned on an earlier start: the picture its board shows first.
+            let asset = picture_of.get(&piece.map).cloned().or_else(|| {
+                load(db, &table_id, &piece.map)
+                    .ok()
+                    .and_then(|source| source.maps.first().map(|m| m.asset.clone()))
+            });
+            let Some(asset) = asset else {
+                continue;
+            };
+            maps.push(MapItem {
+                id: format!("map-{}", ids::id()),
+                asset,
+                x: left + piece.x as f64 * cell,
+                y: top + piece.y as f64 * cell,
+                width: piece.w * cell,
+                height: piece.h * cell,
+                rotation: piece.rotation.filter(|turn| *turn != 0),
+                locked: piece.locked.filter(|locked| *locked),
+            });
+        }
+        store(
+            db,
+            &scene_id,
+            &TableMap {
+                pieces: Vec::new(),
+                maps,
+                ..map
+            },
+        )?;
+        done += 1;
+    }
+    Ok(done)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

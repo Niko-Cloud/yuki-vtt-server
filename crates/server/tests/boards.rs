@@ -145,3 +145,80 @@ async fn lays_map_pictures_from_the_library_on_a_board() {
     .await;
     assert_eq!(shown(As::Dm).await["scene"]["maps"], json!([]));
 }
+
+#[tokio::test]
+async fn turns_maps_made_before_boards_into_boards_once() {
+    let (app, state) = host_and_state();
+    let t = table(&app).await;
+    let scene = |name: &'static str| {
+        let (app, path) = (app.clone(), format!("/tables/{}/scenes", t.id));
+        async move {
+            let (_, made) = call(&app, As::Dm, "POST", &path, Some(json!({ "name": name }))).await;
+            made["id"].as_str().unwrap().to_string()
+        }
+    };
+    let (cave, room) = (scene("Cave").await, scene("Room").await);
+    // The room is 3 by 2 squares, so it lies inside the cave as a piece.
+    for (map, size) in [
+        (&cave, "width=700&height=490"),
+        (&room, "width=210&height=140"),
+    ] {
+        let path = format!("/tables/{}/scenes/{map}/image?{size}", t.id);
+        let (status, _) = upload(&app, As::Dm, "PUT", &path, PNG).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let pieces = format!("/tables/{}/scenes/{cave}/pieces", t.id);
+    let add = json!({ "from": room, "x": 3, "y": 2 });
+    let (status, _) = call(&app, As::Dm, "POST", &pieces, Some(add)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let convert =
+        || yuki_vtt_server::boards::convert_old_maps(&state.config.data_dir, &state.db()).unwrap();
+    assert_eq!(convert(), 3);
+    let shown = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={cave}", t.id),
+        None,
+    )
+    .await
+    .1;
+    let board = &shown["scene"];
+    assert_eq!(board["image"], Value::Null);
+    assert_eq!(board["pieces"], json!([]));
+    // Its own picture where it was, and the piece where it lay, both from the library.
+    let placed: Vec<(f64, f64, f64)> = board["maps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let at = |key: &str| m[key].as_f64().unwrap();
+            (at("x"), at("y"), at("width"))
+        })
+        .collect();
+    assert_eq!(placed, [(0.0, 0.0, 700.0), (210.0, 140.0, 210.0)]);
+    let own = board["maps"][0]["asset"].as_str().unwrap();
+    let picture = shown["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == own)
+        .unwrap();
+    assert_eq!(picture["kind"], "map");
+    assert_eq!(picture["name"], "Cave");
+    assert_eq!(
+        picture["grid"],
+        json!({ "cell": 70.0, "offsetX": 0.0, "offsetY": 0.0 })
+    );
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}/assets/{own}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Already boards: nothing more to do.
+    assert_eq!(convert(), 0);
+}

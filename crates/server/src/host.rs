@@ -72,6 +72,11 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
     if let Err(error) = crate::pictures::note_map_tiles(&options.data, &connection) {
         tracing::warn!("couldn't note big maps' tiles: {}", error.message);
     }
+    match crate::boards::convert_old_maps(&options.data, &connection) {
+        Ok(0) => {}
+        Ok(done) => tracing::info!("{done} maps turned into boards"),
+        Err(error) => tracing::warn!("couldn't turn maps into boards: {}", error.message),
+    }
     let state = AppState::new(
         connection,
         Config {
