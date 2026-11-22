@@ -592,10 +592,21 @@ pub fn copy_changed(data_dir: &Path) -> Result<Vec<String>, String> {
             continue;
         }
         std::fs::create_dir_all(&folder).map_err(problem("Couldn't make the backups folder"))?;
-        let name = chrono::Local::now()
-            .format("%Y-%m-%d %H-%M-%S%.3f.yukitable")
-            .to_string();
-        export(data_dir, &id, &folder.join(name))?;
+        // Named by when, so they sort oldest first; never over an earlier copy made in the
+        // same instant.
+        let named = || {
+            folder.join(
+                chrono::Local::now()
+                    .format("%Y-%m-%d %H-%M-%S%.6f.yukitable")
+                    .to_string(),
+            )
+        };
+        let mut file = named();
+        while file.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            file = named();
+        }
+        export(data_dir, &id, &file)?;
         std::fs::write(&last, &print).map_err(problem("Couldn't note the backup"))?;
         let mut kept: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)
             .map_err(problem("Couldn't read the backups folder"))?
