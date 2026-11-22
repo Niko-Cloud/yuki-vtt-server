@@ -123,6 +123,28 @@ async fn lays_map_pictures_from_the_library_on_a_board() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    // Dragged two squares past the left edge: the board grows there, a token along with it.
+    let ogre = Some(json!({ "name": "Ogre", "x": 1, "y": 1 }));
+    call(&app, As::Dm, "POST", &format!("{at}/tokens"), ogre).await;
+    let grow = format!("{at}/grow");
+    let two = || Some(json!({ "columns": 2, "rows": 0, "maps": [{ "id": item, "x": 0, "y": 0 }] }));
+    let (status, _) = call(&app, player, "POST", &grow, two()).await;
+    assert_ne!(status, StatusCode::NO_CONTENT);
+    let none = Some(json!({ "columns": 0, "rows": 0 }));
+    let (status, _) = call(&app, As::Dm, "POST", &grow, none).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(&app, As::Dm, "POST", &grow, two()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let view = shown(As::Dm).await;
+    assert_eq!(view["scene"]["width"], 2170);
+    assert_eq!(view["scene"]["maps"][0]["x"], 0.0);
+    let ogre = view["scene"]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "Ogre")
+        .unwrap();
+    assert_eq!(ogre["x"], 3);
     // Lined up anew (25-pixel squares): it doubles on every board.
     assert_eq!(grid(crypt.clone(), 25.0).await, StatusCode::OK);
     let view = shown(As::Dm).await;

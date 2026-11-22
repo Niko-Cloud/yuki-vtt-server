@@ -227,6 +227,125 @@ pub async fn change(
     })
 }
 
+#[derive(Deserialize)]
+pub struct Growth {
+    columns: u32,
+    rows: u32,
+    #[serde(default)]
+    maps: Vec<Landed>,
+}
+
+#[derive(Deserialize)]
+pub struct Landed {
+    id: String,
+    x: f64,
+    y: f64,
+}
+
+/// A board grown on its left and top by whole squares: everything on it moves along (tokens
+/// and props in squares, the rest in pixels), and what players explored of it too.
+pub fn grow_board(map: &mut TableMap, columns: u32, rows: u32) {
+    let size = f64::from(map.grid.size);
+    let (dx, dy) = (f64::from(columns) * size, f64::from(rows) * size);
+    let moved = |p: &mut [f64; 2]| {
+        p[0] += dx;
+        p[1] += dy;
+    };
+    map.width += columns * map.grid.size;
+    map.height += rows * map.grid.size;
+    for item in &mut map.maps {
+        (item.x, item.y) = (item.x + dx, item.y + dy);
+    }
+    for passage in &mut map.passages {
+        (passage.x, passage.y) = (passage.x + dx, passage.y + dy);
+    }
+    for light in &mut map.lights {
+        (light.x, light.y) = (light.x + dx, light.y + dy);
+    }
+    for note in &mut map.notes {
+        (note.x, note.y) = (note.x + dx, note.y + dy);
+    }
+    for template in &mut map.templates {
+        (template.x, template.y) = (template.x + dx, template.y + dy);
+    }
+    for token in &mut map.tokens {
+        (token.x, token.y) = (token.x + f64::from(columns), token.y + f64::from(rows));
+    }
+    for prop in &mut map.props {
+        (prop.x, prop.y) = (prop.x + columns, prop.y + rows);
+    }
+    for wall in &mut map.walls {
+        moved(&mut wall.a);
+        moved(&mut wall.b);
+    }
+    let points = map
+        .drawings
+        .iter_mut()
+        .flat_map(|d| d.points.iter_mut())
+        .chain(map.fog_areas.iter_mut().flat_map(|f| f.points.iter_mut()))
+        .chain(map.rulers.iter_mut().flat_map(|r| r.points.iter_mut()));
+    for point in points {
+        moved(point);
+    }
+}
+
+/// `POST /api/tables/{id}/scenes/{scene}/grow`: the board grown on its left and top, for maps
+/// dragged past its edge; those land where they were let go, on the grown board.
+pub async fn grow_on(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene)): Path<(String, String)>,
+    Json(body): Json<Growth>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    if body.columns + body.rows == 0 || body.columns > 200 || body.rows > 200 {
+        return Err(AppError::bad("It has to grow somewhere"));
+    }
+    if body.maps.len() > MOST_MAP_ITEMS
+        || body
+            .maps
+            .iter()
+            .any(|m| !(0.0..=MOST_BOARD).contains(&m.x) || !(0.0..=MOST_BOARD).contains(&m.y))
+    {
+        return Err(AppError::bad("A map goes on the board"));
+    }
+    {
+        let db = state.db();
+        let mut map = load(&db, &id, &scene)?;
+        let size = f64::from(map.grid.size);
+        if f64::from(map.width) + f64::from(body.columns) * size > MOST_BOARD
+            || f64::from(map.height) + f64::from(body.rows) * size > MOST_BOARD
+        {
+            return Err(AppError::bad("The board can't grow any bigger"));
+        }
+        grow_board(&mut map, body.columns, body.rows);
+        for item in &mut map.maps {
+            if let Some(to) = body.maps.iter().find(|m| m.id == item.id)
+                && item.locked != Some(true)
+            {
+                (item.x, item.y) = (to.x, to.y);
+            }
+        }
+        store(&db, &scene, &grow(map))?;
+        let seen: Vec<(String, String)> = db
+            .prepare("SELECT viewer, cells FROM explored WHERE scene_id = ?1")?
+            .query_map([&scene], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (viewer, cells) in seen {
+            let moved = crate::fog::unpack(&cells)
+                .into_iter()
+                .map(|(x, y)| (x + body.columns, y + body.rows))
+                .collect();
+            db.execute(
+                "UPDATE explored SET cells = ?3 WHERE scene_id = ?1 AND viewer = ?2",
+                rusqlite::params![scene, viewer, crate::fog::pack(&moved)],
+            )?;
+        }
+    }
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn remove(
     State(state): State<AppState>,
     headers: HeaderMap,

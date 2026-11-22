@@ -400,7 +400,7 @@ pub fn for_players(scene: &mut Value, looking: &crate::sight::Looking) {
 }
 
 // Explored cells as text: each row's runs, like "3:0-5,8-9;4:1-2", as the website packs them.
-fn unpack(text: &str) -> BTreeSet<(u32, u32)> {
+pub(crate) fn unpack(text: &str) -> BTreeSet<(u32, u32)> {
     let mut cells = BTreeSet::new();
     for row in text.split(';') {
         let Some((y, runs)) = row.split_once(':') else {
@@ -421,7 +421,7 @@ fn unpack(text: &str) -> BTreeSet<(u32, u32)> {
     cells
 }
 
-fn pack(cells: &BTreeSet<(u32, u32)>) -> String {
+pub(crate) fn pack(cells: &BTreeSet<(u32, u32)>) -> String {
     let mut rows: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for &(x, y) in cells {
         rows.entry(y).or_default().push(x);
