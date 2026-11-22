@@ -254,7 +254,17 @@ async fn scales_map_pictures_with_the_boards_squares() {
     )
     .await;
     let board = made["id"].as_str().unwrap().to_string();
-    laid_picture(&app, &t, &board, PNG, (700, 490)).await;
+    let picture = laid_picture(&app, &t, &board, PNG, (700, 490)).await;
+    // The boards list shows it as the board's thumbnail.
+    let shown = call(&app, As::Dm, "GET", &format!("/tables/{}", t.id), None)
+        .await
+        .1;
+    let listed = shown["scenes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == board.as_str());
+    assert_eq!(listed.unwrap()["picture"], picture.as_str());
     let at = format!("/tables/{}/scenes/{board}", t.id);
     // Squares half as big: 20 by 14 of them still, and the picture on them half its size.
     let grid = json!({ "size": 35, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true });

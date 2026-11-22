@@ -848,8 +848,10 @@ pub fn scene(db: &Connection, table_id: &str, scene_id: &str) -> Result<Option<V
 
 /// Every scene, by name, in order; for whoever runs the table.
 pub fn list(db: &Connection, table_id: &str) -> Result<Vec<Value>> {
+    // Each board with the first map picture on it, for its thumbnail.
     let mut rows = db.prepare(
-        "SELECT id, name, folder FROM scenes WHERE table_id = ?1 ORDER BY position, created_at",
+        "SELECT id, name, folder, json_extract(data, '$.maps[0].asset') FROM scenes
+         WHERE table_id = ?1 ORDER BY position, created_at",
     )?;
     let scenes = rows
         .query_map([table_id], |row| {
@@ -857,6 +859,9 @@ pub fn list(db: &Connection, table_id: &str) -> Result<Vec<Value>> {
                 json!({ "id": row.get::<_, String>(0)?, "name": row.get::<_, String>(1)? });
             if let Some(folder) = row.get::<_, Option<String>>(2)? {
                 scene["folder"] = json!(folder);
+            }
+            if let Some(picture) = row.get::<_, Option<String>>(3)? {
+                scene["picture"] = json!(picture);
             }
             Ok(scene)
         })?
