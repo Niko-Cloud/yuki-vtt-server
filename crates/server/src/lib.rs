@@ -5,6 +5,7 @@ pub mod access;
 pub mod areas;
 pub mod awake;
 pub mod backup;
+pub mod boards;
 pub mod cloudflared;
 pub mod connection;
 pub mod db;

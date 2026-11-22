@@ -419,6 +419,9 @@ pub struct TableMap {
     /// Stairs, ladders and portals.
     #[serde(default)]
     pub passages: Vec<crate::passages::Passage>,
+    /// The board's map pictures, from the library, under everything else.
+    #[serde(default)]
+    pub maps: Vec<crate::boards::MapItem>,
     #[serde(default)]
     pub tokens: Vec<Token>,
     #[serde(default)]
@@ -704,6 +707,7 @@ fn blank() -> TableMap {
         image: None,
         pieces: Vec::new(),
         passages: Vec::new(),
+        maps: Vec::new(),
         tokens: vec![],
         props: vec![],
         drawings: vec![],
