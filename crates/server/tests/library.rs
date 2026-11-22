@@ -737,3 +737,32 @@ async fn tells_every_screen_to_fetch_a_maps_picture_before_it_is_shown() {
     assert_eq!(message["preload"]["sceneId"], scene.as_str());
     assert_eq!(message["preload"]["mime"], "image/png");
 }
+
+#[tokio::test]
+async fn takes_map_pictures_copied_in_by_hand_but_not_a_maps_own() {
+    use yuki_vtt_server::library;
+    let data = tempfile::tempdir().unwrap();
+    let state = state_in(data.path());
+    let app = app(state.clone());
+    let t = table(&app).await;
+    // A map with its own picture, kept in Library/Maps by the map.
+    let scene = cave(&app, &t).await;
+    let (status, _) = upload(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("/tables/{}/scenes/{scene}/image?width=100&height=100", t.id),
+        REAL_PNG,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // And one copied in by hand.
+    let maps = data.path().join("Library/Maps");
+    std::fs::create_dir_all(maps.join("Crypt")).unwrap();
+    std::fs::write(maps.join("Crypt/crypt.png"), REAL_PNG).unwrap();
+
+    let report = library::rescan(&state);
+    assert_eq!(report.added, ["Crypt"]);
+    let found = named(&view(&app, As::Dm, &t).await["assets"]);
+    assert_eq!(found, [("Crypt".into(), "map".into())]);
+}

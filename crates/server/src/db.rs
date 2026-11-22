@@ -169,6 +169,10 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE seats ADD COLUMN scene_id TEXT;
 "#,
+    // A map picture's own grid as lined up (JSON: cell, offsetX, offsetY).
+    r#"
+    ALTER TABLE assets ADD COLUMN grid TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

@@ -2710,6 +2710,7 @@ pub fn forget_picture(db: &Connection, table_id: &str, asset_id: &str) -> Result
     for scene_id in scenes {
         let mut map = load(db, table_id, &scene_id)?;
         map.props.retain(|p| p.asset_id != asset_id);
+        map.maps.retain(|m| m.asset != asset_id);
         for token in &mut map.tokens {
             if token.image_id.as_deref() == Some(asset_id) {
                 token.image_id = None;

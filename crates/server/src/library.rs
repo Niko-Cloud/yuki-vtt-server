@@ -10,12 +10,13 @@ use std::path::{Component, Path, PathBuf};
 
 pub const LIBRARY: &str = "Library";
 
-/// The kinds the DM may fill by hand; maps belong to tables and are made in the app.
-pub const KINDS: [(&str, &str); 4] = [
+/// The kinds the DM may fill by hand.
+pub const KINDS: [(&str, &str); 5] = [
     ("token", "Tokens"),
     ("prop", "Props"),
     ("handout", "Handouts"),
     ("audio", "Music"),
+    ("map", "Maps"),
 ];
 const MAPS: &str = "Maps";
 
@@ -372,7 +373,12 @@ pub fn scan(db: &Connection, data_dir: &Path) -> rusqlite::Result<Scan> {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let known_files: HashSet<String> = known.iter().map(|k| k.2.to_lowercase()).collect();
+    // A map's own picture (kept by the map, not as a library picture) isn't a new one either.
+    let mut known_files: HashSet<String> = known.iter().map(|k| k.2.to_lowercase()).collect();
+    let mut maps = db.prepare("SELECT file FROM scenes WHERE file IS NOT NULL")?;
+    for file in maps.query_map([], |row| row.get::<_, String>(0))? {
+        known_files.insert(file?.to_lowercase());
+    }
     let mut missing: Vec<&(String, String, String, i64)> = known
         .iter()
         .filter(|(_, _, file, _)| resolve(data_dir, file).is_none_or(|p| !p.is_file()))

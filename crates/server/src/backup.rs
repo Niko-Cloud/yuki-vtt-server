@@ -94,6 +94,7 @@ const PARTS: [(&str, &[&str]); 6] = [
             "tags",
             "favorite",
             "size",
+            "grid",
         ],
     ),
     (
@@ -160,6 +161,7 @@ fn fits(column: &str, value: &Value) -> bool {
         "permissions" | "visible_to" | "tags" => holds::<Vec<String>>(value),
         "banned" => holds::<Vec<Value>>(value),
         "encounter" => value.is_null() || holds::<yuki_vtt_rules::encounter::Encounter>(value),
+        "grid" => value.is_null() || holds::<crate::boards::PictureGrid>(value),
         "handout" => value.is_null() || holds::<Value>(value),
         "music" => value.is_null() || holds::<Value>(value),
         "background" => value.is_null() || holds::<Value>(value),

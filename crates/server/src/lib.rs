@@ -129,6 +129,8 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/tokens/{token}/through", post(passages::through))
         .route("/tables/{id}/scenes/{scene}/passages/{passage}/party", post(passages::party_through))
         .route("/tables/{id}/scenes/{scene}/pieces", post(pieces::add))
+        .route("/tables/{id}/scenes/{scene}/maps", post(boards::add))
+        .route("/tables/{id}/scenes/{scene}/maps/{item}", patch(boards::change).delete(boards::remove))
         .route("/tables/{id}/scenes/{scene}/pieces/{piece}", patch(pieces::change).delete(pieces::remove))
         .route("/tables/{id}/scenes/{scene}/props/{prop}", patch(maps::change_prop).delete(maps::remove_prop))
         .route("/tables/{id}/scenes/{scene}/drawings", post(maps::add_drawing).delete(maps::clear_drawings))

@@ -1,7 +1,18 @@
 //! A board (a scene): map pictures laid on it under everything else, with the board's own grid
 //! (the website's `packages/engine/src/board.ts`).
 
+use crate::access;
+use crate::error::{AppError, Result};
+use crate::ids;
+use crate::maps::{TableMap, credentials, edit, load, store};
+use crate::state::AppState;
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use yuki_vtt_rules::map::MapGrid;
 
 pub const MOST_BOARD: f64 = 16_384.0;
 pub const MOST_MAP_ITEMS: usize = 50;
@@ -60,6 +71,193 @@ pub fn grown(width: u32, height: u32, maps: &[MapItem]) -> (u32, u32) {
         h = h.max((item.y + down).ceil());
     }
     (w.min(MOST_BOARD) as u32, h.min(MOST_BOARD) as u32)
+}
+
+/// The spot an item goes to so its picture's squares sit on the board's.
+pub fn snap(x: f64, y: f64, board: &MapGrid, grid: Option<&PictureGrid>, scale: f64) -> (f64, f64) {
+    let cell = f64::from(board.size.max(1));
+    let one = |value: f64, own: f64, offset: u32| {
+        let offset = f64::from(offset);
+        ((value + own - offset) / cell).round() * cell - own + offset
+    };
+    let (ox, oy) = grid.map_or((0.0, 0.0), |g| (g.offset_x * scale, g.offset_y * scale));
+    (
+        one(x, ox, board.offset_x).max(0.0),
+        one(y, oy, board.offset_y).max(0.0),
+    )
+}
+
+// A map picture of the library: its size and own grid. Only a map picture goes on a board.
+fn map_picture(db: &Connection, asset: &str) -> Result<(f64, f64, Option<PictureGrid>)> {
+    let found: Option<(String, i64, i64, Option<String>)> = db
+        .query_row(
+            "SELECT kind, width, height, grid FROM assets WHERE id = ?1",
+            [asset],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let (kind, width, height, grid) =
+        found.ok_or_else(|| AppError::not_found("That picture is gone"))?;
+    if kind != "map" {
+        return Err(AppError::bad("Only a map picture goes on a board"));
+    }
+    let grid = grid.and_then(|text| serde_json::from_str(&text).ok());
+    Ok((width as f64, height as f64, grid))
+}
+
+fn grow(mut map: TableMap) -> TableMap {
+    (map.width, map.height) = grown(map.width, map.height, &map.maps);
+    map
+}
+
+#[derive(Deserialize)]
+pub struct NewItem {
+    asset: String,
+    x: f64,
+    y: f64,
+}
+
+/// `POST /api/tables/{id}/scenes/{scene}/maps`: a map picture laid on a board.
+pub async fn add(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene)): Path<(String, String)>,
+    Json(body): Json<NewItem>,
+) -> Result<Json<Value>> {
+    let access = access::runner(&state, &id, &credentials(&headers))?;
+    if !(0.0..=MOST_BOARD).contains(&body.x) || !(0.0..=MOST_BOARD).contains(&body.y) {
+        return Err(AppError::bad("A map goes on the board"));
+    }
+    let picture = map_picture(&state.db(), &body.asset)?;
+    let made = format!("map-{}", ids::id());
+    edit(&state, &access, &id, &scene, |mut map| {
+        if map.maps.len() >= MOST_MAP_ITEMS {
+            return Err(AppError::bad(format!(
+                "A board holds {MOST_MAP_ITEMS} maps"
+            )));
+        }
+        let cell = f64::from(map.grid.size.max(1));
+        let (width, height) = item_size(picture.0, picture.1, picture.2.as_ref(), cell);
+        let scale = width / picture.0;
+        let (x, y) = snap(body.x, body.y, &map.grid, picture.2.as_ref(), scale);
+        map.maps.push(MapItem {
+            id: made.clone(),
+            asset: body.asset,
+            x,
+            y,
+            width,
+            height,
+            rotation: None,
+            locked: Some(true),
+        });
+        Ok(grow(map))
+    })?;
+    Ok(Json(json!({ "id": made })))
+}
+
+#[derive(Deserialize)]
+pub struct ItemChange {
+    x: Option<f64>,
+    y: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+    rotation: Option<u32>,
+    locked: Option<bool>,
+    layer: Option<String>,
+}
+
+pub async fn change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene, item_id)): Path<(String, String, String)>,
+    Json(body): Json<ItemChange>,
+) -> Result<StatusCode> {
+    let access = access::runner(&state, &id, &credentials(&headers))?;
+    let on_board = |n: Option<f64>, least: f64| n.is_none_or(|n| (least..=MOST_BOARD).contains(&n));
+    if !(on_board(body.x, 0.0) && on_board(body.y, 0.0))
+        || !(on_board(body.width, 16.0) && on_board(body.height, 16.0))
+    {
+        return Err(AppError::bad("A map goes on the board"));
+    }
+    if body
+        .rotation
+        .is_some_and(|r| !matches!(r, 0 | 90 | 180 | 270))
+    {
+        return Err(AppError::bad("A map turns in quarter turns"));
+    }
+    if body
+        .layer
+        .as_deref()
+        .is_some_and(|l| l != "front" && l != "back")
+    {
+        return Err(AppError::bad("A map goes to the front or the back"));
+    }
+    edit(&state, &access, &id, &scene, |mut map| {
+        let at = map
+            .maps
+            .iter()
+            .position(|m| m.id == item_id)
+            .ok_or_else(|| AppError::not_found("That map is gone"))?;
+        let mut item = map.maps.remove(at);
+        let moving = body.x.is_some()
+            || body.y.is_some()
+            || body.width.is_some()
+            || body.height.is_some()
+            || body.rotation.is_some();
+        if moving && item.locked == Some(true) && body.locked != Some(false) {
+            return Err(AppError::bad("That map is locked"));
+        }
+        item.x = body.x.unwrap_or(item.x);
+        item.y = body.y.unwrap_or(item.y);
+        item.width = body.width.unwrap_or(item.width);
+        item.height = body.height.unwrap_or(item.height);
+        if let Some(rotation) = body.rotation {
+            item.rotation = (rotation != 0).then_some(rotation);
+        }
+        if let Some(locked) = body.locked {
+            item.locked = locked.then_some(true);
+        }
+        match body.layer.as_deref() {
+            Some("front") => map.maps.push(item),
+            Some("back") => map.maps.insert(0, item),
+            _ => map.maps.insert(at, item),
+        }
+        Ok(grow(map))
+    })
+}
+
+pub async fn remove(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene, item_id)): Path<(String, String, String)>,
+) -> Result<StatusCode> {
+    let access = access::runner(&state, &id, &credentials(&headers))?;
+    edit(&state, &access, &id, &scene, |mut map| {
+        map.maps.retain(|m| m.id != item_id);
+        Ok(map)
+    })
+}
+
+/// A map picture's grid was lined up anew: its items on every board are resized to match.
+pub fn refit(db: &Connection, asset: &str) -> Result<()> {
+    let (width, height, grid) = map_picture(db, asset)?;
+    let scenes: Vec<(String, String)> = db
+        .prepare("SELECT table_id, id FROM scenes")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (table, scene) in scenes {
+        let mut map = load(db, &table, &scene)?;
+        if !map.maps.iter().any(|m| m.asset == asset) {
+            continue;
+        }
+        let cell = f64::from(map.grid.size.max(1));
+        let (w, h) = item_size(width, height, grid.as_ref(), cell);
+        for item in map.maps.iter_mut().filter(|m| m.asset == asset) {
+            (item.width, item.height) = (w, h);
+        }
+        store(db, &scene, &grow(map))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

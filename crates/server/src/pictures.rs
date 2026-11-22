@@ -28,7 +28,7 @@ pub const VIDEO_LIBRARY_LIMIT: usize = 10 * 1024 * 1024;
 pub const AUDIO_LIMIT: usize = 10 * 1024 * 1024;
 // The host's library stays a library, not a photo album.
 const MOST_PICTURES: i64 = 1000;
-const KINDS: [&str; 4] = ["token", "prop", "handout", "audio"];
+const KINDS: [&str; 5] = ["token", "prop", "handout", "audio", "map"];
 
 /// The picture's type, told by its first bytes, not by what the upload claims to be.
 pub fn picture_type(data: &[u8], limit: usize, animated_limit: usize) -> Result<&'static str> {
@@ -513,7 +513,7 @@ pub async fn add(
     let access = access::at_table(&state, &id, &Credentials::from(&headers, None))?;
     if !KINDS.contains(&upload.kind.as_str()) {
         return Err(AppError::bad(
-            "A picture is a token, a prop, a handout or a track",
+            "A picture is a token, a prop, a handout, a map or a track",
         ));
     }
     // A player uploads token pictures, and pictures for the map if they may place them.
@@ -522,8 +522,11 @@ pub async fn add(
         return Err(AppError::not_found("The DM hasn't let you add pictures"));
     }
     let audio = upload.kind == "audio";
+    // A map picture may be as big as a map is.
     let mime = if audio {
         audio_type(&data, AUDIO_LIMIT)?
+    } else if upload.kind == "map" {
+        picture_type(&data, MAP_LIMIT, VIDEO_MAP_LIMIT)?
     } else {
         picture_type(&data, LIBRARY_LIMIT, VIDEO_LIBRARY_LIMIT)?
     };
@@ -567,6 +570,16 @@ pub async fn add(
             "INSERT INTO assets (id, table_id, kind, name, mime, width, height, created_at, size, file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![picture_id, id, upload.kind, name, mime, width, height, ids::now(), data.len() as i64, file],
         )?;
+        // A big map picture's tiles are cut now, beside the requests.
+        let tiles = (upload.kind == "map")
+            .then(|| crate::tiles::tiles_for(width as u32, height as u32, mime))
+            .flatten();
+        if let (Some(tiles), Some(path)) = (tiles, library::resolve(data_dir, &file)) {
+            let (data_dir, picture) = (data_dir.clone(), picture_id.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::tiles::tile(&data_dir, &picture, &path, &tiles, "0-0-0");
+            });
+        }
     }
     state.events.changed(&id);
     Ok(Json(
@@ -593,17 +606,28 @@ pub fn list(
     let on_map = shown.map(pictures_on).unwrap_or_default();
     Ok(all
         .into_iter()
-        .filter(|a| a["kind"] == "token" || a["kind"] == "prop")
+        .filter(|a| a["kind"] == "token" || a["kind"] == "prop" || a["kind"] == "map")
         .filter(|a| a["here"] == true || a["id"].as_str().is_some_and(|id| on_map.contains(&id)))
         .collect())
 }
 
 // The columns a table is sent about a picture, read by `shown_row`.
-const SHOWN: &str = "id, kind, name, width, height, mime, table_id, folder, tags, favorite, size";
+const SHOWN: &str =
+    "id, kind, name, width, height, mime, table_id, folder, tags, favorite, size, grid";
 
 fn shown_row(row: &rusqlite::Row, table_id: &str) -> rusqlite::Result<Value> {
     let tags: String = row.get(8)?;
-    Ok(json!({
+    let kind: String = row.get(1)?;
+    let (width, height): (i64, i64) = (row.get(3)?, row.get(4)?);
+    let mime: String = row.get(5)?;
+    // A map picture's grid, and its tiles when it is big.
+    let grid = row
+        .get::<_, Option<String>>(11)?
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let tiles = (kind == "map")
+        .then(|| crate::tiles::tiles_for(width as u32, height as u32, &mime))
+        .flatten();
+    let mut shown = json!({
         "id": row.get::<_, String>(0)?,
         "kind": row.get::<_, String>(1)?,
         "name": row.get::<_, String>(2)?,
@@ -615,7 +639,14 @@ fn shown_row(row: &rusqlite::Row, table_id: &str) -> rusqlite::Result<Value> {
         "tags": serde_json::from_str::<Vec<String>>(&tags).unwrap_or_default(),
         "favorite": row.get::<_, bool>(9)?,
         "size": row.get::<_, i64>(10)?,
-    }))
+    });
+    if let Some(grid) = grid {
+        shown["grid"] = grid;
+    }
+    if let Some(tiles) = tiles {
+        shown["tiles"] = json!(tiles);
+    }
+    Ok(shown)
 }
 
 // The library pictures a map shows: its props and token portraits.
@@ -628,7 +659,12 @@ fn pictures_on(scene: &Value) -> Vec<&str> {
             .filter_map(|item| item[key].as_str())
             .collect::<Vec<_>>()
     };
-    [field("props", "assetId"), field("tokens", "imageId")].concat()
+    [
+        field("props", "assetId"),
+        field("tokens", "imageId"),
+        field("maps", "asset"),
+    ]
+    .concat()
 }
 
 /// `GET /api/tables/{id}/assets/{asset}`: a picture from the library, for anyone at the table.
@@ -639,22 +675,39 @@ pub async fn picture(
     Query(seen): Query<Seen>,
 ) -> Result<Response> {
     access::at_table(&state, &id, &Credentials::from(&headers, seen.pass))?;
-    let (kind, mime, path) = {
+    let (kind, mime, size, path) = {
         let db = state.db();
-        let (kind, mime): (String, String) = db
+        let (kind, mime, width, height): (String, String, i64, i64) = db
             .query_row(
-                "SELECT kind, mime FROM assets WHERE id = ?1",
+                "SELECT kind, mime, width, height FROM assets WHERE id = ?1",
                 [&asset],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?
             .ok_or_else(|| AppError::not_found("That picture is gone"))?;
         (
             kind,
             mime,
+            (width as u32, height as u32),
             library_path(&db, &state.config.data_dir, &asset)?,
         )
     };
+    // One tile of a big map picture.
+    if let Some(key) = seen.tile {
+        let tiles = (kind == "map")
+            .then(|| crate::tiles::tiles_for(size.0, size.1, &mime))
+            .flatten()
+            .ok_or_else(|| AppError::not_found("This picture has no tiles"))?;
+        let data_dir = state.config.data_dir.clone();
+        let cut = tokio::task::spawn_blocking(move || {
+            crate::tiles::tile(&data_dir, &asset, &path, &tiles, &key)
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| AppError::not_found("No such tile"))?;
+        return send(cut, "image/webp");
+    }
     send_served(&state, asset, path, &kind, mime).await
 }
 
@@ -693,6 +746,9 @@ pub struct Change {
     folder: Option<Option<String>>,
     tags: Option<Vec<String>>,
     favorite: Option<bool>,
+    /// A map picture's own grid, once lined up; null forgets it.
+    #[serde(default, deserialize_with = "crate::play::present")]
+    grid: Option<Option<crate::boards::PictureGrid>>,
 }
 
 fn trimmed(text: &str, most: usize, what: &str) -> Result<String> {
@@ -792,6 +848,24 @@ pub async fn change(
                 "UPDATE assets SET favorite = ?2 WHERE id = ?1",
                 params![asset, favorite],
             )?;
+        }
+        if let Some(grid) = &body.grid {
+            let kind: String =
+                db.query_row("SELECT kind FROM assets WHERE id = ?1", [&asset], |row| {
+                    row.get(0)
+                })?;
+            if kind != "map" {
+                return Err(AppError::bad("Only a map picture has a grid"));
+            }
+            if grid.is_some_and(|g| !(8.0..=1000.0).contains(&g.cell)) {
+                return Err(AppError::bad("A square is 8 to 1000 pixels"));
+            }
+            db.execute(
+                "UPDATE assets SET grid = ?2 WHERE id = ?1",
+                params![asset, grid.map(|g| serde_json::to_string(&g)).transpose()?],
+            )?;
+            // Its squares lined up anew: every board using it sizes it to match.
+            crate::boards::refit(&db, &asset)?;
         }
         let changed = db.query_row(
             &format!("SELECT {SHOWN} FROM assets WHERE id = ?1"),
