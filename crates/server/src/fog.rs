@@ -184,6 +184,9 @@ pub struct NewNote {
     text: String,
     #[serde(default)]
     shared: bool,
+    /// Moved notes are pinned again: they stay on the map picture they were attached to.
+    #[serde(default, rename = "attachedTo")]
+    attached_to: Option<String>,
 }
 
 pub async fn add_note(
@@ -217,6 +220,7 @@ pub async fn add_note(
         text,
         shared: body.shared || by.is_some(),
         by,
+        attached_to: body.attached_to.filter(|a| !a.is_empty() && a.len() <= 40),
     };
     edit(&state, &access, &id, &scene, |mut map| {
         map.notes.push(note);

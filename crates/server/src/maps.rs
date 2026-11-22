@@ -249,6 +249,13 @@ pub struct Wall {
     /// blind side (the right going from a to b on the map) and tokens both ways.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// The map picture on the board it is attached to: it moves, turns and goes with it.
+    #[serde(
+        default,
+        rename = "attachedTo",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attached_to: Option<String>,
 }
 
 /// A door: a locked one stays shut until the DM unlocks it; a secret one is a plain wall to
@@ -283,6 +290,13 @@ pub struct Light {
     /// tokens has a line of sight to the light itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub secondary: bool,
+    /// The map picture on the board it is attached to: it moves, turns and goes with it.
+    #[serde(
+        default,
+        rename = "attachedTo",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attached_to: Option<String>,
 }
 
 /// A note pinned on the map for the DM alone.
@@ -298,6 +312,13 @@ pub struct Note {
     /// The seat of the player who pinned it, who may take it off again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// The map picture on the board it is attached to: it moves, turns and goes with it.
+    #[serde(
+        default,
+        rename = "attachedTo",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attached_to: Option<String>,
 }
 
 /// A spell's area: a cone or line from where it starts, a sphere around a point, a cube with
@@ -348,6 +369,9 @@ pub struct Prop {
     /// A light it gives off, all around its middle: a sconce, a brazier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light: Option<Carried>,
+    /// The map picture on the board it is attached to: it moves, turns and goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_to: Option<String>,
 }
 
 /// A line by hand, or a shape from its first point to its last, in the picture's pixels.
@@ -396,6 +420,9 @@ pub struct Drawing {
     /// Words on the map: a text drawing's, at its first point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The map picture on the board it is attached to: it moves, turns and goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,6 +482,13 @@ pub struct FogArea {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reveal: Option<bool>,
     pub points: Vec<[f64; 2]>,
+    /// The map picture on the board it is attached to: it moves, turns and goes with it.
+    #[serde(
+        default,
+        rename = "attachedTo",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attached_to: Option<String>,
 }
 
 /// A group saved to drop again: things picked together, kept just as they were. The anchor is
@@ -565,6 +599,7 @@ pub fn room_edge_walls(areas: &[FogArea], walls: &[Wall]) -> Vec<Wall> {
                         door: None,
                         window: false,
                         kind: None,
+                        attached_to: None,
                     });
                     k += 1;
                 }
@@ -1121,7 +1156,12 @@ pub async fn update(
                 height: item.height * scale,
                 ..item.clone()
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // What is attached to them scales along.
+        let mut map = map;
+        for (was, now) in map.maps.clone().iter().zip(&maps) {
+            crate::attach::carry(&mut map, was, now);
+        }
         let mut resized = TableMap {
             width: setup.width,
             height: setup.height,
@@ -1944,6 +1984,7 @@ pub async fn add_prop(
             rotation: None,
             flip: None,
             light: None,
+            attached_to: None,
         });
         map.props.push(prop);
         Ok(map)
@@ -2210,6 +2251,7 @@ pub async fn add_drawing(
         underline: body.underline.filter(|&u| u),
         align: text_align(body.align)?,
         text,
+        attached_to: None,
     };
     edit(&state, &access, &id, &scene, |mut map| {
         map.drawings.push(drawing);

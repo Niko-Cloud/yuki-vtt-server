@@ -3,6 +3,7 @@
 
 pub mod access;
 pub mod areas;
+pub mod attach;
 pub mod awake;
 pub mod backup;
 pub mod boards;
@@ -125,6 +126,9 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/passages/{passage}/party", post(passages::party_through))
         .route("/tables/{id}/scenes/{scene}/maps", post(boards::add))
         .route("/tables/{id}/scenes/{scene}/grow", post(boards::grow_on))
+        .route("/tables/{id}/scenes/{scene}/maps/restore", post(boards::restore))
+        .route("/tables/{id}/scenes/{scene}/maps/{item}/attach", post(boards::attach))
+        .route("/tables/{id}/scenes/{scene}/maps/{item}/detach", post(boards::detach))
         .route("/tables/{id}/scenes/{scene}/maps/{item}", patch(boards::change).delete(boards::remove))
         .route("/tables/{id}/scenes/{scene}/props/{prop}", patch(maps::change_prop).delete(maps::remove_prop))
         .route("/tables/{id}/scenes/{scene}/drawings", post(maps::add_drawing).delete(maps::clear_drawings))

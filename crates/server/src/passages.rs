@@ -39,6 +39,13 @@ pub struct Passage {
     pub hidden: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
+    /// The map picture on the board it is attached to: it moves, turns and goes with it.
+    #[serde(
+        default,
+        rename = "attachedTo",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attached_to: Option<String>,
 }
 
 /// The map someone is on: whoever runs the table, the one shown; a player, the one a passage
@@ -152,6 +159,7 @@ pub async fn add(
             ask: None,
             hidden: None,
             locked: None,
+            attached_to: None,
         });
         Ok(map)
     })?;

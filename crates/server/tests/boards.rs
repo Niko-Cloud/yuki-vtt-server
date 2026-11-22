@@ -311,3 +311,103 @@ async fn scales_map_pictures_with_the_boards_squares() {
         (Some(350.0), Some(245.0))
     );
 }
+
+#[tokio::test]
+async fn things_attached_to_a_map_move_and_go_with_it() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Board" })),
+    )
+    .await;
+    let board = made["id"].as_str().unwrap().to_string();
+    let at = format!("/tables/{}/scenes/{board}", t.id);
+    laid_picture(&app, &t, &board, PNG, (700, 490)).await;
+    let shown = || {
+        let (app, path) = (app.clone(), format!("/tables/{}?scene={board}", t.id));
+        async move { call(&app, As::Dm, "GET", &path, None).await.1["scene"].clone() }
+    };
+    let item = shown().await["maps"][0]["id"].as_str().unwrap().to_string();
+    // A wall and a light on the map, and a wall off it.
+    let fog = json!({ "mode": "dynamic", "light": "dark", "remember": true });
+    let lighting = json!({
+        "fog": fog,
+        "walls": [
+            { "id": "w", "a": [70, 70], "b": [210, 70] },
+            { "id": "far", "a": [900, 900], "b": [980, 900] }
+        ],
+        "lights": [{ "id": "l", "x": 35, "y": 35, "bright": 20, "dim": 20 }]
+    });
+    let (status, body) = call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let one = format!("{at}/maps/{item}");
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{one}/attach"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let view = shown().await;
+    assert_eq!(view["walls"][0]["attachedTo"], item.as_str());
+    assert!(view["walls"][1].get("attachedTo").is_none());
+    // Moved two squares right and turned a quarter: the wall follows, the far one stays.
+    let (status, _) = call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 140 }))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let view = shown().await;
+    assert_eq!(view["walls"][0]["a"], json!([210.0, 70.0]));
+    assert_eq!(view["walls"][1]["a"], json!([900.0, 900.0]));
+    // Taken off, it takes them along; brought back, they come back attached.
+    let kept = view["maps"][0].clone();
+    let (status, taken) = call(&app, As::Dm, "DELETE", &one, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let view = shown().await;
+    assert_eq!(view["walls"].as_array().unwrap().len(), 1);
+    assert_eq!(view["lights"], json!([]));
+    let back = json!({ "item": kept, "attached": taken["attached"] });
+    let (status, body) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{at}/maps/restore"),
+        Some(back),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let view = shown().await;
+    assert_eq!(view["maps"][0]["id"], item.as_str());
+    assert_eq!(view["lights"][0]["attachedTo"], item.as_str());
+    // Taken off the map, they stay where they are when it moves.
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{one}/detach"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 0 }))).await;
+    let wall = shown().await["walls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "w")
+        .cloned()
+        .unwrap();
+    assert_eq!(wall["a"], json!([210.0, 70.0]));
+    assert!(wall.get("attachedTo").is_none());
+}

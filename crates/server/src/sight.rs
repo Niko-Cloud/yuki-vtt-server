@@ -295,6 +295,7 @@ mod tests {
             id: "hall".into(),
             reveal: None,
             points: vec![[0.0, 0.0], [140.0, 0.0], [140.0, 140.0], [0.0, 140.0]],
+            attached_to: None,
         };
         assert_eq!(room_edge_walls(std::slice::from_ref(&hall), &[]).len(), 4);
         let door = Wall {
@@ -308,6 +309,7 @@ mod tests {
             }),
             window: false,
             kind: None,
+            attached_to: None,
         };
         let bottom: Vec<(f64, f64)> = room_edge_walls(&[hall], &[door])
             .into_iter()
@@ -363,6 +365,7 @@ mod tests {
             id: id.into(),
             reveal: None,
             points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+            attached_to: None,
         };
         // As room-walls.test.ts: a hall, a corridor into it, a room sharing its right edge.
         let rooms = [
@@ -386,6 +389,7 @@ mod tests {
             door: None,
             window: false,
             kind: Some("one-way".into()),
+            attached_to: None,
         }]);
         assert!(!line_of_sight(&walls, (100.0, 250.0), (400.0, 250.0)));
         assert!(line_of_sight(&walls, (400.0, 250.0), (100.0, 250.0)));

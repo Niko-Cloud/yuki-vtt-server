@@ -2,6 +2,7 @@
 //! (the website's `packages/engine/src/board.ts`).
 
 use crate::access;
+use crate::attach::{Attached, Named};
 use crate::error::{AppError, Result};
 use crate::ids;
 use crate::maps::{TableMap, credentials, edit, load, store};
@@ -200,6 +201,7 @@ pub async fn change(
             .position(|m| m.id == item_id)
             .ok_or_else(|| AppError::not_found("That map is gone"))?;
         let mut item = map.maps.remove(at);
+        let before = item.clone();
         let moving = body.x.is_some()
             || body.y.is_some()
             || body.width.is_some()
@@ -218,6 +220,8 @@ pub async fn change(
         if let Some(locked) = body.locked {
             item.locked = locked.then_some(true);
         }
+        // What is attached to it moves, turns and resizes along.
+        crate::attach::carry(&mut map, &before, &item);
         match body.layer.as_deref() {
             Some("front") => map.maps.push(item),
             Some("back") => map.maps.insert(0, item),
@@ -346,14 +350,129 @@ pub async fn grow_on(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// A map picture taken off a board, with what is attached to it; says what that was, to
+/// bring back on undo.
 pub async fn remove(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, scene, item_id)): Path<(String, String, String)>,
-) -> Result<StatusCode> {
+) -> Result<Json<Value>> {
     let access = access::runner(&state, &id, &credentials(&headers))?;
+    let mut taken = Attached::default();
     edit(&state, &access, &id, &scene, |mut map| {
         map.maps.retain(|m| m.id != item_id);
+        taken = crate::attach::take_off(&mut map, &item_id);
+        Ok(map)
+    })?;
+    Ok(Json(json!({ "attached": taken })))
+}
+
+#[derive(Deserialize)]
+pub struct Restore {
+    item: MapItem,
+    attached: Attached,
+}
+
+/// `POST /api/tables/{id}/scenes/{scene}/maps/restore`: a map picture brought back as it was,
+/// with what was attached to it (undoing taking it off).
+pub async fn restore(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene)): Path<(String, String)>,
+    Json(body): Json<Restore>,
+) -> Result<StatusCode> {
+    let access = access::runner(&state, &id, &credentials(&headers))?;
+    let item = body.item;
+    let fits = |n: f64, least: f64| (least..=MOST_BOARD).contains(&n);
+    if !(fits(item.x, 0.0)
+        && fits(item.y, 0.0)
+        && fits(item.width, 16.0)
+        && fits(item.height, 16.0))
+        || item.id.is_empty()
+        || item.id.len() > 40
+    {
+        return Err(AppError::bad("A map goes on the board"));
+    }
+    map_picture(&state.db(), &item.asset)?;
+    edit(&state, &access, &id, &scene, |mut map| {
+        if map.maps.iter().any(|m| m.id == item.id) {
+            return Ok(map);
+        }
+        if map.maps.len() >= MOST_MAP_ITEMS {
+            return Err(AppError::bad(format!(
+                "A board holds {MOST_MAP_ITEMS} maps"
+            )));
+        }
+        crate::attach::put_back(&mut map, &item.id, body.attached);
+        let too_many = map.walls.len() > 2000
+            || map.lights.len() > 100
+            || map.notes.len() > 200
+            || map.passages.len() > 50
+            || map.fog_areas.len() > 200
+            || map.drawings.len() > 300
+            || map.props.len() > 200;
+        if too_many {
+            return Err(AppError::bad("That's more than a board holds"));
+        }
+        map.maps.push(item);
+        Ok(grow(map))
+    })
+}
+
+#[derive(Deserialize)]
+pub struct Things {
+    things: Option<Vec<Named>>,
+}
+
+impl Things {
+    fn check(&self) -> Result<()> {
+        let named = self.things.as_deref().unwrap_or_default();
+        if named.len() > 3000
+            || named
+                .iter()
+                .any(|n| !crate::attach::KINDS.contains(&n.kind.as_str()) || n.id.len() > 40)
+        {
+            return Err(AppError::bad(
+                "Only walls, lights, notes, fog, drawings, props and passages attach to a map",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `POST .../maps/{item}/attach`: things attached to a map picture, those named or everything
+/// lying on it that isn't on another map.
+pub async fn attach(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene, item_id)): Path<(String, String, String)>,
+    Json(body): Json<Things>,
+) -> Result<StatusCode> {
+    let access = access::runner(&state, &id, &credentials(&headers))?;
+    body.check()?;
+    edit(&state, &access, &id, &scene, |mut map| {
+        let item = map
+            .maps
+            .iter()
+            .find(|m| m.id == item_id)
+            .cloned()
+            .ok_or_else(|| AppError::not_found("That map is gone"))?;
+        crate::attach::attach(&mut map, &item, body.things.as_deref());
+        Ok(map)
+    })
+}
+
+/// `POST .../maps/{item}/detach`: things taken off a map picture, those named or all of them.
+pub async fn detach(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, scene, item_id)): Path<(String, String, String)>,
+    Json(body): Json<Things>,
+) -> Result<StatusCode> {
+    let access = access::runner(&state, &id, &credentials(&headers))?;
+    body.check()?;
+    edit(&state, &access, &id, &scene, |mut map| {
+        crate::attach::detach(&mut map, &item_id, body.things.as_deref());
         Ok(map)
     })
 }
@@ -372,8 +491,13 @@ pub fn refit(db: &Connection, asset: &str) -> Result<()> {
         }
         let cell = f64::from(map.grid.size.max(1));
         let (w, h) = item_size(width, height, grid.as_ref(), cell);
+        let before = map.maps.clone();
         for item in map.maps.iter_mut().filter(|m| m.asset == asset) {
             (item.width, item.height) = (w, h);
+        }
+        // What is attached to them resizes along.
+        for (was, now) in before.iter().zip(map.maps.clone()) {
+            crate::attach::carry(&mut map, was, &now);
         }
         store(db, &scene, &grow(map))?;
     }
