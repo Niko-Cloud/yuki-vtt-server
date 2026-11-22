@@ -98,7 +98,7 @@ async fn lays_map_pictures_from_the_library_on_a_board() {
     let view: Value = shown(As::Dm).await;
     assert_eq!(
         view["scene"]["maps"],
-        json!([{ "id": item, "asset": crypt, "x": 630.0, "y": 0.0, "width": 1400.0, "height": 700.0, "locked": true }])
+        json!([{ "id": item, "asset": crypt, "x": 630.0, "y": 0.0, "width": 1400.0, "height": 700.0 }])
     );
     assert_eq!(
         (
@@ -107,8 +107,11 @@ async fn lays_map_pictures_from_the_library_on_a_board() {
         ),
         (Some(2030), Some(980))
     );
-    // Locked, it stays put until unlocked.
+    // It comes unlocked; locked, it stays put until unlocked.
     let one = format!("{maps}/{item}");
+    let lock = Some(json!({ "locked": true }));
+    let (status, _) = call(&app, As::Dm, "PATCH", &one, lock).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 0 }))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = call(

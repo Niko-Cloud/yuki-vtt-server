@@ -148,7 +148,8 @@ pub async fn add(
             width,
             height,
             rotation: None,
-            locked: Some(true),
+            // Unlocked, ready to drag into place (only Select moves a map).
+            locked: None,
         });
         Ok(grow(map))
     })?;
