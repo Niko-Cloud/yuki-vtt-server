@@ -20,7 +20,6 @@ pub mod limits;
 pub mod maps;
 pub mod passages;
 pub mod pictures;
-pub mod pieces;
 pub mod play;
 pub mod requests;
 pub mod rulers;
@@ -115,10 +114,6 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/preload", post(maps::preload))
         .route("/tables/{id}/prefabs", post(maps::add_prefab))
         .route("/tables/{id}/prefabs/{prefab}", axum::routing::delete(maps::remove_prefab))
-        .route(
-            "/tables/{id}/scenes/{scene}/image",
-            get(pictures::map).put(pictures::set_map).layer(DefaultBodyLimit::max(pictures::MAP_LIMIT + 1024)),
-        )
         .route("/tables/{id}/scenes/{scene}/tokens", post(maps::add_token))
         .route("/tables/{id}/scenes/{scene}/tokens/party", post(maps::place_party))
         .route("/tables/{id}/scenes/{scene}/tokens/{token}", patch(maps::change_token).delete(maps::remove_token))
@@ -128,10 +123,8 @@ pub fn app(state: AppState) -> Router {
         .route("/tables/{id}/scenes/{scene}/passages/{passage}", patch(passages::change).delete(passages::remove))
         .route("/tables/{id}/scenes/{scene}/tokens/{token}/through", post(passages::through))
         .route("/tables/{id}/scenes/{scene}/passages/{passage}/party", post(passages::party_through))
-        .route("/tables/{id}/scenes/{scene}/pieces", post(pieces::add))
         .route("/tables/{id}/scenes/{scene}/maps", post(boards::add))
         .route("/tables/{id}/scenes/{scene}/maps/{item}", patch(boards::change).delete(boards::remove))
-        .route("/tables/{id}/scenes/{scene}/pieces/{piece}", patch(pieces::change).delete(pieces::remove))
         .route("/tables/{id}/scenes/{scene}/props/{prop}", patch(maps::change_prop).delete(maps::remove_prop))
         .route("/tables/{id}/scenes/{scene}/drawings", post(maps::add_drawing).delete(maps::clear_drawings))
         .route("/tables/{id}/scenes/{scene}/drawings/{drawing}", axum::routing::delete(maps::remove_drawing).patch(maps::change_drawing))

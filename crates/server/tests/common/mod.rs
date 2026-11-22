@@ -230,3 +230,25 @@ pub async fn fetch(app: &Router, path: &str) -> (StatusCode, String, usize) {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, kind, bytes.len())
 }
+
+/// A map picture uploaded to the library and laid on a board at its corner: the picture's id.
+pub async fn laid_picture(
+    app: &Router,
+    t: &Table,
+    scene: &str,
+    data: &[u8],
+    (width, height): (u32, u32),
+) -> String {
+    let path = format!(
+        "/tables/{}/assets?kind=map&name=Cave&width={width}&height={height}",
+        t.id
+    );
+    let (status, made) = upload(app, As::Dm, "POST", &path, data).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    let asset = made["id"].as_str().unwrap().to_string();
+    let maps = format!("/tables/{}/scenes/{scene}/maps", t.id);
+    let item = serde_json::json!({ "asset": asset, "x": 0, "y": 0 });
+    let (status, body) = call(app, As::Dm, "POST", &maps, Some(item)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    asset
+}

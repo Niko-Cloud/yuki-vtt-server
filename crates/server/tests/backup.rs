@@ -38,14 +38,7 @@ async fn backs_up_a_table_and_brings_it_back_on_another_computer() {
     )
     .await;
     let scene = made["id"].as_str().unwrap();
-    upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("/tables/{}/scenes/{scene}/image?width=700&height=700", t.id),
-        PNG,
-    )
-    .await;
+    let cave = laid_picture(&app, &t, scene, PNG, (700, 700)).await;
     call(
         &app,
         As::Dm,
@@ -118,7 +111,7 @@ async fn backs_up_a_table_and_brings_it_back_on_another_computer() {
     let (status, kind, size) = fetch(
         &moved,
         &format!(
-            "/tables/{}/scenes/{scene}/image?v=1&pass={}",
+            "/tables/{}/assets/{cave}?v=1&pass={}",
             t.id,
             seat_pass(&moved, &t.id, &token).await
         ),

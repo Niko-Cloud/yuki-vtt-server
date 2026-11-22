@@ -158,19 +158,37 @@ async fn turns_maps_made_before_boards_into_boards_once() {
         }
     };
     let (cave, room) = (scene("Cave").await, scene("Room").await);
-    // The room is 3 by 2 squares, so it lies inside the cave as a piece.
-    for (map, size) in [
-        (&cave, "width=700&height=490"),
-        (&room, "width=210&height=140"),
-    ] {
-        let path = format!("/tables/{}/scenes/{map}/image?{size}", t.id);
-        let (status, _) = upload(&app, As::Dm, "PUT", &path, PNG).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+    // Kept the old way: each map's own picture in Library/Maps, and the room (3 by 2 squares)
+    // laid inside the cave as a piece.
+    {
+        let db = state.db();
+        let data_dir = &state.config.data_dir;
+        let image = json!({ "mime": "image/png", "version": 1 });
+        for (map, name, width, height) in [(&cave, "Cave", 700, 490), (&room, "Room", 210, 140)] {
+            let file = yuki_vtt_server::library::place_map(data_dir, name, "image/png");
+            yuki_vtt_server::library::put(data_dir, &file, PNG).unwrap();
+            let stored: String = db
+                .query_row("SELECT data FROM scenes WHERE id = ?1", [map], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let mut data: Value = serde_json::from_str(&stored).unwrap();
+            data["width"] = json!(width);
+            data["height"] = json!(height);
+            data["image"] = image.clone();
+            if map == &cave {
+                data["pieces"] = json!([{
+                    "id": "piece-1", "map": room, "image": image,
+                    "x": 3, "y": 2, "w": 3.0, "h": 2.0
+                }]);
+            }
+            db.execute(
+                "UPDATE scenes SET data = ?2, file = ?3 WHERE id = ?1",
+                rusqlite::params![map, data.to_string(), file],
+            )
+            .unwrap();
+        }
     }
-    let pieces = format!("/tables/{}/scenes/{cave}/pieces", t.id);
-    let add = json!({ "from": room, "x": 3, "y": 2 });
-    let (status, _) = call(&app, As::Dm, "POST", &pieces, Some(add)).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
     let convert =
         || yuki_vtt_server::boards::convert_old_maps(&state.config.data_dir, &state.db()).unwrap();
     assert_eq!(convert(), 3);
@@ -184,8 +202,8 @@ async fn turns_maps_made_before_boards_into_boards_once() {
     .await
     .1;
     let board = &shown["scene"];
-    assert_eq!(board["image"], Value::Null);
-    assert_eq!(board["pieces"], json!([]));
+    assert!(board.get("image").is_none());
+    assert!(board.get("pieces").is_none());
     // Its own picture where it was, and the piece where it lay, both from the library.
     let placed: Vec<(f64, f64, f64)> = board["maps"]
         .as_array()
@@ -221,4 +239,40 @@ async fn turns_maps_made_before_boards_into_boards_once() {
     assert_eq!(status, StatusCode::OK);
     // Already boards: nothing more to do.
     assert_eq!(convert(), 0);
+}
+
+#[tokio::test]
+async fn scales_map_pictures_with_the_boards_squares() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Board" })),
+    )
+    .await;
+    let board = made["id"].as_str().unwrap().to_string();
+    laid_picture(&app, &t, &board, PNG, (700, 490)).await;
+    let at = format!("/tables/{}/scenes/{board}", t.id);
+    // Squares half as big: 20 by 14 of them still, and the picture on them half its size.
+    let grid = json!({ "size": 35, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true });
+    let setup = json!({ "setup": { "width": 700, "height": 490, "grid": grid } });
+    let (status, body) = call(&app, As::Dm, "PATCH", &at, Some(setup)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let shown = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={board}", t.id),
+        None,
+    )
+    .await
+    .1;
+    let item = &shown["scene"]["maps"][0];
+    assert_eq!(
+        (item["width"].as_f64(), item["height"].as_f64()),
+        (Some(350.0), Some(245.0))
+    );
 }

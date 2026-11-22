@@ -692,22 +692,14 @@ async fn keeps_map_pictures_for_those_at_the_table() {
     let t = table(&app).await;
     let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
     let cave = scene(&app, &t, "Cave").await;
-    let path = format!("/tables/{}/scenes/{cave}/image", t.id);
-
-    let (status, _) = upload(
-        &app,
-        As::Seat(&token),
-        "PUT",
-        &format!("{path}?width=1000&height=700"),
-        PNG,
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, refused) = upload(
         &app,
         As::Dm,
-        "PUT",
-        &format!("{path}?width=1000&height=700"),
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=map&name=Cave&width=1000&height=700",
+            t.id
+        ),
         b"<svg></svg>",
     )
     .await;
@@ -718,28 +710,19 @@ async fn keeps_map_pictures_for_those_at_the_table() {
             Some("Use a PNG, JPEG, WebP, GIF or WebM picture")
         )
     );
-    let (status, _) = upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("{path}?width=1000&height=700"),
-        PNG,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let picture = laid_picture(&app, &t, &cave, PNG, (1000, 700)).await;
 
     let map = view(&app, As::Seat(&token), &t).await["scene"].clone();
-    assert_eq!(
-        (map["width"].as_u64(), map["image"]["mime"].as_str()),
-        (Some(1000), Some("image/png"))
-    );
+    assert_eq!(map["maps"][0]["asset"], picture.as_str());
+    assert!(map["width"].as_u64() >= Some(1000));
+    let path = format!("/tables/{}/assets/{picture}", t.id);
     let pass = seat_pass(&app, &t.id, &token).await;
     let (status, kind, size) = fetch(&app, &format!("{path}?v=1&pass={pass}")).await;
     assert_eq!(
         (status, kind.as_str(), size),
         (StatusCode::OK, "image/png", PNG.len())
     );
-    // The seat token itself no longer goes in an address.
+    // The seat token itself never goes in an address.
     let (status, _, _) = fetch(&app, &format!("{path}?v=1&seat={token}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = fetch(&app, &format!("{path}?v=1&pass=wrong")).await;
@@ -752,7 +735,6 @@ async fn sends_a_big_map_in_tiles_where_the_screen_looks() {
     let t = table(&app).await;
     let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
     let cave = scene(&app, &t, "Cave").await;
-    let path = format!("/tables/{}/scenes/{cave}/image", t.id);
     let picture = image::RgbaImage::from_fn(4200, 300, |x, _| {
         image::Rgba([(x % 256) as u8, 40, 90, 255])
     });
@@ -760,20 +742,26 @@ async fn sends_a_big_map_in_tiles_where_the_screen_looks() {
     image::DynamicImage::ImageRgba8(picture)
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .unwrap();
-    let (status, _) = upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("{path}?width=4200&height=300"),
-        &png,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let map = view(&app, As::Seat(&token), &t).await["scene"].clone();
+    let big = laid_picture(&app, &t, &cave, &png, (4200, 300)).await;
+    let small = laid_picture(&app, &t, &cave, PNG, (1000, 700)).await;
+    let assets = view(&app, As::Seat(&token), &t).await["assets"].clone();
+    let tiles_of = |id: &str| {
+        assets
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .unwrap()
+            .get("tiles")
+            .cloned()
+    };
     assert_eq!(
-        map["image"]["tiles"],
-        json!({ "width": 4200, "height": 300, "levels": 4 })
+        tiles_of(&big),
+        Some(json!({ "width": 4200, "height": 300, "levels": 4 }))
     );
+    // A small map picture goes whole, with no tiles.
+    assert!(tiles_of(&small).is_none_or(|tiles| tiles.is_null()));
+    let path = format!("/tables/{}/assets/{big}", t.id);
     let pass = seat_pass(&app, &t.id, &token).await;
     let (status, kind, _) = fetch(&app, &format!("{path}?v=1&pass={pass}&tile=0-4-0")).await;
     assert_eq!((status, kind.as_str()), (StatusCode::OK, "image/webp"));
@@ -781,109 +769,6 @@ async fn sends_a_big_map_in_tiles_where_the_screen_looks() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = fetch(&app, &format!("{path}?v=1&tile=0-0-0")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    // A small map goes whole, with no tiles.
-    let (status, _) = upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("{path}?width=1000&height=700"),
-        PNG,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let map = view(&app, As::Dm, &t).await["scene"].clone();
-    assert!(map["image"].get("tiles").is_none());
-}
-
-#[tokio::test]
-async fn lays_other_maps_on_a_board_as_pieces_lined_up_with_its_grid() {
-    let app = host();
-    let t = table(&app).await;
-    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
-    let board = scene(&app, &t, "Board").await;
-    let room = scene(&app, &t, "Room").await;
-    // The room: 1400 by 700 pixels on 70-pixel cells, so 20 by 10 cells.
-    let picture = format!("/tables/{}/scenes/{room}/image", t.id);
-    let (status, _) = upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("{picture}?width=1400&height=700"),
-        PNG,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let pieces = format!("/tables/{}/scenes/{board}/pieces", t.id);
-    let add = json!({ "from": room, "x": 15, "y": 2 });
-    let (refused, _) = call(&app, As::Seat(&token), "POST", &pieces, Some(add.clone())).await;
-    assert_ne!(refused, StatusCode::NO_CONTENT);
-    let (status, _) = call(&app, As::Dm, "POST", &pieces, Some(add)).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let shown_at = format!("/tables/{}?scene={board}", t.id);
-    let map = |who| {
-        let (app, at) = (app.clone(), shown_at.clone());
-        async move { call(&app, who, "GET", &at, None).await.1["scene"].clone() }
-    };
-    let shown = map(As::Dm).await;
-    let piece = shown["pieces"][0].clone();
-    assert_eq!(
-        (piece["w"].as_f64(), piece["h"].as_f64()),
-        (Some(20.0), Some(10.0))
-    );
-    assert_eq!(piece["image"]["mime"], "image/png");
-    // The blank board grew to hold it: 35 cells across, 12 down.
-    assert_eq!(
-        (shown["width"].as_u64(), shown["height"].as_u64()),
-        (Some(2450), Some(980))
-    );
-    // Turned a quarter, locked, and then it stays put.
-    let one = format!("{pieces}/{}", piece["id"].as_str().unwrap());
-    let (status, _) = call(
-        &app,
-        As::Dm,
-        "PATCH",
-        &one,
-        Some(json!({ "rotation": 90, "locked": true })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 0 }))).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, _) = call(
-        &app,
-        As::Dm,
-        "PATCH",
-        &one,
-        Some(json!({ "rotation": 45, "locked": false })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    // The room gets a new picture: the piece shows it, at its size.
-    let (status, _) = upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("{picture}?width=700&height=700"),
-        PNG,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let piece = map(As::Dm).await["pieces"][0].clone();
-    assert_eq!(
-        (piece["w"].as_f64(), piece["rotation"].as_u64()),
-        (Some(10.0), Some(90))
-    );
-    // The room goes: so does its piece.
-    let (status, _) = call(
-        &app,
-        As::Dm,
-        "DELETE",
-        &format!("/tables/{}/scenes/{room}", t.id),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(map(As::Dm).await["pieces"], json!([]));
 }
 
 #[tokio::test]
@@ -2119,14 +2004,7 @@ async fn copies_a_map_with_everything_on_it() {
     let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
     let cave = scene(&app, &t, "Cave").await;
     let at = format!("/tables/{}/scenes/{cave}", t.id);
-    upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("{at}/image?width=1000&height=700"),
-        PNG,
-    )
-    .await;
+    let picture = laid_picture(&app, &t, &cave, PNG, (1000, 700)).await;
     let ogre = json!({ "name": "Ogre", "x": 2, "y": 2 });
     call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(ogre)).await;
     let folder = json!({ "folder": "Act one" });
@@ -2150,20 +2028,29 @@ async fn copies_a_map_with_everything_on_it() {
     )
     .await;
     assert_eq!(shown["scene"]["tokens"][0]["name"], "Ogre");
+    // The same map picture from the library.
+    assert_eq!(shown["scene"]["maps"][0]["asset"], picture.as_str());
+
+    // The copy is its own board: deleting it leaves the first and its picture alone.
+    let gone = format!("/tables/{}/scenes/{copy}", t.id);
+    call(&app, As::Dm, "DELETE", &gone, None).await;
+    let (_, first) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={cave}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(first["scene"]["maps"][0]["asset"], picture.as_str());
     let (status, _) = call(
         &app,
         As::Dm,
         "GET",
-        &format!("/tables/{}/scenes/{copy}/image", t.id),
+        &format!("/tables/{}/assets/{picture}", t.id),
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-
-    // The copy is its own map: deleting it leaves the first and its picture alone.
-    let gone = format!("/tables/{}/scenes/{copy}", t.id);
-    call(&app, As::Dm, "DELETE", &gone, None).await;
-    let (status, _) = call(&app, As::Dm, "GET", &format!("{at}/image"), None).await;
     assert_eq!(status, StatusCode::OK);
 }
 

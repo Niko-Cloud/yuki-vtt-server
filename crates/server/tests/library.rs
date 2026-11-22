@@ -419,22 +419,17 @@ async fn keeps_each_picture_in_its_own_readable_folder() {
     call(&app, As::Dm, "DELETE", &at, None).await;
     assert!(!library.join("Tokens/Ogre King").exists());
 
-    // A map's picture lives under Maps, follows a rename and a copy, and goes with its map.
+    // A map picture lives under Maps; a board copied or deleted leaves it in the library.
     let scene = cave(&app, &t).await;
-    let image = format!("/tables/{}/scenes/{scene}/image?width=700&height=700", t.id);
-    upload(&app, As::Dm, "PUT", &image, PNG).await;
-    assert!(library.join("Maps/Cave/map.png").is_file());
-    let renamed = json!({ "name": "Goblin cave" });
+    laid_picture(&app, &t, &scene, PNG, (700, 700)).await;
+    let kept = || std::fs::read_dir(library.join("Maps/Cave")).map_or(0, |files| files.count());
+    assert_eq!(kept(), 1);
     let map_at = format!("/tables/{}/scenes/{scene}", t.id);
-    call(&app, As::Dm, "PATCH", &map_at, Some(renamed)).await;
-    assert!(library.join("Maps/Goblin cave/map.png").is_file());
     let (_, copy) = call(&app, As::Dm, "POST", &format!("{map_at}/copy"), None).await;
-    assert!(library.join("Maps/Goblin cave (copy)/map.png").is_file());
     let copy_at = format!("/tables/{}/scenes/{}", t.id, copy["id"].as_str().unwrap());
     call(&app, As::Dm, "DELETE", &copy_at, None).await;
-    assert!(!library.join("Maps/Goblin cave (copy)").exists());
-    call(&app, As::Dm, "DELETE", &format!("/tables/{}", t.id), None).await;
-    assert!(!library.join("Maps/Goblin cave").exists());
+    call(&app, As::Dm, "DELETE", &map_at, None).await;
+    assert_eq!(kept(), 1);
 }
 
 async fn pass_for(app: &Router, table: &str) -> String {
@@ -691,15 +686,8 @@ async fn sends_a_small_first_look_at_a_map() {
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .unwrap();
     let scene = cave(&app, &t).await;
-    let at = format!("/tables/{}/scenes/{scene}/image", t.id);
-    upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("{at}?width=1400&height=1000"),
-        &png,
-    )
-    .await;
+    let picture = laid_picture(&app, &t, &scene, &png, (1400, 1000)).await;
+    let at = format!("/tables/{}/assets/{picture}", t.id);
     let (_, given) = call(
         &app,
         As::Dm,
@@ -724,8 +712,7 @@ async fn tells_every_screen_to_fetch_a_maps_picture_before_it_is_shown() {
     let t = table(&app).await;
     let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
     let scene = cave(&app, &t).await;
-    let image = format!("/tables/{}/scenes/{scene}/image?width=700&height=700", t.id);
-    upload(&app, As::Dm, "PUT", &image, PNG).await;
+    let picture = laid_picture(&app, &t, &scene, PNG, (700, 700)).await;
     let mut heard = state.events.listen(&t.id);
     let at = format!("/tables/{}/scenes/{scene}/preload", t.id);
     let (status, _) = call(&app, As::Seat(&token), "POST", &at, None).await;
@@ -735,27 +722,22 @@ async fn tells_every_screen_to_fetch_a_maps_picture_before_it_is_shown() {
     let message: Value = serde_json::from_str(&heard.recv().await.unwrap()).unwrap();
     assert_eq!(message["type"], "preload");
     assert_eq!(message["preload"]["sceneId"], scene.as_str());
-    assert_eq!(message["preload"]["mime"], "image/png");
+    assert_eq!(
+        message["preload"]["pictures"],
+        json!([{ "id": picture, "mime": "image/png" }])
+    );
 }
 
 #[tokio::test]
-async fn takes_map_pictures_copied_in_by_hand_but_not_a_maps_own() {
+async fn takes_map_pictures_copied_in_by_hand_once() {
     use yuki_vtt_server::library;
     let data = tempfile::tempdir().unwrap();
     let state = state_in(data.path());
     let app = app(state.clone());
     let t = table(&app).await;
-    // A map with its own picture, kept in Library/Maps by the map.
+    // A map picture uploaded and laid on a board, kept in Library/Maps.
     let scene = cave(&app, &t).await;
-    let (status, _) = upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("/tables/{}/scenes/{scene}/image?width=100&height=100", t.id),
-        REAL_PNG,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    laid_picture(&app, &t, &scene, REAL_PNG, (100, 100)).await;
     // And one copied in by hand.
     let maps = data.path().join("Library/Maps");
     std::fs::create_dir_all(maps.join("Crypt")).unwrap();
@@ -763,6 +745,15 @@ async fn takes_map_pictures_copied_in_by_hand_but_not_a_maps_own() {
 
     let report = library::rescan(&state);
     assert_eq!(report.added, ["Crypt"]);
-    let found = named(&view(&app, As::Dm, &t).await["assets"]);
-    assert_eq!(found, [("Crypt".into(), "map".into())]);
+    let mut found = named(&view(&app, As::Dm, &t).await["assets"]);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("Cave".into(), "map".into()),
+            ("Crypt".into(), "map".into())
+        ]
+    );
+    // Scanned again: nothing new.
+    assert!(library::rescan(&state).added.is_empty());
 }

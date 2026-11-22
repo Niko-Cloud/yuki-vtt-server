@@ -125,52 +125,9 @@ fn library_path(db: &rusqlite::Connection, data_dir: &FilePath, asset_id: &str) 
         .ok_or_else(|| AppError::not_found("That picture is gone"))
 }
 
-/// The file of a map's picture, inside the library folder, if it has one.
-pub fn map_file(
-    db: &rusqlite::Connection,
-    table_id: &str,
-    scene_id: &str,
-) -> Result<Option<String>> {
-    Ok(db
-        .query_row(
-            "SELECT file FROM scenes WHERE table_id = ?1 AND id = ?2",
-            [table_id, scene_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten())
-}
-
 /// Brings pictures kept the old way (by id, beside their table or in `library/`) into the
 /// readable library folder, and notes the size of any picture that lacks one. Runs at start;
 /// a picture already in place is left alone.
-/// Notes the tiles of maps whose picture is big, kept before maps had them. Runs at start.
-pub fn note_map_tiles(data_dir: &FilePath, db: &rusqlite::Connection) -> Result<()> {
-    let found: Vec<(String, String, String)> = db
-        .prepare("SELECT table_id, id, file FROM scenes WHERE file IS NOT NULL")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (table_id, scene_id, file) in found {
-        let Ok(mut map) = maps::load(db, &table_id, &scene_id) else {
-            continue;
-        };
-        let Some(image) = map.image.as_mut().filter(|image| image.tiles.is_none()) else {
-            continue;
-        };
-        let Some(size) =
-            library::resolve(data_dir, &file).and_then(|path| imagesize::size(path).ok())
-        else {
-            continue;
-        };
-        let (width, height) = (size.width as u32, size.height as u32);
-        if let Some(tiles) = crate::tiles::tiles_for(width, height, &image.mime) {
-            image.tiles = Some(tiles);
-            maps::store(db, &scene_id, &map)?;
-        }
-    }
-    Ok(())
-}
-
 pub fn gather_library(data_dir: &FilePath, db: &rusqlite::Connection) -> rusqlite::Result<()> {
     let mut rows =
         db.prepare("SELECT id, table_id, kind, name, mime, size FROM assets WHERE file IS NULL")?;
@@ -325,47 +282,6 @@ async fn send_served(
     send(path, &mime)
 }
 
-/// A map was deleted: its picture goes too.
-pub fn forget_map(state: &AppState, file: Option<String>) {
-    if let Some(file) = file {
-        library::drop_file(&state.config.data_dir, &file);
-    }
-}
-
-/// A map was copied: the copy gets its own copy of the picture, under its own name.
-pub fn copy_map(state: &AppState, file: Option<&str>, name: &str) -> Result<Option<String>> {
-    let Some(file) = file else {
-        return Ok(None);
-    };
-    let data_dir = &state.config.data_dir;
-    let from = library::resolve(data_dir, file)
-        .ok_or_else(|| AppError::not_found("This map's picture couldn't be read"))?;
-    let data = std::fs::read(&from)
-        .map_err(|_| AppError::not_found("This map's picture couldn't be read"))?;
-    let mime = picture_type(&data, MAP_LIMIT, VIDEO_MAP_LIMIT)?;
-    let copy = library::place_map(data_dir, name, mime);
-    library::put(data_dir, &copy, &data).map_err(not_saved)?;
-    Ok(Some(copy))
-}
-
-/// A renamed map's picture moves to a folder of its new name.
-pub fn rename_map(
-    state: &AppState,
-    db: &rusqlite::Connection,
-    scene_id: &str,
-    file: &str,
-    name: &str,
-    mime: &str,
-) -> Result<()> {
-    if let Some(moved) = library::rehome(&state.config.data_dir, file, "map", name, mime) {
-        db.execute(
-            "UPDATE scenes SET file = ?2 WHERE id = ?1",
-            params![scene_id, moved],
-        )?;
-    }
-    Ok(())
-}
-
 /// A table was deleted: its map pictures go. The library keeps what was uploaded there.
 pub fn forget_table(state: &AppState, files: Vec<String>) {
     for file in files {
@@ -374,122 +290,12 @@ pub fn forget_table(state: &AppState, files: Vec<String>) {
 }
 
 #[derive(Deserialize)]
-pub struct Measured {
-    width: u32,
-    height: u32,
-}
-
-/// `PUT /api/tables/{id}/scenes/{scene}/image`: a new picture for a map, sized as the browser
-/// measured it.
-pub async fn set_map(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((id, scene)): Path<(String, String)>,
-    Query(size): Query<Measured>,
-    data: Bytes,
-) -> Result<StatusCode> {
-    access::runner(&state, &id, &Credentials::from(&headers, None))?;
-    let mime = picture_type(&data, MAP_LIMIT, VIDEO_MAP_LIMIT)?;
-    if !(100..=16_384).contains(&size.width) || !(100..=16_384).contains(&size.height) {
-        return Err(AppError::bad("The picture must be 100 to 16384 pixels"));
-    }
-    {
-        let db = state.db();
-        maps::load(&db, &id, &scene)?;
-        let name: String = db.query_row(
-            "SELECT name FROM scenes WHERE table_id = ?1 AND id = ?2",
-            [&id, &scene],
-            |row| row.get(0),
-        )?;
-        // A new picture of the same type replaces the old in its folder; another type gets
-        // its own file, and the old one goes.
-        let had = map_file(&db, &id, &scene)?;
-        let data_dir = &state.config.data_dir;
-        let file = match &had {
-            Some(file) if file.ends_with(&format!(".{}", library::extension(mime))) => file.clone(),
-            _ => library::place_map(data_dir, &name, mime),
-        };
-        library::put(data_dir, &file, &data).map_err(not_saved)?;
-        if let Some(old) = had.filter(|old| *old != file) {
-            library::drop_file(data_dir, &old);
-        }
-        crate::served::forget(data_dir, &scene);
-        db.execute(
-            "UPDATE scenes SET file = ?3 WHERE table_id = ?1 AND id = ?2",
-            params![id, scene, file],
-        )?;
-        maps::set_picture(&db, &id, &scene, mime, size.width, size.height)?;
-        // A big map's tiles are cut now, beside the requests, so the first screen to look
-        // doesn't wait for them all.
-        if let (Some(tiles), Some(path)) = (
-            crate::tiles::tiles_for(size.width, size.height, mime),
-            library::resolve(data_dir, &file),
-        ) {
-            let (data_dir, scene) = (data_dir.clone(), scene.clone());
-            tokio::task::spawn_blocking(move || {
-                crate::tiles::tile(&data_dir, &scene, &path, &tiles, "0-0-0");
-            });
-        }
-    }
-    state.events.changed(&id);
-    Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(Deserialize)]
 pub struct Seen {
     pass: Option<String>,
-    // A map's small first look instead of the whole picture.
+    // A map picture's small first look instead of the whole of it.
     preview: Option<String>,
     // One tile of a big map ("level-column-row").
     tile: Option<String>,
-}
-
-/// `GET /api/tables/{id}/scenes/{scene}/image`: the map's picture, for anyone at the table.
-pub async fn map(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((id, scene)): Path<(String, String)>,
-    Query(seen): Query<Seen>,
-) -> Result<Response> {
-    access::at_table(&state, &id, &Credentials::from(&headers, seen.pass))?;
-    let (picture, file) = {
-        let db = state.db();
-        let picture = maps::load(&db, &id, &scene)?
-            .image
-            .ok_or_else(|| AppError::not_found("This map has no picture"))?;
-        (picture, map_file(&db, &id, &scene)?)
-    };
-    let path = file
-        .and_then(|file| library::resolve(&state.config.data_dir, &file))
-        .ok_or_else(|| AppError::not_found("This map has no picture"))?;
-    if let Some(key) = seen.tile {
-        let tiles = picture
-            .tiles
-            .ok_or_else(|| AppError::not_found("This map has no tiles"))?;
-        let data_dir = state.config.data_dir.clone();
-        let cut = tokio::task::spawn_blocking(move || {
-            crate::tiles::tile(&data_dir, &scene, &path, &tiles, &key)
-        })
-        .await
-        .ok()
-        .flatten()
-        .ok_or_else(|| AppError::not_found("No such tile"))?;
-        return send(cut, "image/webp");
-    }
-    if seen.preview.is_some() {
-        let data_dir = state.config.data_dir.clone();
-        let (id, mime, full) = (scene.clone(), picture.mime.clone(), path.clone());
-        let small = tokio::task::spawn_blocking(move || {
-            crate::served::preview(&data_dir, &id, &full, &mime)
-        })
-        .await
-        .ok()
-        .flatten();
-        if let Some(small) = small {
-            return send(small, "image/webp");
-        }
-    }
-    send_served(&state, scene, path, "map", picture.mime).await
 }
 
 #[derive(Deserialize)]
@@ -707,6 +513,20 @@ pub async fn picture(
         .flatten()
         .ok_or_else(|| AppError::not_found("No such tile"))?;
         return send(cut, "image/webp");
+    }
+    // A map picture's small first look, on the way to the whole of it.
+    if seen.preview.is_some() && kind == "map" {
+        let data_dir = state.config.data_dir.clone();
+        let (id, picture_mime, full) = (asset.clone(), mime.clone(), path.clone());
+        let small = tokio::task::spawn_blocking(move || {
+            crate::served::preview(&data_dir, &id, &full, &picture_mime)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(small) = small {
+            return send(small, "image/webp");
+        }
     }
     send_served(&state, asset, path, &kind, mime).await
 }

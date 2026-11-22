@@ -69,9 +69,6 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
         .map_err(|error| format!("Couldn't open the tables: {error}"))?;
     crate::pictures::gather_library(&options.data, &connection)
         .map_err(|error| format!("Couldn't gather the picture library: {error}"))?;
-    if let Err(error) = crate::pictures::note_map_tiles(&options.data, &connection) {
-        tracing::warn!("couldn't note big maps' tiles: {}", error.message);
-    }
     match crate::boards::convert_old_maps(&options.data, &connection) {
         Ok(0) => {}
         Ok(done) => tracing::info!("{done} maps turned into boards"),

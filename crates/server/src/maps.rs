@@ -27,15 +27,6 @@ const TOKEN_COLORS: [&str; 6] = [
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Image {
-    pub mime: String,
-    pub version: i64,
-    /// A big picture's tiles, sent only where a screen looks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tiles: Option<crate::tiles::Tiles>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Token {
     pub id: String,
@@ -412,10 +403,6 @@ pub struct TableMap {
     pub width: u32,
     pub height: u32,
     pub grid: MapGrid,
-    pub image: Option<Image>,
-    /// Other maps' pictures laid on this one, as pieces of a bigger board.
-    #[serde(default)]
-    pub pieces: Vec<crate::pieces::Piece>,
     /// Stairs, ladders and portals.
     #[serde(default)]
     pub passages: Vec<crate::passages::Passage>,
@@ -704,8 +691,6 @@ fn blank() -> TableMap {
             diagonals: None,
             style: None,
         },
-        image: None,
-        pieces: Vec::new(),
         passages: Vec::new(),
         maps: Vec::new(),
         tokens: vec![],
@@ -1098,12 +1083,6 @@ pub async fn update(
         if changed == 0 {
             return Err(AppError::not_found("That map is gone"));
         }
-        // The map's folder in the library takes the new name too.
-        if let Some(file) = crate::pictures::map_file(&db, &id, &scene)?
-            && let Some(picture) = load(&db, &id, &scene)?.image
-        {
-            crate::pictures::rename_map(&state, &db, &scene, &file, &name, &picture.mime)?;
-        }
     }
     if let Some(folder) = &body.folder {
         let folder = match folder {
@@ -1125,14 +1104,30 @@ pub async fn update(
     };
     setup.check()?;
     edit(&state, &access, &id, &scene, |map| {
-        Ok(TableMap {
+        // Bigger or smaller squares: the map pictures scale with them, to stay lined up.
+        let scale = setup.grid.size as f64 / map.grid.size as f64;
+        let maps = map
+            .maps
+            .iter()
+            .map(|item| crate::boards::MapItem {
+                x: item.x * scale,
+                y: item.y * scale,
+                width: item.width * scale,
+                height: item.height * scale,
+                ..item.clone()
+            })
+            .collect();
+        let mut resized = TableMap {
             width: setup.width,
             height: setup.height,
             grid: setup.grid,
             weather: setup.weather.unwrap_or_else(|| map.weather.clone()),
+            maps,
             ..map
-        }
-        .keep_all())
+        };
+        (resized.width, resized.height) =
+            crate::boards::grown(resized.width, resized.height, &resized.maps);
+        Ok(resized.keep_all())
     })
 }
 
@@ -1143,9 +1138,8 @@ pub async fn remove(
     Path((id, scene)): Path<(String, String)>,
 ) -> Result<StatusCode> {
     access::runner(&state, &id, &credentials(&headers))?;
-    let file = {
+    {
         let db = state.db();
-        let file = crate::pictures::map_file(&db, &id, &scene)?;
         if db.execute(
             "DELETE FROM scenes WHERE table_id = ?1 AND id = ?2",
             [&id, &scene],
@@ -1153,9 +1147,7 @@ pub async fn remove(
         {
             return Err(AppError::not_found("That map is gone"));
         }
-        // Pieces of other maps that showed its picture go with it, and passages there lead
-        // nowhere.
-        crate::pieces::follow_source(&db, &id, &scene)?;
+        // Passages there lead nowhere.
         crate::passages::forget_map(&db, &id, &scene)?;
         if active_scene(&db, &id)?.as_deref() == Some(scene.as_str()) {
             let next = list(&db, &id)?
@@ -1166,10 +1158,7 @@ pub async fn remove(
                 params![id, next],
             )?;
         }
-        file
-    };
-    crate::pictures::forget_map(&state, file);
-    crate::served::forget(&state.config.data_dir, &scene);
+    }
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1202,11 +1191,10 @@ pub async fn copy(
             return Err(AppError::bad(format!("A table keeps {MOST_SCENES} maps")));
         }
         let name = format!("{} (copy)", name.chars().take(53).collect::<String>());
-        let had = crate::pictures::map_file(&db, &id, &scene)?;
-        let file = crate::pictures::copy_map(&state, had.as_deref(), &name)?;
+        // Its map pictures are the library's, so the copy shows the same ones.
         db.execute(
-            "INSERT INTO scenes (id, table_id, name, folder, position, data, created_at, file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![copy_id, id, name, folder, count, data, ids::now(), file],
+            "INSERT INTO scenes (id, table_id, name, folder, position, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![copy_id, id, name, folder, count, data, ids::now()],
         )?;
         (name, folder)
     };
@@ -1218,21 +1206,44 @@ pub async fn copy(
     Ok(Json(made))
 }
 
-/// `POST /api/tables/{id}/scenes/{scene}/preload`: every screen fetches this map's picture now,
-/// before the DM shows it.
+/// `POST /api/tables/{id}/scenes/{scene}/preload`: every screen fetches this board's map
+/// pictures now, before the DM shows it.
 pub async fn preload(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, scene)): Path<(String, String)>,
 ) -> Result<StatusCode> {
     access::runner(&state, &id, &credentials(&headers))?;
-    let image = load(&state.db(), &id, &scene)?.image;
-    if let Some(image) = image {
-        let mut preload = json!({ "sceneId": scene, "version": image.version, "mime": image.mime });
-        if let Some(tiles) = image.tiles {
-            preload["tiles"] = json!(tiles);
+    let pictures = {
+        let db = state.db();
+        let mut seen = std::collections::HashSet::new();
+        let mut pictures = Vec::new();
+        for item in load(&db, &id, &scene)?.maps {
+            if !seen.insert(item.asset.clone()) {
+                continue;
+            }
+            let found: Option<(String, i64, i64)> = db
+                .query_row(
+                    "SELECT mime, width, height FROM assets WHERE id = ?1",
+                    [&item.asset],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((mime, width, height)) = found else {
+                continue;
+            };
+            let mut picture = json!({ "id": item.asset, "mime": mime });
+            if let Some(tiles) = crate::tiles::tiles_for(width as u32, height as u32, &mime) {
+                picture["tiles"] = json!(tiles);
+            }
+            pictures.push(picture);
         }
-        state.events.preload(&id, preload);
+        pictures
+    };
+    if !pictures.is_empty() {
+        state
+            .events
+            .preload(&id, json!({ "sceneId": scene, "pictures": pictures }));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1263,34 +1274,6 @@ pub async fn show(
 }
 
 /// The map got a new picture: its size is the picture's, and tokens stay on it.
-pub fn set_picture(
-    db: &Connection,
-    table_id: &str,
-    scene_id: &str,
-    mime: &str,
-    width: u32,
-    height: u32,
-) -> Result<()> {
-    let current = load(db, table_id, scene_id)?;
-    let image = Some(Image {
-        mime: mime.into(),
-        version: ids::now(),
-        tiles: crate::tiles::tiles_for(width, height, mime),
-    });
-    store(
-        db,
-        scene_id,
-        &TableMap {
-            width,
-            height,
-            image,
-            ..current
-        }
-        .keep_all(),
-    )?;
-    crate::pieces::follow_source(db, table_id, scene_id)
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewToken {
