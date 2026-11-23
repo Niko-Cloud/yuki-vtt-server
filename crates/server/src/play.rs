@@ -19,8 +19,10 @@ use yuki_vtt_rules::changes::{self, Change};
 use yuki_vtt_rules::encounter::{self, Combatant, Effect, Encounter, Hp};
 use yuki_vtt_rules::{Advantage, parse_dice, roll_detail};
 
-// What each screen gets of the log; older entries are dropped from the table.
-const LOG_SHOWN: usize = 100;
+// What each screen gets of the log with the table: the newest few, so every download stays
+// small. Older entries come a page at a time as the log is scrolled; past LOG_KEPT they go.
+const LOG_SHOWN: usize = 30;
+const LOG_PAGE: usize = 30;
 const LOG_KEPT: i64 = 300;
 
 fn d20() -> i32 {
@@ -37,9 +39,23 @@ struct Seat {
     snapshot: Snapshot,
 }
 
+/// Each seat at the table, with its character's darkvision (none when it has none).
+pub fn darkvision_by_seat(
+    db: &Connection,
+    table_id: &str,
+) -> Result<std::collections::HashMap<String, Option<f64>>> {
+    Ok(seats(db, table_id)?
+        .iter()
+        .map(|seat| {
+            let member = seat.snapshot.member(&seat.id, &seat.permissions);
+            (seat.id.clone(), member["darkvision"].as_f64())
+        })
+        .collect())
+}
+
 fn seats(db: &Connection, table_id: &str) -> Result<Vec<Seat>> {
     let mut rows = db.prepare(
-        "SELECT id, permissions, snapshot FROM seats WHERE table_id = ?1 ORDER BY created_at",
+        "SELECT id, permissions, snapshot FROM seats WHERE table_id = ?1 AND kind != 'screen' ORDER BY created_at",
     )?;
     let found = rows
         .query_map([table_id], |row| {
@@ -55,7 +71,9 @@ fn seats(db: &Connection, table_id: &str) -> Result<Vec<Seat>> {
         .map(|(id, permissions, snapshot)| {
             Ok(Seat {
                 id,
-                permissions: serde_json::from_str(&permissions)?,
+                permissions: serde_json::to_value(crate::access::upgraded(
+                    &serde_json::from_str::<Vec<String>>(&permissions)?,
+                ))?,
                 snapshot: serde_json::from_str(&snapshot)?,
             })
         })
@@ -66,6 +84,8 @@ fn seats(db: &Connection, table_id: &str) -> Result<Vec<Seat>> {
 pub struct ViewQuery {
     // The map the DM is looking at; players always see the one the DM shows.
     scene: Option<String>,
+    // The version of the table this screen already has: then only what changed comes back.
+    base: Option<String>,
 }
 
 /// `GET /api/tables/{id}`: the table as this person sees it.
@@ -77,14 +97,15 @@ pub async fn view(
 ) -> Result<Json<Value>> {
     let access = access::at_table(&state, &id, &credentials(&headers))?;
     let db = state.db();
-    let (name, edition, encounter, handout, active_scene): (
+    let (name, edition, encounter, handout, active_scene, prefabs): (
         String,
         String,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
     ) = db.query_row(
-        "SELECT name, edition, encounter, handout, active_scene_id FROM tables WHERE id = ?1",
+        "SELECT name, edition, encounter, handout, active_scene_id, prefabs FROM tables WHERE id = ?1",
         [&id],
         |row| {
             Ok((
@@ -93,14 +114,38 @@ pub async fn view(
                 row.get(2)?,
                 row.get(3)?,
                 row.get(4)?,
+                row.get(5)?,
             ))
         },
     )?;
+    let timer: Option<String> =
+        db.query_row("SELECT timer FROM tables WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })?;
+    let xcard_at: Option<i64> =
+        db.query_row("SELECT xcard_at FROM tables WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })?;
+    let music: Option<String> =
+        db.query_row("SELECT music FROM tables WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })?;
+    let background: Option<String> = db.query_row(
+        "SELECT background FROM tables WHERE id = ?1",
+        [&id],
+        |row| row.get(0),
+    )?;
+    let (loot, journal): (Option<String>, Option<String>) = db.query_row(
+        "SELECT loot, journal FROM tables WHERE id = ?1",
+        [&id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     let seated = seats(&db, &id)?;
+    // Players see the map the DM shows, or the one a passage took them to.
     let looking = if access.runs() {
-        query.scene.or(active_scene.clone())
+        query.scene.clone().or(active_scene.clone())
     } else {
-        active_scene.clone()
+        crate::passages::scene_for(&db, &access, &id)?
     };
     let mut shown = match &looking {
         Some(scene) => maps::scene(&db, &id, scene)?,
@@ -110,16 +155,48 @@ pub async fn view(
     if let Some(scene) = shown.as_mut()
         && !access.runs()
     {
-        crate::fog::for_players(scene);
+        let looking = crate::sight::Looking {
+            seat_ids: &access.seat_ids,
+            shared: crate::fog::shared_sight(&db, &id)?,
+            darkvision: seated
+                .iter()
+                .map(|seat| {
+                    let member = seat.snapshot.member(&seat.id, &seat.permissions);
+                    (seat.id.clone(), member["darkvision"].as_f64())
+                })
+                .collect(),
+        };
+        crate::fog::for_players(scene, &looking);
     }
     let characters: Vec<Value> = seated
         .iter()
         .filter(|seat| access.seat_ids.contains(&seat.id))
         .map(|seat| json!({ "seatId": seat.id, "characterId": seat.snapshot.character_id }))
         .collect();
-    Ok(Json(json!({
-        "party": { "id": id, "name": name, "edition": edition, "sharedSight": crate::fog::shared_sight(&db, &id)? },
-        "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "characters": characters },
+    // The screens watching this table, for the DM to see and remove.
+    let screens: Vec<Value> = if access.runs() {
+        let mut rows = db.prepare(
+            "SELECT id FROM seats WHERE table_id = ?1 AND kind = 'screen' ORDER BY created_at",
+        )?;
+        let ids = rows
+            .query_map([&id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|seat_id| json!({ "seatId": seat_id, "name": "Screen" }))
+            .collect()
+    } else {
+        vec![]
+    };
+    let (log, log_more) = log_page(&db, &id, &access, None, LOG_SHOWN)?;
+    let view = json!({
+        "party": {
+            "id": id,
+            "name": name,
+            "edition": edition,
+            "sharedSight": crate::fog::shared_sight(&db, &id)?,
+            "dragSight": crate::fog::drag_sight(&db, &id)?,
+        },
+        "you": { "role": access.role, "name": access.name, "seatIds": access.seat_ids, "permissions": access.permissions, "screen": access.screen, "characters": characters },
         // Player characters' health is everyone's to see, as at a real table.
         "members": seated.iter().map(|seat| seat.snapshot.member(&seat.id, &seat.permissions)).collect::<Vec<_>>(),
         // Players get the fight without the DM's numbers.
@@ -130,20 +207,64 @@ pub async fn view(
         "scene": shown,
         "scenes": if access.runs() { maps::list(&db, &id)? } else { vec![] },
         "activeSceneId": active_scene,
-        "assets": pictures::list(&db, &id, access.runs())?,
+        // Whoever runs the table sees where passages took players: seat to map.
+        "away": if access.runs() { Some(crate::passages::away(&db, &id)?) } else { None },
+        "assets": pictures::list(&db, &id, access.runs(), shown.as_ref())?,
         "handout": handout.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
-        "log": log_for(&db, &id, &access)?,
+        // The track the DM plays to everyone, looping; null when the table is quiet.
+        "music": music.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // The picture behind the map for everyone; null when there is none.
+        "background": background.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // The countdown the DM started, for everyone to watch.
+        "timer": timer.map(|text| serde_json::from_str::<Value>(&text)).transpose()?,
+        // The X-card is up: every screen shows it until whoever runs the table goes on.
+        "xcard": xcard_at.is_some(),
+        // The party's shared loot list and session journal; everyone at the table reads them.
+        "loot": loot.map(|text| serde_json::from_str::<Value>(&text)).transpose()?.unwrap_or_else(|| json!([])),
+        "journal": journal.map(|text| serde_json::from_str::<Value>(&text)).transpose()?.unwrap_or_else(|| json!([])),
+        // Saved groups are the DM's alone; players never receive them.
+        "prefabs": if access.runs() { maps::parse_prefabs(prefabs) } else { vec![] },
+        // The TV screens watching this table; the DM's alone.
+        "screens": screens,
+        "log": log,
+        "logMore": log_more,
         // Waiting to join: for whoever runs the table, to let in from the map room.
         "requests": if access.runs() { crate::requests::waiting(&db, &id)? } else { vec![] },
-    })))
+    });
+    // Who the copy is for: what they may see decides what they get.
+    let mut seats = access.seat_ids.clone();
+    seats.sort();
+    let viewer = format!(
+        "{id}|{:?}|{}|{}|{}",
+        access.role,
+        seats.join(","),
+        access.screen,
+        query.scene.as_deref().unwrap_or("")
+    );
+    drop(db);
+    Ok(Json(state.versions.answer(
+        &viewer,
+        query.base.as_deref(),
+        view,
+    )))
 }
 
-// The newest entries this person may see, oldest first. A player sees what is for everyone,
-// and private rolls meant for their seat.
-fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value>> {
-    let mut rows = db.prepare("SELECT id, kind, author, data, visible_to, created_at FROM log WHERE table_id = ?1 ORDER BY seq DESC")?;
+// A page of the entries this person may see, oldest first, ending just before `before` (or at
+// the newest), and whether older ones are left. A player sees what is for everyone, and
+// private rolls meant for their seat.
+fn log_page(
+    db: &Connection,
+    table_id: &str,
+    access: &Access,
+    before: Option<i64>,
+    page: usize,
+) -> Result<(Vec<Value>, bool)> {
+    let mut rows = db.prepare(
+        "SELECT id, kind, author, data, visible_to, created_at FROM log
+         WHERE table_id = ?1 AND seq < ?2 ORDER BY seq DESC",
+    )?;
     let entries = rows
-        .query_map([table_id], |row| {
+        .query_map(params![table_id, before.unwrap_or(i64::MAX)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -155,6 +276,7 @@ fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut shown = Vec::new();
+    let mut more = false;
     for (entry, kind, author, data, visible_to, at) in entries {
         let visible_to: Vec<String> = serde_json::from_str(&visible_to)?;
         let mine = visible_to.is_empty()
@@ -162,6 +284,10 @@ fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value
             || visible_to.iter().any(|v| access.seat_ids.contains(v));
         if !mine {
             continue;
+        }
+        if shown.len() == page {
+            more = true;
+            break;
         }
         shown.push(json!({
             "id": entry,
@@ -171,12 +297,39 @@ fn log_for(db: &Connection, table_id: &str, access: &Access) -> Result<Vec<Value
             "hidden": !visible_to.is_empty(),
             "at": ids::iso(at),
         }));
-        if shown.len() == LOG_SHOWN {
-            break;
-        }
     }
     shown.reverse();
-    Ok(shown)
+    Ok((shown, more))
+}
+
+#[derive(Deserialize)]
+pub struct Before {
+    before: Option<String>,
+}
+
+/// `GET /api/tables/{id}/log?before=`: older log entries, a page at a time, as the log is
+/// scrolled back.
+pub async fn older_log(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<Before>,
+) -> Result<Json<Value>> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let before = query
+        .before
+        .ok_or_else(|| AppError::bad("Say which entry to read back from"))?;
+    let db = state.db();
+    let seq: i64 = db
+        .query_row(
+            "SELECT seq FROM log WHERE table_id = ?1 AND id = ?2",
+            [&id, &before],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("That log entry is gone"))?;
+    let (entries, more) = log_page(&db, &id, &access, Some(seq), LOG_PAGE)?;
+    Ok(Json(json!({ "entries": entries, "more": more })))
 }
 
 /// Who a whisper is for, and who may read it. The DM whispers to one seat; a player only to
@@ -335,9 +488,19 @@ pub enum Post {
         #[serde(rename = "seatId")]
         seat_id: Option<String>,
     },
+    /// A framed line the DM speaks as a character: a name, an optional portrait, shown big to all.
+    Speech {
+        name: String,
+        text: String,
+        #[serde(rename = "assetId")]
+        asset_id: Option<String>,
+        #[serde(rename = "seatId")]
+        seat_id: Option<String>,
+    },
 }
 
-/// `POST /api/tables/{id}/log`: a chat line, or a roll made on the device.
+/// `POST /api/tables/{id}/log`: a chat line, a roll made on the device, or a framed line the DM
+/// speaks as a character.
 pub async fn post(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -387,9 +550,392 @@ pub async fn post(
                 let data = json!({ "label": text(&label, 120, "A roll's name")?, "expression": expression, "total": total, "detail": detail, "advantage": advantage, "critical": critical, "by": "device" });
                 log(&db, &id, "roll", &author, data, &[])?;
             }
+            Post::Speech {
+                name,
+                text: line,
+                asset_id,
+                seat_id,
+            } => {
+                if !access.runs() {
+                    return Err(AppError::forbidden("Only the DM speaks as a character"));
+                }
+                let author = author(&db, &access, &id, seat_id.as_deref())?;
+                let mut data = json!({ "name": text(&name, 60, "A name")?, "text": text(&line, 500, "A message")? });
+                if let Some(asset) = asset_id {
+                    if asset.is_empty() || asset.len() > 40 {
+                        return Err(AppError::bad("A portrait is a picture from the table"));
+                    }
+                    data["assetId"] = json!(asset);
+                }
+                log(&db, &id, "speech", &author, data, &[])?;
+            }
         }
     }
     state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/tables/{id}/xcard`: anyone presses the X-card; everyone sees it at once, and no
+/// name is shown. It stays up on every screen until whoever runs the table goes on; the log
+/// keeps an anonymous line.
+pub async fn xcard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    access::at_table(&state, &id, &credentials(&headers))?;
+    {
+        let db = state.db();
+        db.execute(
+            "UPDATE tables SET xcard_at = ?2 WHERE id = ?1",
+            params![&id, ids::now()],
+        )?;
+        log(&db, &id, "xcard", "", json!({ "text": "X-card" }), &[])?;
+    }
+    state.events.xcard(&id);
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/xcard`: whoever runs the table goes on after an X-card; it comes off
+/// every screen.
+pub async fn resume_after_xcard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    state
+        .db()
+        .execute("UPDATE tables SET xcard_at = NULL WHERE id = ?1", [&id])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimerRequest {
+    seconds: i64,
+}
+
+/// `PUT /api/tables/{id}/timer`: a countdown everyone watches, ending this many seconds from now.
+pub async fn set_timer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<TimerRequest>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    if !(1..=3600).contains(&body.seconds) {
+        return Err(AppError::bad(
+            "A countdown runs from one second to one hour",
+        ));
+    }
+    let timer = json!({ "endsAt": ids::now() + body.seconds * 1000 }).to_string();
+    state
+        .db()
+        .execute("UPDATE tables SET timer = ?2 WHERE id = ?1", [&id, &timer])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/timer`: stops the countdown and takes it off everyone's screen.
+pub async fn clear_timer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    state
+        .db()
+        .execute("UPDATE tables SET timer = NULL WHERE id = ?1", [&id])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The party's loot list, checked and tidied: a name, a count from 1 to 999, an optional note.
+fn loot_items(value: &Value) -> Result<Vec<Value>> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| AppError::bad("Loot is a list of items"))?;
+    if items.len() > 200 {
+        return Err(AppError::bad("That is too much loot for one list"));
+    }
+    items
+        .iter()
+        .map(|item| {
+            let id = item["id"].as_str().unwrap_or("");
+            let name = item["name"].as_str().unwrap_or("").trim();
+            let quantity = item["quantity"].as_i64().unwrap_or(1);
+            let note = item["note"].as_str().unwrap_or("").trim();
+            if id.is_empty()
+                || id.len() > 40
+                || name.is_empty()
+                || name.chars().count() > 80
+                || !(1..=999).contains(&quantity)
+                || note.chars().count() > 200
+            {
+                return Err(AppError::bad(
+                    "A loot item needs a name and a count from 1 to 999",
+                ));
+            }
+            let mut tidy = json!({ "id": id, "name": name, "quantity": quantity, "note": note });
+            if let Some(item) = book_item(&item["item"])? {
+                tidy["item"] = item;
+            }
+            keep_author(item, &mut tidy)?;
+            Ok(tidy)
+        })
+        .collect()
+}
+
+/// The book entry a find was picked from, as `{ pack, key }`, when it has one.
+fn book_item(value: &Value) -> Result<Option<Value>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let pack = value["pack"].as_str().unwrap_or("");
+    let key = value["key"].as_str().unwrap_or("");
+    if pack.is_empty() || key.is_empty() || pack.len() > 100 || key.len() > 200 {
+        return Err(AppError::bad("That isn't an item from the books"));
+    }
+    Ok(Some(json!({ "pack": pack, "key": key })))
+}
+
+/// Who added a find or an entry (a player's seat and name), kept as it was sent back.
+fn keep_author(from: &Value, into: &mut Value) -> Result<()> {
+    for (field, longest) in [("by", 40), ("author", 60)] {
+        if let Some(text) = from[field].as_str() {
+            if text.chars().count() > longest {
+                return Err(AppError::bad("That name is too long"));
+            }
+            into[field] = json!(text);
+        }
+    }
+    Ok(())
+}
+
+/// The session journal, checked and tidied: a title, optional text, and the moment it was written.
+fn journal_entries(value: &Value) -> Result<Vec<Value>> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| AppError::bad("The journal is a list of entries"))?;
+    if entries.len() > 200 {
+        return Err(AppError::bad(
+            "That is too many journal entries for one table",
+        ));
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let id = entry["id"].as_str().unwrap_or("");
+            let title = entry["title"].as_str().unwrap_or("").trim();
+            let text = entry["text"].as_str().unwrap_or("").trim();
+            let at = entry["at"]
+                .as_i64()
+                .ok_or_else(|| AppError::bad("A journal entry needs a time"))?;
+            if id.is_empty()
+                || id.len() > 40
+                || title.is_empty()
+                || title.chars().count() > 100
+                || text.chars().count() > 2000
+            {
+                return Err(AppError::bad("A journal entry needs a title"));
+            }
+            let mut tidy = json!({ "id": id, "title": title, "text": text, "at": at });
+            keep_author(entry, &mut tidy)?;
+            Ok(tidy)
+        })
+        .collect()
+}
+
+/// `PUT /api/tables/{id}/loot`: the party's whole shared loot list; only the DM writes it.
+pub async fn set_loot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    let items = loot_items(&body["items"])?;
+    let text = serde_json::to_string(&items)?;
+    state
+        .db()
+        .execute("UPDATE tables SET loot = ?2 WHERE id = ?1", [&id, &text])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /api/tables/{id}/journal`: the whole session journal, newest first; only the DM writes it.
+pub async fn set_journal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode> {
+    access::runner(&state, &id, &credentials(&headers))?;
+    let entries = journal_entries(&body["entries"])?;
+    let text = serde_json::to_string(&entries)?;
+    state
+        .db()
+        .execute("UPDATE tables SET journal = ?2 WHERE id = ?1", [&id, &text])?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The loot list or the journal as kept, in the order kept.
+fn list_of(state: &AppState, id: &str, list: &str) -> Result<Vec<Value>> {
+    let text: Option<String> = state.db().query_row(
+        &format!("SELECT {list} FROM tables WHERE id = ?1"),
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(text
+        .map(|text| serde_json::from_str::<Vec<Value>>(&text))
+        .transpose()?
+        .unwrap_or_default())
+}
+
+fn save_list(state: &AppState, id: &str, list: &str, items: &[Value]) -> Result<()> {
+    let text = serde_json::to_string(items)?;
+    state.db().execute(
+        &format!("UPDATE tables SET {list} = ?2 WHERE id = ?1"),
+        [id, &text],
+    )?;
+    state.events.changed(id);
+    Ok(())
+}
+
+/// A player's additions carry their seat and name; the DM's carry neither. A screen only watches.
+fn added_by(access: &Access, into: &mut Value) -> Result<()> {
+    if access.screen {
+        return Err(AppError::forbidden("A screen only watches"));
+    }
+    if !access.runs()
+        && let Some(seat) = access.seat_ids.first()
+    {
+        into["by"] = json!(seat);
+        into["author"] = json!(access.name);
+    }
+    Ok(())
+}
+
+/// Whoever runs the table takes anything away; a player only what they added.
+fn take_away(access: &Access, items: &mut Vec<Value>, what: &str) -> Result<()> {
+    let at = items
+        .iter()
+        .position(|item| item["id"] == what)
+        .ok_or_else(|| AppError::not_found("That is gone already"))?;
+    let own = items[at]["by"]
+        .as_str()
+        .is_some_and(|by| access.seat_ids.iter().any(|seat| seat == by));
+    if !access.runs() && !own {
+        return Err(AppError::forbidden(
+            "Only the DM takes away what someone else added",
+        ));
+    }
+    items.remove(at);
+    Ok(())
+}
+
+/// `POST /api/tables/{id}/loot/items`: anyone at the table adds a find, under their name.
+pub async fn add_loot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let mut loot = list_of(&state, &id, "loot")?;
+    let mut item = json!({
+        "id": ids::id(),
+        "name": body["name"],
+        "quantity": body["quantity"].as_i64().unwrap_or(1),
+        "note": body["note"].as_str().unwrap_or(""),
+        "item": body["item"],
+    });
+    added_by(&access, &mut item)?;
+    loot.push(item);
+    let loot = loot_items(&json!(loot))?;
+    save_list(&state, &id, "loot", &loot)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/loot/items/{item}`: a player's own find, or any for the DM.
+pub async fn remove_loot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, item)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let mut loot = list_of(&state, &id, "loot")?;
+    take_away(&access, &mut loot, &item)?;
+    save_list(&state, &id, "loot", &loot)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/tables/{id}/loot/items/{item}/take`: someone with a character takes one of a find
+/// for their own bag; the last one leaves the list. Answers with what was taken.
+pub async fn take_loot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, item)): Path<(String, String)>,
+) -> Result<Json<Value>> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    if access.screen || access.seat_ids.is_empty() {
+        return Err(AppError::forbidden(
+            "Only someone with a character takes things",
+        ));
+    }
+    let mut loot = list_of(&state, &id, "loot")?;
+    let at = loot
+        .iter()
+        .position(|found| found["id"] == item.as_str())
+        .ok_or_else(|| AppError::not_found("Someone took that already"))?;
+    let mut taken = loot[at].clone();
+    let quantity = taken["quantity"].as_i64().unwrap_or(1);
+    if quantity > 1 {
+        loot[at]["quantity"] = json!(quantity - 1);
+    } else {
+        loot.remove(at);
+    }
+    save_list(&state, &id, "loot", &loot)?;
+    taken["quantity"] = json!(1);
+    Ok(Json(taken))
+}
+
+/// `POST /api/tables/{id}/journal/entries`: anyone at the table writes an entry, newest first.
+pub async fn add_journal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let journal = list_of(&state, &id, "journal")?;
+    let mut entry = json!({
+        "id": ids::id(),
+        "title": body["title"],
+        "text": body["text"].as_str().unwrap_or(""),
+        "at": ids::now(),
+    });
+    added_by(&access, &mut entry)?;
+    let all: Vec<Value> = std::iter::once(entry).chain(journal).collect();
+    let journal = journal_entries(&json!(all))?;
+    save_list(&state, &id, "journal", &journal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/tables/{id}/journal/entries/{entry}`: a player's own entry, or any for the DM.
+pub async fn remove_journal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, entry)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    let mut journal = list_of(&state, &id, "journal")?;
+    take_away(&access, &mut journal, &entry)?;
+    save_list(&state, &id, "journal", &journal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -544,6 +1090,7 @@ pub async fn start(
                 ac: None,
                 health: None,
                 effects: vec![],
+                moved: None,
             })
             .collect();
         let started = encounter::start(fighters, d20);
@@ -622,6 +1169,7 @@ pub async fn add(
             ac: body.ac.map(ac_ok).transpose()?,
             health: None,
             effects: vec![],
+            moved: None,
         };
         save(
             db,
@@ -660,7 +1208,7 @@ pub struct CombatantChange {
 }
 
 // Something sent, even null: Some(None) for null, None when it was left out.
-fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     sent: D,
 ) -> std::result::Result<Option<Option<T>>, D::Error> {
     Option::<T>::deserialize(sent).map(Some)

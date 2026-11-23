@@ -1,19 +1,20 @@
 //! A table in one file, to keep somewhere safe or move to another computer: its maps, tokens,
 //! seats, log and pictures. The file is a .yukitable (a gzipped tar): `table.json` with every
-//! row, and the table's pictures beside it.
+//! row, and the table's pictures beside it: its map pictures, and the library pictures it
+//! uploaded or uses.
 
-use crate::db;
+use crate::{db, library};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use rusqlite::types::{Value as Sql, ValueRef};
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use serde_json::{Map, Number, Value, json};
 use std::io::Read;
 use std::path::Path;
 
 const FORMAT: u64 = 1;
-// A table's pictures are at most 200 of 8 MB; a file bigger than this isn't one of ours.
+// A table's pictures are at most 200 of 25 MB; a file bigger than this isn't one of ours.
 const BIGGEST: u64 = 2 * 1024 * 1024 * 1024;
 // The table's rows, without pictures: far more than any real table's log and maps.
 const TABLE_LIMIT: u64 = 256 * 1024 * 1024;
@@ -37,6 +38,14 @@ const PARTS: [(&str, &[&str]); 6] = [
             "updated_at",
             "ask_to_join",
             "shared_sight",
+            "drag_sight",
+            "guests",
+            "prefabs",
+            "timer",
+            "loot",
+            "journal",
+            "music",
+            "background",
         ],
     ),
     (
@@ -55,7 +64,15 @@ const PARTS: [(&str, &[&str]); 6] = [
     ),
     (
         "scenes",
-        &["id", "table_id", "name", "position", "data", "created_at"],
+        &[
+            "id",
+            "table_id",
+            "name",
+            "position",
+            "data",
+            "created_at",
+            "folder",
+        ],
     ),
     // What players explored of each map with fog; after the scenes it belongs to.
     (
@@ -73,6 +90,11 @@ const PARTS: [(&str, &[&str]); 6] = [
             "width",
             "height",
             "created_at",
+            "folder",
+            "tags",
+            "favorite",
+            "size",
+            "grid",
         ],
     ),
     (
@@ -106,8 +128,9 @@ fn as_json(value: ValueRef<'_>) -> Value {
 }
 
 // Columns kept as numbers; every other one is text.
-const NUMBERS: [&str; 9] = [
+const NUMBERS: [&str; 12] = [
     "locked",
+    "guests",
     "ask_to_join",
     "shared_sight",
     "created_at",
@@ -116,6 +139,8 @@ const NUMBERS: [&str; 9] = [
     "width",
     "height",
     "seq",
+    "favorite",
+    "size",
 ];
 
 // Text that must read back as `T`.
@@ -133,11 +158,18 @@ fn fits(column: &str, value: &Value) -> bool {
     match column {
         c if NUMBERS.contains(&c) => value.is_i64() || value.is_boolean(),
         "snapshot" => holds::<Snapshot>(value),
-        "permissions" | "visible_to" => holds::<Vec<String>>(value),
+        "permissions" | "visible_to" | "tags" => holds::<Vec<String>>(value),
         "banned" => holds::<Vec<Value>>(value),
         "encounter" => value.is_null() || holds::<yuki_vtt_rules::encounter::Encounter>(value),
+        "grid" => value.is_null() || holds::<crate::boards::PictureGrid>(value),
         "handout" => value.is_null() || holds::<Value>(value),
-        "active_scene_id" | "player_id" => value.is_null() || value.is_string(),
+        "music" => value.is_null() || holds::<Value>(value),
+        "background" => value.is_null() || holds::<Value>(value),
+        "timer" => value.is_null() || holds::<Value>(value),
+        "drag_sight" => value.is_null() || holds::<crate::fog::DragSight>(value),
+        "loot" | "journal" => value.is_null() || value.is_array(),
+        "prefabs" => value.is_null() || holds::<Vec<crate::maps::Prefab>>(value),
+        "active_scene_id" | "player_id" | "folder" => value.is_null() || value.is_string(),
         _ => value.is_string(),
     }
 }
@@ -182,10 +214,25 @@ fn read_rows(
     columns: &[&str],
     table_id: &str,
 ) -> rusqlite::Result<Vec<Value>> {
-    let key = if part == "tables" { "id" } else { "table_id" };
     let order = if part == "log" { " ORDER BY seq" } else { "" };
+    let only = match part {
+        "tables" => "id = ?1",
+        // Screens are transient displays with no character: a restored table opens them again.
+        "seats" => "table_id = ?1 AND kind != 'screen'",
+        // The library is the host's: a table takes what it uploaded, and what its maps,
+        // prefabs, handout, music or background name. Ids are long and random, so finding one
+        // in the stored JSON is finding a use of it.
+        "assets" => {
+            "table_id = ?1
+             OR EXISTS (SELECT 1 FROM scenes s WHERE s.table_id = ?1 AND instr(s.data, assets.id) > 0)
+             OR EXISTS (SELECT 1 FROM tables t WHERE t.id = ?1 AND instr(
+                 coalesce(t.prefabs, '') || coalesce(t.handout, '') || coalesce(t.music, '')
+                 || coalesce(t.background, ''), assets.id) > 0)"
+        }
+        _ => "table_id = ?1",
+    };
     let sql = format!(
-        "SELECT {} FROM {part} WHERE {key} = ?1{order}",
+        "SELECT {} FROM {part} WHERE {only}{order}",
         columns.join(", ")
     );
     let mut statement = db.prepare(&sql)?;
@@ -200,16 +247,22 @@ fn read_rows(
         .collect()
 }
 
+// Every row of one table, part by part.
+fn table_rows(db: &Connection, table_id: &str) -> Result<Map<String, Value>, String> {
+    let mut rows = Map::new();
+    for (part, columns) in PARTS {
+        let found = read_rows(db, part, columns, table_id)
+            .map_err(|e| format!("Couldn't read the table: {e}"))?;
+        rows.insert(part.to_string(), Value::Array(found));
+    }
+    Ok(rows)
+}
+
 /// Writes one table to `out`. Works while the host is on.
 pub fn export(data_dir: &Path, table_id: &str, out: &Path) -> Result<(), String> {
     let db = db::open(&data_dir.join("tables.db"))
         .map_err(|e| format!("Couldn't open the tables: {e}"))?;
-    let mut rows = Map::new();
-    for (part, columns) in PARTS {
-        let found = read_rows(&db, part, columns, table_id)
-            .map_err(|e| format!("Couldn't read the table: {e}"))?;
-        rows.insert(part.to_string(), Value::Array(found));
-    }
+    let rows = table_rows(&db, table_id)?;
     if rows["tables"].as_array().is_none_or(Vec::is_empty) {
         return Err("That table isn't on this computer".into());
     }
@@ -225,10 +278,11 @@ pub fn export(data_dir: &Path, table_id: &str, out: &Path) -> Result<(), String>
     archive
         .append_data(&mut header, "table.json", text.as_slice())
         .map_err(problem("Couldn't write the backup"))?;
-    let pictures = data_dir.join("pictures").join(table_id);
-    if pictures.is_dir() {
+    let files = picture_files(&db, data_dir, table_id, &rows["assets"])
+        .map_err(|e| format!("Couldn't read the pictures: {e}"))?;
+    for (name, path) in files {
         archive
-            .append_dir_all("pictures", &pictures)
+            .append_path_with_name(&path, format!("pictures/{name}"))
             .map_err(problem("Couldn't add the pictures"))?;
     }
     archive
@@ -236,6 +290,63 @@ pub fn export(data_dir: &Path, table_id: &str, out: &Path) -> Result<(), String>
         .and_then(|gz| gz.finish())
         .map_err(problem("Couldn't finish the backup"))?;
     Ok(())
+}
+
+// The files a backup carries, named by id inside it: the table's map pictures, and the library
+// pictures in its rows. A host that hasn't started since an update may still keep them the old
+// way, by id.
+fn picture_files(
+    db: &Connection,
+    data_dir: &Path,
+    table_id: &str,
+    assets: &Value,
+) -> rusqlite::Result<Vec<(String, std::path::PathBuf)>> {
+    let in_library = |file: Option<String>| file.and_then(|f| library::resolve(data_dir, &f));
+    let mut files = Vec::new();
+    let mut rows = db.prepare("SELECT id, file FROM scenes WHERE table_id = ?1")?;
+    let maps = rows
+        .query_map([table_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<(String, Option<String>)>>>()?;
+    for (scene, file) in maps {
+        let name = format!("{scene}.map");
+        if !safe_picture(&name) {
+            continue;
+        }
+        let found = in_library(file)
+            .into_iter()
+            .chain([data_dir.join("pictures").join(table_id).join(&name)])
+            .find(|path| path.is_file());
+        if let Some(path) = found {
+            files.push((name, path));
+        }
+    }
+    for row in assets.as_array().into_iter().flatten() {
+        let id = row["id"].as_str().unwrap_or_default();
+        let name = format!("{id}.pic");
+        let from = row["table_id"].as_str().unwrap_or_default();
+        if !safe_picture(&name) {
+            continue;
+        }
+        let file: Option<String> = db
+            .query_row("SELECT file FROM assets WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .flatten();
+        let found = in_library(file)
+            .into_iter()
+            .chain([
+                data_dir.join("library").join(&name),
+                data_dir.join("pictures").join(from).join(&name),
+            ])
+            .find(|path| path.is_file());
+        if let Some(path) = found {
+            files.push((name, path));
+        }
+    }
+    Ok(files)
 }
 
 // Picture files are named by the host: letters, digits and dashes, then .map or .pic.
@@ -278,7 +389,8 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
         let limit = if path == "table.json" {
             TABLE_LIMIT
         } else {
-            crate::pictures::MAP_LIMIT as u64
+            // A picture file may be a map (up to 25 MB) or a library track or clip (up to 10 MB).
+            crate::pictures::VIDEO_MAP_LIMIT as u64
         };
         let mut bytes = Vec::new();
         (&mut entry)
@@ -327,17 +439,28 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
     if here > 0 && !replace {
         return Err(format!("{name} is already on this computer"));
     }
+    // A table brought back over itself: its old map pictures make way for the backup's.
+    let replaced: Vec<String> = {
+        let mut rows = tx
+            .prepare("SELECT file FROM scenes WHERE table_id = ?1 AND file IS NOT NULL")
+            .map_err(|e| e.to_string())?;
+        rows.query_map([&id], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(|e| e.to_string())?
+    };
     tx.execute("DELETE FROM tables WHERE id = ?1", [&id])
         .map_err(|e| e.to_string())?;
     for (part, columns) in PARTS {
         for row in rows[part].as_array().into_iter().flatten() {
-            // Every row belongs to this table, whatever the file says.
+            // Every row belongs to this table, whatever the file says. Library pictures are the
+            // host's, and may have been uploaded at another table.
             let owner = if part == "tables" {
                 &row["id"]
             } else {
                 &row["table_id"]
             };
-            if owner.as_str() != Some(id.as_str()) {
+            if part != "assets" && owner.as_str() != Some(id.as_str()) {
                 continue;
             }
             // Only the columns the row has: an older backup lacks newer ones, which keep their
@@ -355,8 +478,14 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // A library picture already on this host is kept as it is.
+            let verb = if part == "assets" {
+                "INSERT OR IGNORE"
+            } else {
+                "INSERT"
+            };
             let sql = format!(
-                "INSERT INTO {part} ({}) VALUES ({marks})",
+                "{verb} INTO {part} ({}) VALUES ({marks})",
                 present.join(", ")
             );
             tx.execute(&sql, params_from_iter(values))
@@ -370,14 +499,148 @@ pub fn restore(data_dir: &Path, file: &Path, replace: bool) -> Result<(String, S
         [&id],
     )
     .map_err(|e| e.to_string())?;
-    let folder = data_dir.join("pictures").join(&id);
-    let _ = std::fs::remove_dir_all(&folder);
-    std::fs::create_dir_all(&folder).map_err(problem("Couldn't make the pictures folder"))?;
+    // Each picture gets its place in the library folder now; the files are written once the
+    // rows are in, so a running host's scan of the folder never takes them for new ones.
+    for file in &replaced {
+        library::drop_file(data_dir, file);
+    }
+    let mut writes: Vec<(String, Vec<u8>)> = Vec::new();
     for (file, bytes) in pictures {
-        std::fs::write(folder.join(file), bytes).map_err(problem("Couldn't save a picture"))?;
+        let Some((stem, kind)) = file.rsplit_once('.') else {
+            continue;
+        };
+        let placed: Option<String> = if kind == "map" {
+            let row: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT name, data FROM scenes WHERE table_id = ?1 AND id = ?2",
+                    [&id, stem],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            row.and_then(|(name, data)| {
+                let mime = serde_json::from_str::<Value>(&data).ok()?["image"]["mime"]
+                    .as_str()?
+                    .to_string();
+                let file = library::place_map(data_dir, &name, &mime);
+                tx.execute("UPDATE scenes SET file = ?2 WHERE id = ?1", [stem, &file])
+                    .ok()?;
+                Some(file)
+            })
+        } else {
+            // A picture this host has already keeps its own file.
+            let row: Option<(String, String, String)> = tx
+                .query_row(
+                    "SELECT kind, name, mime FROM assets WHERE id = ?1 AND file IS NULL",
+                    [stem],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            row.and_then(|(kind, name, mime)| {
+                let file = library::place(data_dir, &kind, &name, &mime, None);
+                tx.execute("UPDATE assets SET file = ?2 WHERE id = ?1", [stem, &file])
+                    .ok()?;
+                Some(file)
+            })
+        };
+        if let Some(placed) = placed {
+            // The folder is made now, so the next picture of the same name gets " (2)".
+            if let Some(path) = library::resolve(data_dir, &placed) {
+                let _ = std::fs::create_dir_all(path.parent().expect("a picture's folder"));
+            }
+            writes.push((placed, bytes));
+        }
     }
     tx.commit().map_err(|e| e.to_string())?;
+    for (file, bytes) in writes {
+        library::put(data_dir, &file, &bytes).map_err(problem("Couldn't save a picture"))?;
+    }
     Ok((id, name))
+}
+
+// How many copies of each table are kept; the oldest go first.
+const KEPT_COPIES: usize = 10;
+// How often the host looks for tables that changed since their last copy.
+const EVERY: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Where the host keeps its own copies of each table.
+pub fn copies_folder(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("backups")
+}
+
+/// Keeps a fresh copy of every table that changed since its last copy, in
+/// `backups/<table>/<date and time>.yukitable`, with the newest ten of each. Says which
+/// tables it copied.
+pub fn copy_changed(data_dir: &Path) -> Result<Vec<String>, String> {
+    use sha2::{Digest, Sha256};
+    let db = db::open(&data_dir.join("tables.db"))
+        .map_err(|e| format!("Couldn't open the tables: {e}"))?;
+    let ids: Vec<String> = db
+        .prepare("SELECT id FROM tables")
+        .and_then(|mut rows| rows.query_map([], |row| row.get(0))?.collect())
+        .map_err(|e| e.to_string())?;
+    let mut copied = Vec::new();
+    for id in ids {
+        if !safe_picture(&format!("{id}.map")) {
+            continue;
+        }
+        let folder = copies_folder(data_dir).join(&id);
+        // A table changed when its rows did: map edits don't move the table's own time.
+        let rows = table_rows(&db, &id)?;
+        let print = hex::encode(Sha256::digest(Value::Object(rows).to_string()));
+        let last = folder.join("last-copied");
+        if std::fs::read_to_string(&last).is_ok_and(|was| was == print) {
+            continue;
+        }
+        std::fs::create_dir_all(&folder).map_err(problem("Couldn't make the backups folder"))?;
+        // Named by when, so they sort oldest first; never over an earlier copy made in the
+        // same instant.
+        let named = || {
+            folder.join(
+                chrono::Local::now()
+                    .format("%Y-%m-%d %H-%M-%S%.6f.yukitable")
+                    .to_string(),
+            )
+        };
+        let mut file = named();
+        while file.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            file = named();
+        }
+        export(data_dir, &id, &file)?;
+        std::fs::write(&last, &print).map_err(problem("Couldn't note the backup"))?;
+        let mut kept: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)
+            .map_err(problem("Couldn't read the backups folder"))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "yukitable"))
+            .collect();
+        kept.sort();
+        for old in kept.iter().rev().skip(KEPT_COPIES) {
+            let _ = std::fs::remove_file(old);
+        }
+        copied.push(id);
+    }
+    Ok(copied)
+}
+
+/// Copies changed tables a minute after the host starts, then every twenty minutes.
+pub fn schedule(data_dir: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        loop {
+            let folder = data_dir.clone();
+            match tokio::task::spawn_blocking(move || copy_changed(&folder)).await {
+                Ok(Ok(copied)) if !copied.is_empty() => {
+                    tracing::info!("kept a fresh copy of {} table(s)", copied.len());
+                }
+                Ok(Err(error)) => tracing::warn!("couldn't keep copies of the tables: {error}"),
+                _ => {}
+            }
+            tokio::time::sleep(EVERY).await;
+        }
+    })
 }
 
 #[cfg(test)]

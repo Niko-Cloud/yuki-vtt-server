@@ -25,12 +25,13 @@ struct Invited {
     dm_name: String,
     locked: bool,
     ask_to_join: bool,
+    guests: bool,
     banned: Vec<crate::tables::Banned>,
 }
 
 fn invited(db: &Connection, invite: &str) -> Result<Invited> {
     db.query_row(
-        "SELECT id, name, edition, dm_name, locked, banned, ask_to_join FROM tables WHERE invite_token = ?1",
+        "SELECT id, name, edition, dm_name, locked, banned, ask_to_join, guests FROM tables WHERE invite_token = ?1",
         [invite],
         |row| {
             Ok((
@@ -41,12 +42,13 @@ fn invited(db: &Connection, invite: &str) -> Result<Invited> {
                 row.get(4)?,
                 row.get::<_, String>(5)?,
                 row.get(6)?,
+                row.get(7)?,
             ))
         },
     )
     .optional()?
     .map(
-        |(id, name, edition, dm_name, locked, banned, ask_to_join)| -> Result<Invited> {
+        |(id, name, edition, dm_name, locked, banned, ask_to_join, guests)| -> Result<Invited> {
             Ok(Invited {
                 id,
                 name,
@@ -54,6 +56,7 @@ fn invited(db: &Connection, invite: &str) -> Result<Invited> {
                 dm_name,
                 locked,
                 ask_to_join,
+                guests,
                 banned: crate::tables::bans(&banned)?,
             })
         },
@@ -77,7 +80,7 @@ pub async fn invite(
         |row| row.get(0),
     )?;
     Ok(Json(json!({
-        "party": { "id": table.id, "name": table.name, "edition": table.edition, "dm": table.dm_name, "locked": table.locked },
+        "party": { "id": table.id, "name": table.name, "edition": table.edition, "dm": table.dm_name, "locked": table.locked, "guests": table.guests },
         "seats": seats,
         "full": seats >= MOST_SEATS,
     })))
@@ -101,6 +104,11 @@ pub async fn join(
         if table.locked {
             return Err(AppError::forbidden(
                 "The DM locked this table: ask them to open it",
+            ));
+        }
+        if !table.guests && snapshot.player_id.is_none() {
+            return Err(AppError::forbidden(
+                "This table takes players signed in with Discord: sign in, then use the invite again",
             ));
         }
         if snapshot
@@ -137,6 +145,45 @@ pub async fn join(
         db.execute(
             "INSERT INTO seats (id, table_id, token_hash, player_id, snapshot, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
             params![seat_id, table.id, ids::hash(&token), snapshot.player_id, serde_json::to_string(&snapshot)?, now],
+        )?;
+        (table.id, seat_id, token)
+    };
+    state.events.changed(&table_id);
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "partyId": table_id, "seatId": seat_id, "seatToken": token })),
+    ))
+}
+
+/// `POST /api/join/{invite}/screen`: a TV screen sits down with no character, a tool-less map
+/// that follows the DM. Only this browser gets the seat token, to leave again.
+pub async fn join_screen(
+    State(state): State<AppState>,
+    Path(invite): Path<String>,
+) -> Result<(StatusCode, Json<Value>)> {
+    let (table_id, seat_id, token) = {
+        let db = state.db();
+        let table = invited(&db, &invite)?;
+        if table.locked {
+            return Err(AppError::forbidden(
+                "The DM locked this table: ask them to open it",
+            ));
+        }
+        let seats: i64 = db.query_row(
+            "SELECT COUNT(*) FROM seats WHERE table_id = ?1",
+            [&table.id],
+            |row| row.get(0),
+        )?;
+        if seats >= MOST_SEATS {
+            return Err(AppError::forbidden(format!(
+                "The party is full ({MOST_SEATS} seats)"
+            )));
+        }
+        let (seat_id, token, now) = (ids::id(), ids::secret(), ids::now());
+        // A screen keeps no sheet: just a name for the DM's list, and no rights on the map.
+        db.execute(
+            "INSERT INTO seats (id, table_id, token_hash, player_id, snapshot, kind, permissions, created_at, updated_at) VALUES (?1, ?2, ?3, NULL, ?4, 'screen', '[]', ?5, ?5)",
+            params![seat_id, table.id, ids::hash(&token), r#"{"summary":{"name":"Screen"}}"#, now],
         )?;
         (table.id, seat_id, token)
     };

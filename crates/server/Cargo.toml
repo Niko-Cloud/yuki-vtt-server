@@ -9,7 +9,7 @@ license.workspace = true
 yuki-vtt-rules = { path = "../rules" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "limit"] }
+tower-http = { version = "0.6", features = ["cors", "limit", "compression-br", "compression-gzip"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -23,7 +23,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+imagesize = "0.13"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+opener = { version = "0.8", features = ["reveal"] }
 tar = "0.4"
+webp = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -90,6 +90,58 @@ async fn shows_players_only_the_map_the_dm_shows() {
 }
 
 #[tokio::test]
+async fn the_dm_sets_weather_everyone_sees_on_the_map() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    let setup = |weather: &str| {
+        json!({ "setup": {
+            "width": 1400, "height": 980,
+            "grid": { "size": 70, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true },
+            "weather": weather
+        } })
+    };
+
+    // A fresh map is clear, and the player reads the weather the DM sets.
+    assert_eq!(
+        view(&app, As::Seat(&token), &t).await["scene"]["weather"],
+        "none"
+    );
+    call(&app, As::Dm, "PATCH", &at, Some(setup("rain"))).await;
+    assert_eq!(
+        view(&app, As::Seat(&token), &t).await["scene"]["weather"],
+        "rain"
+    );
+
+    // Only clear, rain or snow; and only the DM changes it.
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(setup("hail")))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&app, As::Seat(&token), "PATCH", &at, Some(setup("snow")))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    call(&app, As::Dm, "PATCH", &at, Some(setup("snow"))).await;
+    assert_eq!(
+        view(&app, As::Seat(&token), &t).await["scene"]["weather"],
+        "snow"
+    );
+    call(&app, As::Dm, "PATCH", &at, Some(setup("none"))).await;
+    assert_eq!(
+        view(&app, As::Seat(&token), &t).await["scene"]["weather"],
+        "none"
+    );
+}
+
+#[tokio::test]
 async fn moves_tokens_as_far_as_the_dm_lets_players() {
     let app = host();
     let t = table(&app).await;
@@ -174,6 +226,50 @@ async fn moves_tokens_as_far_as_the_dm_lets_players() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // The DM lets Tam's player move the ogre too (a summon, a mount), and takes it back.
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "movedBy": [seat] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "movedBy": [seat] })),
+    )
+    .await;
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "x": 6 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "movedBy": [], "x": 5 })),
+    )
+    .await;
+    let (status, _) = call(
+        &app,
+        As::Seat(&token),
+        "PATCH",
+        &format!("{base}/{ogre}"),
+        Some(json!({ "x": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     call(
         &app,
         As::Dm,
@@ -191,7 +287,7 @@ async fn moves_tokens_as_far_as_the_dm_lets_players() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    // Renaming still takes "tokens"; locking is the DM's.
+    // Renaming takes "token-edit"; locking is the DM's.
     let (status, _) = call(
         &app,
         As::Seat(&token),
@@ -249,7 +345,7 @@ async fn keeps_players_off_the_dms_other_maps() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{seat}/permissions", t.id),
-        Some(json!({ "permissions": ["tokens", "draw"] })),
+        Some(json!({ "permissions": ["token-add", "token-edit", "token-resize", "token-arrange", "token-remove", "token-any", "prop-add", "prop-edit", "prop-remove", "upload", "drawings", "ping"] })),
     )
     .await;
     let (status, _) = call(
@@ -278,7 +374,7 @@ async fn draws_and_erases_by_permission() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{seat}/permissions", t.id),
-        Some(json!({ "permissions": ["draw"] })),
+        Some(json!({ "permissions": ["drawings", "ping"] })),
     )
     .await;
     call(&app, As::Seat(&token), "POST", &path, Some(line.clone())).await;
@@ -344,7 +440,7 @@ async fn draws_and_erases_by_permission() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     call(&app, As::Dm, "DELETE", &format!("{path}/{pond_id}"), None).await;
     // Words on the map are a drawing too; only text has them.
-    let words = json!({ "shape": "text", "color": "#f0f0f0", "points": [[70, 70], [70, 70]], "text": "Inn" });
+    let words = json!({ "shape": "text", "color": "#f0f0f0", "points": [[70, 70], [70, 70]], "text": "Inn", "fontSize": 2, "font": "title", "rotation": 45, "underline": true, "align": "center" });
     let (status, _) = call(&app, As::Dm, "POST", &path, Some(words.clone())).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let mut wordless = words.clone();
@@ -363,6 +459,42 @@ async fn draws_and_erases_by_permission() {
         .as_str()
         .unwrap()
         .to_string();
+    // Words keep their size, font, turn, underline and lean; bad values are refused, as on the website.
+    let inn = view(&app, As::Dm, &t).await["scene"]["drawings"][2].clone();
+    assert_eq!(inn["fontSize"], json!(2.0));
+    assert_eq!(inn["font"], json!("title"));
+    assert_eq!(inn["rotation"], json!(45.0));
+    assert_eq!(inn["underline"], json!(true));
+    assert_eq!(inn["align"], json!("center"));
+    let text_at = format!("{path}/{text}");
+    for bad in [
+        json!({ "fontSize": 9 }),
+        json!({ "font": "comic" }),
+        json!({ "rotation": 200 }),
+        json!({ "align": "top" }),
+    ] {
+        assert_eq!(
+            call(&app, As::Dm, "PATCH", &text_at, Some(bad)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &text_at,
+            Some(json!({ "fontSize": 3, "align": "right", "underline": false }))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let restyled = view(&app, As::Dm, &t).await["scene"]["drawings"][2].clone();
+    assert_eq!(restyled["fontSize"], json!(3.0));
+    assert_eq!(restyled["align"], json!("right"));
+    assert_eq!(restyled["font"], json!("title"));
+    assert_eq!(restyled["underline"], json!(null));
     call(&app, As::Dm, "DELETE", &format!("{path}/{text}"), None).await;
 
     // A player erases only their own line.
@@ -407,27 +539,167 @@ async fn draws_and_erases_by_permission() {
 }
 
 #[tokio::test]
+async fn keeps_triangle_hexagon_and_polygon_drawings_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/drawings", t.id);
+    let shape =
+        |name: &str, points: Value| json!({ "shape": name, "color": "#ff9090", "points": points });
+    let two = json!([[0, 0], [60, 80]]);
+    for name in ["triangle", "hexagon"] {
+        let (status, _) = call(&app, As::Dm, "POST", &path, Some(shape(name, two.clone()))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let corners = json!([[0, 0], [40, 0], [40, 40], [0, 40]]);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(shape("polygon", corners.clone())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(shape("blob", two.clone())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let drawings = view(&app, As::Dm, &t).await["scene"]["drawings"].clone();
+    assert_eq!(drawings[0]["shape"], "triangle");
+    assert_eq!(drawings[1]["shape"], "hexagon");
+    assert_eq!(drawings[2]["shape"], "polygon");
+    assert_eq!(
+        drawings[2]["points"],
+        json!([[0.0, 0.0], [40.0, 0.0], [40.0, 40.0], [0.0, 40.0]])
+    );
+    // A two-point shape refuses a third corner when reshaped; a polygon keeps its corners.
+    let at = |n: usize| format!("{path}/{}", drawings[n]["id"].as_str().unwrap());
+    let three = json!({ "points": [[0, 0], [1, 1], [2, 2]] });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at(0), Some(three)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let moved = json!({ "points": [[10, 0], [50, 0], [50, 40], [10, 40]] });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at(2), Some(moved)).await.0,
+        StatusCode::NO_CONTENT
+    );
+
+    // The brush width is kept and changed; outside 0.25 to 4 it is refused, as on the website.
+    let wide = json!({ "shape": "pen", "color": "#ff9090", "points": [[0, 0], [9, 9]], "width": 2.5, "fillOpacity": 0.4, "dash": true, "curve": 60 });
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(wide)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let drawings = view(&app, As::Dm, &t).await["scene"]["drawings"].clone();
+    let pen = drawings
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["shape"] == "pen")
+        .unwrap();
+    assert_eq!(pen["width"], json!(2.5));
+    assert_eq!(pen["fillOpacity"], json!(0.4));
+    assert_eq!(pen["dash"], json!(true));
+    assert_eq!(pen["curve"], json!(60.0));
+    let pen_at = format!("{path}/{}", pen["id"].as_str().unwrap());
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &pen_at, Some(json!({ "width": 3 })))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &pen_at, Some(json!({ "width": 9 })))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    // A fill opacity outside 0 to 1 is refused; the dash can be turned off again.
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &pen_at,
+            Some(json!({ "fillOpacity": 2 }))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &pen_at,
+            Some(json!({ "dash": false }))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    // A curve outside 0 to 100 is refused; a hand-drawn line keeps however many points it gains.
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &pen_at,
+            Some(json!({ "curve": 150 }))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &pen_at,
+            Some(json!({ "points": [[0, 0], [5, 5], [9, 9]] }))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let after = view(&app, As::Dm, &t).await["scene"]["drawings"].clone();
+    let pen = after
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["shape"] == "pen")
+        .unwrap();
+    assert_eq!(pen["width"], json!(3.0));
+    assert_eq!(pen["fillOpacity"], json!(0.4));
+    assert_eq!(pen["dash"], json!(null));
+    assert_eq!(pen["curve"], json!(60.0));
+    assert_eq!(pen["points"], json!([[0.0, 0.0], [5.0, 5.0], [9.0, 9.0]]));
+}
+
+#[tokio::test]
 async fn keeps_map_pictures_for_those_at_the_table() {
     let app = host();
     let t = table(&app).await;
     let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
     let cave = scene(&app, &t, "Cave").await;
-    let path = format!("/tables/{}/scenes/{cave}/image", t.id);
-
-    let (status, _) = upload(
-        &app,
-        As::Seat(&token),
-        "PUT",
-        &format!("{path}?width=1000&height=700"),
-        PNG,
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, refused) = upload(
         &app,
         As::Dm,
-        "PUT",
-        &format!("{path}?width=1000&height=700"),
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=map&name=Cave&width=1000&height=700",
+            t.id
+        ),
         b"<svg></svg>",
     )
     .await;
@@ -435,34 +707,67 @@ async fn keeps_map_pictures_for_those_at_the_table() {
         (status, refused["message"].as_str()),
         (
             StatusCode::BAD_REQUEST,
-            Some("Use a PNG, JPEG or WebP picture")
+            Some("Use a PNG, JPEG, WebP, GIF or WebM picture")
         )
     );
-    let (status, _) = upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("{path}?width=1000&height=700"),
-        PNG,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let picture = laid_picture(&app, &t, &cave, PNG, (1000, 700)).await;
 
     let map = view(&app, As::Seat(&token), &t).await["scene"].clone();
-    assert_eq!(
-        (map["width"].as_u64(), map["image"]["mime"].as_str()),
-        (Some(1000), Some("image/png"))
-    );
+    assert_eq!(map["maps"][0]["asset"], picture.as_str());
+    assert!(map["width"].as_u64() >= Some(1000));
+    let path = format!("/tables/{}/assets/{picture}", t.id);
     let pass = seat_pass(&app, &t.id, &token).await;
     let (status, kind, size) = fetch(&app, &format!("{path}?v=1&pass={pass}")).await;
     assert_eq!(
         (status, kind.as_str(), size),
         (StatusCode::OK, "image/png", PNG.len())
     );
-    // The seat token itself no longer goes in an address.
+    // The seat token itself never goes in an address.
     let (status, _, _) = fetch(&app, &format!("{path}?v=1&seat={token}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = fetch(&app, &format!("{path}?v=1&pass=wrong")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn sends_a_big_map_in_tiles_where_the_screen_looks() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let picture = image::RgbaImage::from_fn(4200, 300, |x, _| {
+        image::Rgba([(x % 256) as u8, 40, 90, 255])
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(picture)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let big = laid_picture(&app, &t, &cave, &png, (4200, 300)).await;
+    let small = laid_picture(&app, &t, &cave, PNG, (1000, 700)).await;
+    let assets = view(&app, As::Seat(&token), &t).await["assets"].clone();
+    let tiles_of = |id: &str| {
+        assets
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .unwrap()
+            .get("tiles")
+            .cloned()
+    };
+    assert_eq!(
+        tiles_of(&big),
+        Some(json!({ "width": 4200, "height": 300, "levels": 4 }))
+    );
+    // A small map picture goes whole, with no tiles.
+    assert!(tiles_of(&small).is_none_or(|tiles| tiles.is_null()));
+    let path = format!("/tables/{}/assets/{big}", t.id);
+    let pass = seat_pass(&app, &t.id, &token).await;
+    let (status, kind, _) = fetch(&app, &format!("{path}?v=1&pass={pass}&tile=0-4-0")).await;
+    assert_eq!((status, kind.as_str()), (StatusCode::OK, "image/webp"));
+    let (status, _, _) = fetch(&app, &format!("{path}?v=1&pass={pass}&tile=0-5-0")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = fetch(&app, &format!("{path}?v=1&tile=0-0-0")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -487,7 +792,7 @@ async fn keeps_a_picture_library_and_shows_handouts() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{seat}/permissions", t.id),
-        Some(json!({ "permissions": ["tokens"] })),
+        Some(json!({ "permissions": ["token-add", "token-edit", "token-resize", "token-arrange", "token-remove", "token-any", "prop-add", "prop-edit", "prop-remove", "upload"] })),
     )
     .await;
     let (status, portrait) = upload(&app, As::Seat(&token), "POST", &add("token"), PNG).await;
@@ -659,7 +964,7 @@ async fn a_co_dm_changes_anything_on_the_board() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{wren_seat}/permissions", t.id),
-        Some(json!({ "permissions": ["draw"] })),
+        Some(json!({ "permissions": ["drawings", "ping"] })),
     )
     .await;
     let made = call(
@@ -733,7 +1038,7 @@ async fn only_whoever_runs_the_table_adds_hidden_tokens() {
         As::Dm,
         "PATCH",
         &format!("/tables/{}/seats/{seat}/permissions", t.id),
-        Some(json!({ "permissions": ["tokens"] })),
+        Some(json!({ "permissions": ["token-add", "token-edit", "token-resize", "token-arrange", "token-remove", "token-any", "prop-add", "prop-edit", "prop-remove", "upload"] })),
     )
     .await;
     let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
@@ -832,9 +1137,121 @@ async fn carries_attached_tokens_and_stacks_them() {
     );
     let (status, _) = call(&app, As::Dm, "DELETE", &format!("{path}/{horse}"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    // The horse taken away takes the rider and the owl on it with it.
     let all = tokens().await;
-    let rider_now = all.iter().find(|t| t["name"] == "Rider").unwrap();
-    assert!(rider_now.get("attachedTo").is_none());
+    assert!(
+        all.iter()
+            .all(|t| t["name"] != "Rider" && t["name"] != "Owl")
+    );
+}
+
+#[tokio::test]
+async fn attachments_follow_what_they_choose() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Horse", "x": 5, "y": 2 })),
+    )
+    .await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Rider", "x": 1, "y": 1 })),
+    )
+    .await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Owl", "x": 6, "y": 2 })),
+    )
+    .await;
+    let tokens = || {
+        let app = app.clone();
+        let t = &t;
+        async move {
+            view(&app, As::Dm, t).await["scene"]["tokens"]
+                .as_array()
+                .unwrap()
+                .clone()
+        }
+    };
+    let id_of = |all: &[Value], name: &str| {
+        all.iter().find(|t| t["name"] == name).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let all = tokens().await;
+    let (horse, rider, owl) = (
+        id_of(&all, "Horse"),
+        id_of(&all, "Rider"),
+        id_of(&all, "Owl"),
+    );
+    let change = |id: &str, body: Value| {
+        let (app, at) = (app.clone(), format!("{path}/{id}"));
+        async move { call(&app, As::Dm, "PATCH", &at, Some(body)).await.0 }
+    };
+    // The rider follows turn and size but not place; the owl follows place only (the default).
+    change(
+        &rider,
+        json!({ "attachedTo": horse, "follow": ["rotation", "size"] }),
+    )
+    .await;
+    change(&owl, json!({ "attachedTo": horse })).await;
+    assert_eq!(
+        change(&rider, json!({ "follow": ["sideways"] })).await,
+        StatusCode::BAD_REQUEST
+    );
+    // The horse moves, turns and grows.
+    assert_eq!(
+        change(
+            &horse,
+            json!({ "x": 7, "y": 2, "facing": 90, "rotation": 45, "size": 2 })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    let all = tokens().await;
+    let of = |name: &str| all.iter().find(|t| t["name"] == name).unwrap().clone();
+    let rider_now = of("Rider");
+    // Stays put, but takes the turn and the size.
+    assert_eq!(
+        (rider_now["x"].clone(), rider_now["y"].clone()),
+        (json!(1), json!(1))
+    );
+    assert_eq!(rider_now["facing"].as_f64(), Some(90.0));
+    assert_eq!(rider_now["rotation"], json!(45));
+    assert_eq!(rider_now["size"], json!(2));
+    // The owl rides along, but keeps its own turn and size.
+    let owl_now = of("Owl");
+    assert_eq!(
+        (owl_now["x"].clone(), owl_now["y"].clone()),
+        (json!(8), json!(2))
+    );
+    assert!(owl_now.get("facing").is_none() && owl_now.get("rotation").is_none());
+    assert_eq!(owl_now["size"], json!(1));
+    // Hide and lock follow too, for a rider that chooses them.
+    change(&rider, json!({ "follow": ["visibility", "lock"] })).await;
+    assert_eq!(
+        change(&horse, json!({ "hidden": true, "locked": true })).await,
+        StatusCode::NO_CONTENT
+    );
+    let all = tokens().await;
+    let of = |name: &str| all.iter().find(|t| t["name"] == name).unwrap().clone();
+    let rider_now = of("Rider");
+    assert_eq!(rider_now["hidden"], json!(true));
+    assert_eq!(rider_now["locked"], json!(true));
+    assert!(of("Owl").get("hidden").is_none());
 }
 
 #[tokio::test]
@@ -858,6 +1275,102 @@ async fn keeps_how_diagonals_count() {
     let mut odd = setup;
     odd["setup"]["grid"]["diagonals"] = json!("sideways");
     let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(odd)).await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
+async fn keeps_the_grid_style() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let grid = json!({ "size": 70, "offsetX": 0, "offsetY": 0, "feetPerCell": 5, "show": true,
+        "style": { "color": "#1a2b3c", "width": 2, "opacity": 0.6, "dash": true } });
+    let setup = json!({ "setup": { "width": 1400, "height": 980, "grid": grid } });
+    let path = format!("/tables/{}/scenes/{cave}", t.id);
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(setup.clone())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let view = view(&app, As::Dm, &t).await;
+    assert_eq!(view["scene"]["grid"]["style"]["color"], "#1a2b3c");
+    assert_eq!(view["scene"]["grid"]["style"]["dash"], true);
+    let mut odd = setup.clone();
+    odd["setup"]["grid"]["style"]["color"] = json!("blue");
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(odd)).await;
+    assert!(status.is_client_error());
+    let mut wide = setup;
+    wide["setup"]["grid"]["style"]["width"] = json!(9);
+    let (status, _) = call(&app, As::Dm, "PATCH", &path, Some(wide)).await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
+async fn gathers_maps_under_folders() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let (status, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Keep", "folder": "Dungeon" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["folder"], "Dungeon");
+    let keep = made["id"].as_str().unwrap().to_string();
+    let listed = |view: &Value, id: &str| {
+        view["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == json!(id))
+            .unwrap()
+            .clone()
+    };
+    let looking = view(&app, As::Dm, &t).await;
+    assert_eq!(listed(&looking, &keep)["folder"], "Dungeon");
+    assert!(listed(&looking, &cave)["folder"].is_null());
+    // The map itself carries its folder; null moves it back out.
+    let path = format!("/tables/{}/scenes/{keep}", t.id);
+    let seen = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={keep}", t.id),
+        None,
+    )
+    .await
+    .1;
+    assert_eq!(seen["scene"]["folder"], "Dungeon");
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &path,
+        Some(json!({ "folder": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let looking = view(&app, As::Dm, &t).await;
+    assert!(listed(&looking, &keep)["folder"].is_null());
+    let cave_path = format!("/tables/{}/scenes/{cave}", t.id);
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &cave_path,
+        Some(json!({ "folder": "  " })),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &cave_path,
+        Some(json!({ "folder": "x".repeat(41) })),
+    )
+    .await;
     assert!(status.is_client_error());
 }
 
@@ -928,6 +1441,187 @@ async fn marks_tokens_and_keeps_a_hidden_name_from_players() {
 }
 
 #[tokio::test]
+async fn keeps_a_screen_reader_description_for_the_dm_alone() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Ogre", "x": 3, "y": 3 })),
+    )
+    .await;
+    let id = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = format!("{path}/{id}");
+    let described = json!({ "description": "A big ogre with a club" });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(described)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["description"],
+        "A big ogre with a club"
+    );
+    // A player never receives it, and may not write one.
+    let theirs = view(&app, As::Seat(&tam), &t).await["scene"]["tokens"][0].clone();
+    assert!(theirs.get("description").is_none());
+    let sneaky = json!({ "description": "sneaky" });
+    assert!(
+        call(&app, As::Seat(&tam), "PATCH", &at, Some(sneaky))
+            .await
+            .0
+            .is_client_error()
+    );
+    // Too long is refused; null takes it off.
+    let long = json!({ "description": "x".repeat(281) });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(long)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let cleared = json!({ "description": null });
+    call(&app, As::Dm, "PATCH", &at, Some(cleared)).await;
+    assert!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]
+            .get("description")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn saves_a_group_as_a_prefab_for_the_dm_alone() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Goblin", "x": 2, "y": 2 })),
+    )
+    .await;
+    let token = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
+    let prefab = json!({
+        "name": "Ambush",
+        "anchor": { "x": 140, "y": 140 },
+        "tokens": [token],
+        "props": [],
+        "drawings": [
+            { "id": "d1", "shape": "line", "color": "#ff0000", "points": [[140, 140], [210, 210]], "by": "dm" }
+        ],
+        "lights": [],
+    });
+    let at = format!("/tables/{}/prefabs", t.id);
+    let (status, made) = call(&app, As::Dm, "POST", &at, Some(prefab.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    let prefab_id = made["id"].as_str().unwrap().to_string();
+    // The DM sees the saved group; a player never does.
+    let as_dm = view(&app, As::Dm, &t).await;
+    assert_eq!(as_dm["prefabs"].as_array().unwrap().len(), 1);
+    assert_eq!(as_dm["prefabs"][0]["name"], "Ambush");
+    assert_eq!(view(&app, As::Seat(&tam), &t).await["prefabs"], json!([]));
+    // A player may not save or remove one.
+    assert_eq!(
+        call(&app, As::Seat(&tam), "POST", &at, Some(prefab.clone()))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let one = format!("{at}/{prefab_id}");
+    assert_eq!(
+        call(&app, As::Seat(&tam), "DELETE", &one, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    // A nameless group is refused.
+    let mut nameless = prefab.clone();
+    nameless["name"] = json!("   ");
+    assert_eq!(
+        call(&app, As::Dm, "POST", &at, Some(nameless)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    // Removing it takes it away.
+    assert_eq!(
+        call(&app, As::Dm, "DELETE", &one, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(view(&app, As::Dm, &t).await["prefabs"], json!([]));
+}
+
+#[tokio::test]
+async fn counts_feet_moved_this_turn_and_clears_them_at_the_next_turn() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    let fight = format!("/tables/{}/encounter", t.id);
+    let goblin = |v: &Value| -> Value {
+        v["encounter"]["combatants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Goblin")
+            .unwrap()
+            .clone()
+    };
+    // Without a fight, moving a token counts nothing.
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &at,
+        Some(json!({ "name": "Goblin", "x": 2, "y": 2 })),
+    )
+    .await;
+    let token = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let one = format!("{at}/{token}");
+    call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 4, "y": 2 }))).await;
+    assert_eq!(view(&app, As::Dm, &t).await["encounter"], Value::Null);
+    // A monster in the fight, going first, with the token of the same name on the map.
+    call(&app, As::Dm, "POST", &fight, None).await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{fight}/combatants"),
+        Some(json!({ "name": "Goblin", "bonus": 0, "initiative": 60 })),
+    )
+    .await;
+    call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 7, "y": 2 }))).await;
+    let v = view(&app, As::Dm, &t).await;
+    assert_eq!(goblin(&v)["moved"], 15);
+    // Players see the tally too; moving again adds to it.
+    assert_eq!(goblin(&view(&app, As::Seat(&tam), &t).await)["moved"], 15);
+    call(&app, As::Dm, "PATCH", &one, Some(json!({ "x": 7, "y": 4 }))).await;
+    assert_eq!(goblin(&view(&app, As::Dm, &t).await)["moved"], 25);
+    // Round the order back to the Goblin: its turn begins with no feet moved.
+    let mut v = view(&app, As::Dm, &t).await;
+    for _ in 0..10 {
+        call(&app, As::Dm, "POST", &format!("{fight}/next"), None).await;
+        v = view(&app, As::Dm, &t).await;
+        let turn = v["encounter"]["turn"].as_u64().unwrap() as usize;
+        if v["encounter"]["combatants"][turn]["name"] == "Goblin" {
+            break;
+        }
+    }
+    let turn = v["encounter"]["turn"].as_u64().unwrap() as usize;
+    assert_eq!(v["encounter"]["combatants"][turn]["name"], "Goblin");
+    assert_eq!(goblin(&v)["moved"], Value::Null);
+}
+
+#[tokio::test]
 async fn turns_and_mirrors_pictures() {
     let app = host();
     let t = table(&app).await;
@@ -951,15 +1645,25 @@ async fn turns_and_mirrors_pictures() {
         call(&app, As::Dm, "PATCH", &at, Some(turned)).await.0,
         StatusCode::NO_CONTENT
     );
-    let odd = json!({ "rotation": 45 });
+    let odd = json!({ "rotation": 400 });
     assert_eq!(
         call(&app, As::Dm, "PATCH", &at, Some(odd)).await.0,
         StatusCode::BAD_REQUEST
     );
+    // Any whole degree is kept now, not just quarter turns.
+    let free = json!({ "rotation": 45 });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(free)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["rotation"],
+        json!(45)
+    );
     let bat = view(&app, As::Dm, &t).await["scene"]["tokens"][0].clone();
     assert_eq!(
         (bat["rotation"].clone(), bat["flip"].clone()),
-        (json!(90), json!(true))
+        (json!(45), json!(true))
     );
     let back = json!({ "rotation": 0, "flip": false });
     assert_eq!(
@@ -1010,6 +1714,188 @@ async fn keeps_tokens_between_cells_and_tiny_ones() {
 }
 
 #[tokio::test]
+async fn keeps_freely_resized_tokens_and_pictures() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/scenes/{cave}/tokens", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &path,
+        Some(json!({ "name": "Ogre", "x": 4, "y": 4, "size": 2 })),
+    )
+    .await;
+    let id = view(&app, As::Dm, &t).await["scene"]["tokens"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = format!("{path}/{id}");
+    // A corner handle sends any size in range, to two decimals.
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(json!({ "size": 2.37 })))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["size"],
+        json!(2.37)
+    );
+    // Whole cells stay whole, as the website sends them with Shift held.
+    call(&app, As::Dm, "PATCH", &at, Some(json!({ "size": 3 }))).await;
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["tokens"][0]["size"],
+        json!(3)
+    );
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(json!({ "size": 5 })))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // A picture on the map stretches freely too, across and down apart.
+    let (_, art) = upload(
+        &app,
+        As::Dm,
+        "POST",
+        &format!(
+            "/tables/{}/assets?kind=prop&name=Chest&width=128&height=64",
+            t.id
+        ),
+        PNG,
+    )
+    .await;
+    let art = art["id"].as_str().unwrap();
+    let props = format!("/tables/{}/scenes/{cave}/props", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &props,
+        Some(json!({ "assetId": art, "x": 0, "y": 0, "w": 2, "h": 1 })),
+    )
+    .await;
+    let prop = view(&app, As::Dm, &t).await["scene"]["props"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prop_at = format!("{props}/{prop}");
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &prop_at,
+            Some(json!({ "w": 2.5, "h": 1.5 }))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let shown = view(&app, As::Dm, &t).await["scene"]["props"][0].clone();
+    assert_eq!(
+        (shown["w"].clone(), shown["h"].clone()),
+        (json!(2.5), json!(1.5))
+    );
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &prop_at,
+            Some(json!({ "w": 0.2, "h": 1 }))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn replaces_a_pictures_image() {
+    let app = host();
+    let t = table(&app).await;
+    let cave = scene(&app, &t, "Cave").await;
+    let add = |name: &str| {
+        format!(
+            "/tables/{}/assets?kind=prop&name={name}&width=64&height=64",
+            t.id
+        )
+    };
+    let (_, chest) = upload(&app, As::Dm, "POST", &add("Chest"), PNG).await;
+    let (_, cart) = upload(&app, As::Dm, "POST", &add("Cart"), PNG).await;
+    let chest = chest["id"].as_str().unwrap();
+    let cart = cart["id"].as_str().unwrap();
+    let props = format!("/tables/{}/scenes/{cave}/props", t.id);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &props,
+        Some(json!({ "assetId": chest, "x": 4, "y": 4, "w": 2, "h": 1 })),
+    )
+    .await;
+    let prop = view(&app, As::Dm, &t).await["scene"]["props"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = format!("{props}/{prop}");
+    call(&app, As::Dm, "PATCH", &at, Some(json!({ "rotation": 45 }))).await;
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(json!({ "assetId": cart })))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let shown = view(&app, As::Dm, &t).await["scene"]["props"][0].clone();
+    assert_eq!(shown["assetId"], json!(cart));
+    assert_eq!(
+        (
+            shown["x"].clone(),
+            shown["y"].clone(),
+            shown["w"].clone(),
+            shown["h"].clone()
+        ),
+        (json!(4), json!(4), json!(2), json!(1))
+    );
+    assert_eq!(shown["rotation"], json!(45));
+    assert_eq!(
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &at,
+            Some(json!({ "assetId": "gone" }))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    // A picture gives off light (a brazier), all around only; null puts it out.
+    let lit = json!({ "light": { "bright": 10, "dim": 20, "edge": "sharp" } });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(lit)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let shown = view(&app, As::Dm, &t).await["scene"]["props"][0].clone();
+    assert_eq!(
+        shown["light"],
+        json!({ "bright": 10, "dim": 20, "edge": "sharp" })
+    );
+    let cone = json!({ "light": { "bright": 10, "dim": 20, "shape": "cone" } });
+    assert_eq!(
+        call(&app, As::Dm, "PATCH", &at, Some(cone)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let out = json!({ "light": null });
+    call(&app, As::Dm, "PATCH", &at, Some(out)).await;
+    assert!(view(&app, As::Dm, &t).await["scene"]["props"][0]["light"].is_null());
+}
+
+#[tokio::test]
 async fn shares_rulers_with_anyone_and_trails_with_those_who_draw() {
     let app = host();
     let t = table(&app).await;
@@ -1021,12 +1907,12 @@ async fn shares_rulers_with_anyone_and_trails_with_those_who_draw() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     scene(&app, &t, "Cave").await;
     let (status, _) = call(&app, As::Seat(&tam), "POST", &path, Some(ruler)).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let trail = json!({ "kind": "trail", "points": [[10, 10], [20, 20]], "tab": "tab-1" });
     let (status, _) = call(&app, As::Seat(&tam), "POST", &path, Some(trail.clone())).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = call(&app, As::Dm, "POST", &path, Some(trail)).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let many: Vec<[i32; 2]> = (0..60).map(|i| [i, i]).collect();
     let long = json!({ "kind": "ruler", "points": many, "tab": "tab-1" });
     let (status, _) = call(&app, As::Dm, "POST", &path, Some(long)).await;
@@ -1080,4 +1966,310 @@ async fn pins_rulers_and_takes_them_off() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(view(&app, As::Dm, &t).await["scene"]["rulers"], json!([]));
+}
+
+#[tokio::test]
+async fn shares_the_dms_view_only_for_those_who_run_the_table() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    scene(&app, &t, "Cave").await;
+    let path = format!("/tables/{}/view", t.id);
+    let body = json!({ "on": true, "x": 350.0, "y": 245.0, "k": 1.5 });
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(body.clone()))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(
+        call(&app, As::Seat(&tam), "POST", &path, Some(body))
+            .await
+            .0
+            .is_client_error()
+    );
+    // Turning follow off needs no spot, and is allowed for the DM alone too.
+    assert_eq!(
+        call(&app, As::Dm, "POST", &path, Some(json!({ "on": false })))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn copies_a_map_with_everything_on_it() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    let picture = laid_picture(&app, &t, &cave, PNG, (1000, 700)).await;
+    let ogre = json!({ "name": "Ogre", "x": 2, "y": 2 });
+    call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(ogre)).await;
+    let folder = json!({ "folder": "Act one" });
+    call(&app, As::Dm, "PATCH", &at, Some(folder)).await;
+
+    let (status, _) = call(&app, As::Seat(&token), "POST", &format!("{at}/copy"), None).await;
+    assert!(status.is_client_error());
+    let (status, copy) = call(&app, As::Dm, "POST", &format!("{at}/copy"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (&copy["name"], &copy["folder"]),
+        (&json!("Cave (copy)"), &json!("Act one"))
+    );
+    let copy = copy["id"].as_str().unwrap();
+    let (_, shown) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={copy}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(shown["scene"]["tokens"][0]["name"], "Ogre");
+    // The same map picture from the library.
+    assert_eq!(shown["scene"]["maps"][0]["asset"], picture.as_str());
+
+    // The copy is its own board: deleting it leaves the first and its picture alone.
+    let gone = format!("/tables/{}/scenes/{copy}", t.id);
+    call(&app, As::Dm, "DELETE", &gone, None).await;
+    let (_, first) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}?scene={cave}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(first["scene"]["maps"][0]["asset"], picture.as_str());
+    let (status, _) = call(
+        &app,
+        As::Dm,
+        "GET",
+        &format!("/tables/{}/assets/{picture}", t.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn never_sends_a_player_a_token_they_cant_see_with_dynamic_fog() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, token) = join(&app, &t.invite, "Tam", "user-1").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    let ogre = json!({ "name": "Ogre", "x": 8, "y": 1 });
+    call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(ogre)).await;
+    let tam = view(&app, As::Dm, &t).await["scene"]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "Tam")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let to_corner = json!({ "x": 1, "y": 1 });
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("{at}/tokens/{tam}"),
+        Some(to_corner),
+    )
+    .await;
+    let lighting = |walls: Value| json!({ "fog": { "mode": "dynamic", "light": "bright", "remember": false }, "walls": walls, "lights": [] });
+    let wall = json!([{ "id": "w1", "a": [350, 0], "b": [350, 490] }]);
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting(wall)),
+    )
+    .await;
+    let names = |view: Value| -> Vec<String> {
+        view["scene"]["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let seen = names(view(&app, As::Seat(&token), &t).await);
+    assert!(seen.contains(&"Tam".to_string()));
+    assert!(!seen.contains(&"Ogre".to_string()));
+    assert!(names(view(&app, As::Dm, &t).await).contains(&"Ogre".to_string()));
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting(json!([]))),
+    )
+    .await;
+    assert!(names(view(&app, As::Seat(&token), &t).await).contains(&"Ogre".to_string()));
+}
+
+// Everything the DM keeps to themself carries the word SECRET, as on the website; a player's
+// copy of the table, whole, as a delta and as older log pages, must never hold it.
+#[tokio::test]
+async fn never_lets_a_dm_only_thing_reach_a_player() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (wren, _) = join(&app, &t.invite, "Wren", "user-2").await;
+    let cave = scene(&app, &t, "Cave").await;
+    let at = format!("/tables/{}/scenes/{cave}", t.id);
+    let table_at = format!("/tables/{}", t.id);
+    let before = view(&app, As::Seat(&tam), &t).await["version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let dm = |method: &'static str, path: String, body: Value| {
+        let app = app.clone();
+        async move { call(&app, As::Dm, method, &path, Some(body)).await }
+    };
+
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    for (name, x, hidden) in [
+        ("SECRET-hidden", 2, true),
+        ("SECRET-named", 3, false),
+        ("Ogre", 4, false),
+        ("SECRET-fogged", 9, false),
+    ] {
+        let token =
+            json!({ "name": name, "x": x, "y": if x == 9 { 1 } else { x }, "hidden": hidden });
+        dm("POST", format!("{at}/tokens"), token).await;
+    }
+    let tokens = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    let id_of = |name: &str| {
+        tokens
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    dm(
+        "PATCH",
+        format!("{at}/tokens/{}", id_of("SECRET-named")),
+        json!({ "nameHidden": true }),
+    )
+    .await;
+    dm(
+        "PATCH",
+        format!("{at}/tokens/{}", id_of("Ogre")),
+        json!({ "description": "SECRET-description" }),
+    )
+    .await;
+    dm(
+        "PATCH",
+        format!("{at}/tokens/{}", id_of("Tam")),
+        json!({ "x": 1, "y": 1 }),
+    )
+    .await;
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "bright", "remember": false },
+        "walls": [
+            { "id": "w-wall", "a": [500, 0], "b": [500, 490] },
+            { "id": "w-door", "a": [0, 300], "b": [200, 300], "door": { "open": false, "secret": true } }
+        ],
+        "lights": []
+    });
+    dm("PUT", format!("{at}/lighting"), lighting).await;
+    dm(
+        "POST",
+        format!("{at}/notes"),
+        json!({ "x": 10, "y": 10, "text": "SECRET-note" }),
+    )
+    .await;
+    let area = json!({ "shape": "sphere", "x": 70, "y": 70, "size": 10, "color": "#ff9090", "label": "SECRET-area", "hidden": true });
+    dm("POST", format!("{at}/templates"), area).await;
+    dm(
+        "POST",
+        format!("{table_at}/roll"),
+        json!({ "label": "SECRET-roll", "expression": "1d20", "hidden": true }),
+    )
+    .await;
+    dm(
+        "POST",
+        format!("{table_at}/log"),
+        json!({ "kind": "chat", "text": "SECRET-whisper", "to": wren }),
+    )
+    .await;
+    let handout = format!("{table_at}/assets?kind=handout&name=SECRET-handout&width=64&height=64");
+    upload(&app, As::Dm, "POST", &handout, PNG).await;
+    let prefab = json!({ "name": "SECRET-prefab", "anchor": { "x": 0, "y": 0 }, "tokens": [], "props": [], "drawings": [], "lights": [] });
+    dm("POST", format!("{table_at}/prefabs"), prefab).await;
+    let other = table(&app).await;
+    let elsewhere = format!(
+        "/tables/{}/assets?kind=token&name=SECRET-elsewhere&width=64&height=64",
+        other.id
+    );
+    upload(&app, As::Dm, "POST", &elsewhere, PNG).await;
+    call(&app, As::Dm, "POST", &format!("{table_at}/encounter"), None).await;
+    dm(
+        "POST",
+        format!("{table_at}/encounter/combatants"),
+        json!({ "name": "Goblin", "bonus": 2, "hp": 7, "ac": 15 }),
+    )
+    .await;
+
+    let whole = view(&app, As::Seat(&tam), &t).await;
+    let (_, delta) = call(
+        &app,
+        As::Seat(&tam),
+        "GET",
+        &format!("{table_at}?base={before}"),
+        None,
+    )
+    .await;
+    let last = whole["log"].as_array().unwrap().last().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, older) = call(
+        &app,
+        As::Seat(&tam),
+        "GET",
+        &format!("{table_at}/log?before={last}"),
+        None,
+    )
+    .await;
+    for copy in [&whole, &delta, &older] {
+        assert!(!copy.to_string().contains("SECRET"), "{copy}");
+    }
+    let goblin = whole["encounter"]["combatants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Goblin")
+        .unwrap()
+        .clone();
+    assert_eq!((goblin.get("hp"), goblin.get("ac")), (None, None));
+    // The DM still has all of it, so each secret really was set.
+    let theirs = view(&app, As::Dm, &t).await.to_string();
+    for secret in [
+        "hidden",
+        "named",
+        "description",
+        "fogged",
+        "note",
+        "area",
+        "roll",
+        "whisper",
+        "handout",
+        "prefab",
+        "elsewhere",
+    ] {
+        assert!(theirs.contains(&format!("SECRET-{secret}")), "{secret}");
+    }
 }

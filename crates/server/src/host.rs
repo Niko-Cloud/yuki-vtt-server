@@ -29,6 +29,8 @@ pub struct Running {
     stop: Option<oneshot::Sender<()>>,
     server: JoinHandle<()>,
     helpers: Vec<JoinHandle<()>>,
+    // The computer stays awake while this is held: until the host stops.
+    _awake: crate::awake::Awake,
 }
 
 /// The DM's key, made on the first start and kept; the website gets it when pairing.
@@ -65,6 +67,13 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
     }
     let connection = db::open(&options.data.join("tables.db"))
         .map_err(|error| format!("Couldn't open the tables: {error}"))?;
+    crate::pictures::gather_library(&options.data, &connection)
+        .map_err(|error| format!("Couldn't gather the picture library: {error}"))?;
+    match crate::boards::convert_old_maps(&options.data, &connection) {
+        Ok(0) => {}
+        Ok(done) => tracing::info!("{done} maps turned into boards"),
+        Err(error) => tracing::warn!("couldn't turn maps into boards: {}", error.message),
+    }
     let state = AppState::new(
         connection,
         Config {
@@ -85,7 +94,13 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
         })?;
     tracing::info!("hosting on http://{address}");
 
-    let mut helpers = Vec::new();
+    // Pictures the DM copied in, renamed or deleted while the host was off count from now on.
+    crate::library::rescan(&state);
+    let mut helpers = vec![
+        crate::library::watch(state.clone()),
+        // Each table is copied now and then, so a bad night or a broken disk loses little.
+        crate::backup::schedule(options.data.clone()),
+    ];
     let tunnel_address = if options.tunnel {
         let program =
             tunnel::find(&options.data).ok_or("The tunnel needs the cloudflared program")?;
@@ -123,6 +138,7 @@ pub async fn start(mut options: Options) -> Result<Running, String> {
         stop: Some(stop),
         server,
         helpers,
+        _awake: crate::awake::keep_awake(),
     })
 }
 

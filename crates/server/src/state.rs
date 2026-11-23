@@ -1,8 +1,9 @@
 //! What every request can reach: the database, the host's settings and the live channels.
 
+use crate::delta::ViewVersions;
 use crate::events::Events;
 use rusqlite::Connection;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Clone)]
@@ -24,6 +25,25 @@ pub struct AppState {
     db: Arc<Mutex<Connection>>,
     pub config: Arc<Config>,
     pub events: Events,
+    /// Recent copies of the table per viewer, so a screen gets only what changed.
+    pub versions: ViewVersions,
+    /// Files in the library folder the last scan couldn't take, with why, for the app to show.
+    pub skipped: Arc<Mutex<Vec<String>>>,
+    /// Opens a folder, or shows a file in its folder, on this computer's screen. Tests swap it
+    /// for one that only notes what it was asked.
+    pub show_on_screen: ShowOnScreen,
+}
+
+pub type ShowOnScreen = Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
+
+// A folder opens in the file manager; a file is shown selected in its folder.
+fn show_on_screen(path: &Path) -> std::io::Result<()> {
+    let shown = if path.is_dir() {
+        opener::open(path)
+    } else {
+        opener::reveal(path)
+    };
+    shown.map_err(std::io::Error::other)
 }
 
 impl AppState {
@@ -32,6 +52,9 @@ impl AppState {
             db: Arc::new(Mutex::new(connection)),
             config: Arc::new(config),
             events: Events::default(),
+            versions: ViewVersions::default(),
+            skipped: Arc::default(),
+            show_on_screen: Arc::new(show_on_screen),
         }
     }
 

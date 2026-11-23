@@ -34,6 +34,24 @@ function draw(status) {
   $('problem').hidden = !status.problem;
   $('problem').textContent = status.problem ?? '';
 
+  // How the connection looked once hosting started.
+  const connection = status.hosting ? status.connection : null;
+  const said = (ok, good, bad) => (ok === null || ok === undefined ? null : ok ? good : bad);
+  const parts = connection
+    ? [
+        said(connection.tunnel, 'players can reach this computer', 'the tunnel isn\'t answering'),
+        said(connection.website, 'the website answers', 'the website can\'t be reached'),
+        connection.uploadMbps != null ? `upload about ${connection.uploadMbps} Mbit/s` : null,
+      ].filter(Boolean)
+    : [];
+  $('connection').hidden = parts.length === 0;
+  $('connection').textContent = parts.length ? `Connection: ${parts.join(' · ')}.` : '';
+  $('slow').hidden = !connection?.slow;
+  $('slow').textContent = connection?.slow
+    ? 'Your upload is slow for hosting: with more than a few players, maps and pictures will ' +
+      'come slowly. A wired connection or a quieter network helps.'
+    : '';
+
   $('waiting-card').hidden = status.requests.length === 0;
   $('waiting').replaceChildren(
     ...status.requests.map((request) => {
@@ -90,6 +108,13 @@ function draw(status) {
     }),
   );
   $('no-tables').hidden = status.tables.length > 0;
+
+  const skipped = status.librarySkipped;
+  $('library-skipped').hidden = skipped.length === 0;
+  $('library-skipped').textContent =
+    skipped.length === 1
+      ? `One file in the picture library couldn't be added: ${skipped[0]}`
+      : `${skipped.length} files in the picture library couldn't be added: ${skipped.join('; ')}`;
 
   $('start-on-open').checked = status.startOnOpen;
   $('tray-note').textContent = status.hasTray
@@ -156,6 +181,8 @@ $('start-on-open').addEventListener('change', (event) =>
   run('set_start_on_open', { on: event.target.checked }),
 );
 $('folder').addEventListener('click', () => run('open_data_folder'));
+$('library').addEventListener('click', () => run('open_library_folder'));
+$('backups').addEventListener('click', () => run('open_backups_folder'));
 
 $('pair-website').value = localStorage.getItem('website') ?? '';
 refresh();

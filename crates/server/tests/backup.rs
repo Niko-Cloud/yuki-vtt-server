@@ -38,14 +38,7 @@ async fn backs_up_a_table_and_brings_it_back_on_another_computer() {
     )
     .await;
     let scene = made["id"].as_str().unwrap();
-    upload(
-        &app,
-        As::Dm,
-        "PUT",
-        &format!("/tables/{}/scenes/{scene}/image?width=700&height=700", t.id),
-        PNG,
-    )
-    .await;
+    let cave = laid_picture(&app, &t, scene, PNG, (700, 700)).await;
     call(
         &app,
         As::Dm,
@@ -118,7 +111,7 @@ async fn backs_up_a_table_and_brings_it_back_on_another_computer() {
     let (status, kind, size) = fetch(
         &moved,
         &format!(
-            "/tables/{}/scenes/{scene}/image?v=1&pass={}",
+            "/tables/{}/assets/{cave}?v=1&pass={}",
             t.id,
             seat_pass(&moved, &t.id, &token).await
         ),
@@ -206,4 +199,65 @@ async fn turns_down_a_backup_whose_rows_the_host_couldnt_read() {
         backup::restore(data.path(), &damaged, false).unwrap_err(),
         "The backup's tables are damaged"
     );
+}
+
+#[tokio::test]
+async fn keeps_a_fresh_copy_of_each_table_that_changed() {
+    let data = tempfile::tempdir().unwrap();
+    let app = host_in(data.path());
+    let t = table(&app).await;
+    let folder = backup::copies_folder(data.path()).join(&t.id);
+    let copies = || {
+        std::fs::read_dir(&folder)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "yukitable"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    assert_eq!(
+        backup::copy_changed(data.path()).unwrap(),
+        std::slice::from_ref(&t.id)
+    );
+    assert_eq!(copies(), 1);
+    // Nothing changed: no new copy.
+    assert!(backup::copy_changed(data.path()).unwrap().is_empty());
+    // A change on a map counts, though the table's own time doesn't move.
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    assert!(made["id"].is_string());
+    assert_eq!(backup::copy_changed(data.path()).unwrap().len(), 1);
+    assert_eq!(copies(), 2);
+    // Only the newest ten are kept.
+    for i in 0..12 {
+        call(
+            &app,
+            As::Dm,
+            "POST",
+            &format!("/tables/{}/roll", t.id),
+            Some(json!({ "label": format!("Roll {i}"), "expression": "1d20" })),
+        )
+        .await;
+        backup::copy_changed(data.path()).unwrap();
+    }
+    assert_eq!(copies(), 10);
+    // A copy is a table backup like any other.
+    let newest = std::fs::read_dir(&folder)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "yukitable"))
+        .max()
+        .unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let (id, _) = backup::restore(elsewhere.path(), &newest, false).unwrap();
+    assert_eq!(id, t.id);
 }

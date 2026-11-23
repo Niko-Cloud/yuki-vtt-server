@@ -102,7 +102,7 @@ async fn runs_fog_of_war_like_the_website() {
         Some(json!({ "x": 1, "y": 1, "text": "Mine" })),
     )
     .await;
-    assert_eq!(mine.0, StatusCode::FORBIDDEN);
+    assert_eq!(mine.0, StatusCode::NOT_FOUND);
     let line = json!({ "shape": "rect", "color": "#ff9090", "points": [[0, 0], [70, 70]], "hidden": true });
     let drawn = call(
         &app,
@@ -431,6 +431,32 @@ async fn stops_players_tokens_at_walls_unless_the_dm_lets_them_through() {
     assert_eq!(put(json!([wall]), None).await, StatusCode::NO_CONTENT);
     assert_eq!(go(As::Seat(&tam), x + 1).await, StatusCode::NO_CONTENT);
     assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::BAD_REQUEST);
+    // A move round the end of a wall, by the squares it turned at: each step is checked.
+    let short = json!({ "id": "w", "a": [edge, 0], "b": [edge, (y + 1) * 70] });
+    assert_eq!(put(json!([short]), None).await, StatusCode::NO_CONTENT);
+    let round = |to: i64, via: Value| {
+        let (app, path, tam) = (app.clone(), path.clone(), tam.clone());
+        async move {
+            let body = json!({ "x": to, "y": y, "via": via });
+            call(&app, As::Seat(&tam), "PATCH", &path, Some(body))
+                .await
+                .0
+        }
+    };
+    let below = |x: i64| json!({ "x": x, "y": y + 1 });
+    assert_eq!(
+        round(x + 3, json!([below(x + 3)])).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        round(x + 3, json!([below(x + 1), below(x + 3)])).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        round(x + 1, json!([below(x + 3), below(x + 1)])).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(put(json!([wall]), None).await, StatusCode::NO_CONTENT);
     // An open door lets them through; the DM goes anywhere.
     let mut door = wall.clone();
     door["door"] = json!({ "open": true });
@@ -446,6 +472,36 @@ async fn stops_players_tokens_at_walls_unless_the_dm_lets_them_through() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::NO_CONTENT);
+    // With fog by sight, a painted room's edge is a wall too (Tam is back inside the room),
+    // unless the DM turns that off.
+    assert_eq!(go(As::Dm, x + 1).await, StatusCode::NO_CONTENT);
+    let roomed = |room_walls: Option<bool>| {
+        let (app, lit) = (app.clone(), lit.clone());
+        let mut fog = json!({ "mode": "dynamic", "light": "bright", "remember": true });
+        if let Some(on) = room_walls {
+            fog["roomWalls"] = json!(on);
+        }
+        let room = json!([{ "id": "hall", "points": [[0, 0], [edge, 0], [edge, 700], [0, 700]] }]);
+        async move {
+            let body = json!({ "fog": fog, "walls": [], "lights": [], "fogAreas": room });
+            call(&app, As::Dm, "PUT", &lit, Some(body)).await.0
+        }
+    };
+    assert_eq!(roomed(None).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::BAD_REQUEST);
+    assert_eq!(roomed(Some(false)).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 3).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["fog"]["roomWalls"],
+        json!(false)
+    );
+    // A curtain stops sight, not tokens; a wall of no known kind is refused.
+    let mut curtain = wall.clone();
+    curtain["kind"] = json!("curtain");
+    assert_eq!(put(json!([curtain]), None).await, StatusCode::NO_CONTENT);
+    assert_eq!(go(As::Seat(&tam), x + 1).await, StatusCode::NO_CONTENT);
+    curtain["kind"] = json!("glass");
+    assert_eq!(put(json!([curtain]), None).await, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -493,6 +549,19 @@ async fn hides_monsters_under_painted_fog_from_players() {
     assert!(theirs.contains(&"Rat".to_string()) && theirs.contains(&"Tam".to_string()));
     assert!(!theirs.contains(&"Ogre".to_string()));
     assert!(names(As::Dm).await.contains(&"Ogre".to_string()));
+    // With painted fog switched off, nothing painted hides: the ogre is sent, the switch kept.
+    let mut off = lighting.clone();
+    off["fog"]["hand"] = json!(false);
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(off)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(names(As::Seat(&tam)).await.contains(&"Ogre".to_string()));
+    assert_eq!(
+        view(&app, As::Dm, &t).await["scene"]["fog"]["hand"],
+        json!(false)
+    );
+    call(&app, As::Dm, "PUT", &lit, Some(lighting.clone())).await;
     // Lighting sent without the painted areas keeps them; odd areas are refused.
     let mut without = lighting.clone();
     without.as_object_mut().unwrap().remove("fogAreas");
@@ -508,4 +577,439 @@ async fn hides_monsters_under_painted_fog_from_players() {
         call(&app, As::Dm, "PUT", &lit, Some(odd)).await.0,
         StatusCode::BAD_REQUEST
     );
+}
+
+#[tokio::test]
+async fn keeps_a_fog_colour_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    let lit = format!("{at}/lighting");
+    let base = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true },
+        "walls": [],
+        "lights": [],
+    });
+    let mut coloured = base.clone();
+    coloured["fog"]["color"] = json!("#203040");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(coloured)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = view(&app, As::Dm, &t).await["scene"]["fog"]["color"].clone();
+    assert_eq!(kept, json!("#203040"));
+    // A colour that is not #rrggbb is refused, as on the website.
+    for bad in ["red", "#12345", "#1234567", "203040"] {
+        let mut odd = base.clone();
+        odd["fog"]["color"] = json!(bad);
+        assert_eq!(
+            call(&app, As::Dm, "PUT", &lit, Some(odd)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // No colour means the default dark: the field is simply absent.
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(base)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let plain = view(&app, As::Dm, &t).await["scene"]["fog"].clone();
+    assert!(plain.get("color").is_none());
+}
+
+#[tokio::test]
+async fn keeps_circle_and_brush_fog_shapes_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    // Rat stands in the circle, Bat in the brush band, Ogre outside both.
+    for (name, x, y) in [("Rat", 4, 3), ("Bat", 2, 1), ("Ogre", 10, 10)] {
+        let token = json!({ "name": name, "x": x, "y": y });
+        call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(token)).await;
+    }
+    // A circle is a 48-corner polygon; a brush stroke a band with round ends.
+    let circle: Vec<Value> = (0..48)
+        .map(|i| {
+            let a = (i as f64 / 48.0) * std::f64::consts::TAU;
+            json!([
+                (350.0 + a.cos() * 100.0).round(),
+                (245.0 + a.sin() * 100.0).round()
+            ])
+        })
+        .collect();
+    let band = json!([
+        [100, 80],
+        [300, 80],
+        [320, 100],
+        [300, 120],
+        [100, 120],
+        [80, 100]
+    ]);
+    let lighting = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true },
+        "walls": [],
+        "lights": [],
+        "fogAreas": [
+            { "id": "circle", "points": circle },
+            { "id": "brush", "points": band },
+        ],
+    });
+    let lit = format!("{at}/lighting");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(lighting)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = view(&app, As::Dm, &t).await["scene"]["fogAreas"].clone();
+    let areas = kept.as_array().unwrap();
+    assert_eq!(areas.len(), 2);
+    assert_eq!(areas[0]["points"].as_array().unwrap().len(), 48);
+    assert_eq!(areas[1]["points"].as_array().unwrap().len(), 6);
+    let names = |who| {
+        let app = app.clone();
+        let t = &t;
+        async move {
+            view(&app, who, t).await["scene"]["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    let theirs = names(As::Seat(&tam)).await;
+    assert!(theirs.contains(&"Tam".to_string()) && theirs.contains(&"Ogre".to_string()));
+    assert!(!theirs.contains(&"Rat".to_string()) && !theirs.contains(&"Bat".to_string()));
+    let dms = names(As::Dm).await;
+    assert!(dms.contains(&"Rat".to_string()) && dms.contains(&"Bat".to_string()));
+}
+
+#[tokio::test]
+async fn keeps_a_fog_layer_mode_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    let lit = format!("{at}/lighting");
+    let base = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true },
+        "walls": [],
+        "lights": [],
+    });
+    for layer in ["single", "stacked"] {
+        let mut set = base.clone();
+        set["fog"]["layer"] = json!(layer);
+        assert_eq!(
+            call(&app, As::Dm, "PUT", &lit, Some(set)).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            view(&app, As::Dm, &t).await["scene"]["fog"]["layer"],
+            json!(layer)
+        );
+    }
+    // A mode the map does not know is refused; none means stacked, the field absent.
+    let mut odd = base.clone();
+    odd["fog"]["layer"] = json!("many");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(odd)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(base)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let plain = view(&app, As::Dm, &t).await["scene"]["fog"].clone();
+    assert!(plain.get("layer").is_none());
+}
+
+#[tokio::test]
+async fn keeps_trimmed_and_joined_fog_shapes_like_the_website() {
+    let app = host();
+    let t = table(&app).await;
+    let (_, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    for (name, x, y) in [("Rat", 0, 1), ("Ogre", 10, 10)] {
+        let token = json!({ "name": name, "x": x, "y": y });
+        call(&app, As::Dm, "POST", &format!("{at}/tokens"), Some(token)).await;
+    }
+    // A join can leave an L-shaped outline; a trim a smaller piece. Both are plain polygons.
+    let joined = json!([
+        [0, 0],
+        [200, 0],
+        [200, 100],
+        [100, 100],
+        [100, 200],
+        [0, 200]
+    ]);
+    let trimmed = json!([[300, 300], [400, 300], [400, 400], [300, 400]]);
+    let lighting = json!({
+        "fog": { "mode": "off", "light": "bright", "remember": true },
+        "walls": [],
+        "lights": [],
+        "fogAreas": [
+            { "id": "joined", "points": joined },
+            { "id": "trimmed", "points": trimmed },
+        ],
+    });
+    let lit = format!("{at}/lighting");
+    assert_eq!(
+        call(&app, As::Dm, "PUT", &lit, Some(lighting)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = view(&app, As::Dm, &t).await["scene"]["fogAreas"].clone();
+    let areas = kept.as_array().unwrap();
+    assert_eq!(areas.len(), 2);
+    assert_eq!(areas[0]["points"].as_array().unwrap().len(), 6);
+    assert_eq!(areas[1]["points"].as_array().unwrap().len(), 4);
+    let names = |who| {
+        let app = app.clone();
+        let t = &t;
+        async move {
+            view(&app, who, t).await["scene"]["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    // Rat stands in the L (35, 105); Ogre far outside both shapes.
+    let theirs = names(As::Seat(&tam)).await;
+    assert!(theirs.contains(&"Tam".to_string()) && theirs.contains(&"Ogre".to_string()));
+    assert!(!theirs.contains(&"Rat".to_string()));
+    assert!(names(As::Dm).await.contains(&"Rat".to_string()));
+}
+
+#[tokio::test]
+async fn shows_a_player_what_their_dragged_token_would_see_as_far_as_the_table_allows() {
+    let app = host();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (wren_seat, _) = join(&app, &t.invite, "Wren", "user-2").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("{at}/tokens"),
+        Some(json!({ "name": "Ogre", "x": 8, "y": 3 })),
+    )
+    .await;
+    let tokens = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    let id_of = |seat: &str| {
+        tokens
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["seatId"] == seat)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (tam_token, wren_token) = (id_of(&tam_seat), id_of(&wren_seat));
+    for (token, x) in [(&tam_token, 1), (&wren_token, 8)] {
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &format!("{at}/tokens/{token}"),
+            Some(json!({ "x": x, "y": 1 })),
+        )
+        .await;
+    }
+    // Daylight by sight, a wall between Tam and the far side where Wren and the Ogre are.
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "bright", "remember": true },
+        "walls": [{ "id": "w", "a": [350, 0], "b": [350, 700] }],
+        "lights": []
+    });
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting),
+    )
+    .await;
+    let mark = format!("/tables/{}/mark", t.id);
+    let dragged = |token: String| {
+        let (app, mark, tam) = (app.clone(), mark.clone(), tam.clone());
+        async move {
+            let body =
+                json!({ "kind": "drag", "points": [[455, 105]], "tab": "tab-1", "token": token });
+            let (status, answer) = call(&app, As::Seat(&tam), "POST", &mark, Some(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let mut names: Vec<String> = answer["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect();
+            names.sort();
+            names
+        }
+    };
+    let sight = format!("/tables/{}/sight", t.id);
+    let rule = |mode: &'static str, outside_fights: bool| {
+        let (app, sight) = (app.clone(), sight.clone());
+        async move {
+            let body = json!({ "drag": { "mode": mode, "outsideFights": outside_fights, "remember": false } });
+            call(&app, As::Dm, "PATCH", &sight, Some(body)).await.0
+        }
+    };
+    // By default nothing more until it is dropped.
+    assert_eq!(
+        view(&app, As::Dm, &t).await["party"]["dragSight"],
+        json!({ "mode": "drop", "outsideFights": true, "remember": false })
+    );
+    assert!(dragged(tam_token.clone()).await.is_empty());
+    // Allies live: Wren shows on the way, the Ogre waits for the drop.
+    assert_eq!(rule("allies", true).await, StatusCode::NO_CONTENT);
+    assert_eq!(dragged(tam_token.clone()).await, ["Wren"]);
+    // Everything live: the Ogre too, but not in a fight unless the DM allows it there.
+    assert_eq!(rule("live", true).await, StatusCode::NO_CONTENT);
+    assert_eq!(dragged(tam_token.clone()).await, ["Ogre", "Wren"]);
+    call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/encounter", t.id),
+        None,
+    )
+    .await;
+    assert!(dragged(tam_token.clone()).await.is_empty());
+    assert_eq!(rule("live", false).await, StatusCode::NO_CONTENT);
+    assert_eq!(dragged(tam_token.clone()).await, ["Ogre", "Wren"]);
+    // Only for a token of their own, and only whoever runs the table sets the rule.
+    assert!(dragged(wren_token.clone()).await.is_empty());
+    let body = json!({ "drag": { "mode": "live", "outsideFights": false, "remember": true } });
+    let refused = call(&app, As::Seat(&tam), "PATCH", &sight, Some(body))
+        .await
+        .0;
+    assert_ne!(refused, StatusCode::NO_CONTENT);
+    assert_eq!(rule("peek", false).await, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn tells_a_player_who_loses_sight_of_a_dragged_token_that_it_went() {
+    let (app, state) = host_and_state();
+    let t = table(&app).await;
+    let (tam_seat, tam) = join(&app, &t.invite, "Tam", "user-1").await;
+    let (wren_seat, _) = join(&app, &t.invite, "Wren", "user-2").await;
+    let (_, made) = call(
+        &app,
+        As::Dm,
+        "POST",
+        &format!("/tables/{}/scenes", t.id),
+        Some(json!({ "name": "Cave" })),
+    )
+    .await;
+    let at = format!("/tables/{}/scenes/{}", t.id, made["id"].as_str().unwrap());
+    call(&app, As::Dm, "POST", &format!("{at}/tokens/party"), None).await;
+    let tokens = view(&app, As::Dm, &t).await["scene"]["tokens"].clone();
+    let tam_token = tokens
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["seatId"] == tam_seat.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Both on the near side of a wall in daylight, so Wren sees Tam where Tam stands.
+    for token in tokens.as_array().unwrap() {
+        let id = token["id"].as_str().unwrap();
+        call(
+            &app,
+            As::Dm,
+            "PATCH",
+            &format!("{at}/tokens/{id}"),
+            Some(json!({ "x": 1, "y": 1 })),
+        )
+        .await;
+    }
+    let lighting = json!({
+        "fog": { "mode": "dynamic", "light": "bright", "remember": false },
+        "walls": [{ "id": "w", "a": [350, 0], "b": [350, 700] }],
+        "lights": []
+    });
+    call(
+        &app,
+        As::Dm,
+        "PUT",
+        &format!("{at}/lighting"),
+        Some(lighting),
+    )
+    .await;
+    // Each sees only through their own token.
+    call(
+        &app,
+        As::Dm,
+        "PATCH",
+        &format!("/tables/{}/sight", t.id),
+        Some(json!({ "shared": false })),
+    )
+    .await;
+    let mut events = state.events.listen(&t.id);
+    let wren = [wren_seat.clone()];
+    let drag = |x: i64| json!({ "kind": "drag", "points": [[x, 105]], "tab": "tab-1", "token": tam_token });
+    let seen_by_wren = |text: String| {
+        let text = yuki_vtt_server::events::for_me(text, false, &wren).expect("an event for Wren");
+        serde_json::from_str::<Value>(&text).unwrap()["mark"].clone()
+    };
+    // On the near side Wren watches it go.
+    let mark = format!("/tables/{}/mark", t.id);
+    call(&app, As::Seat(&tam), "POST", &mark, Some(drag(175))).await;
+    let near = seen_by_wren(events.recv().await.unwrap());
+    assert_eq!(near["points"], json!([[175.0, 105.0]]));
+    // Past the wall Wren hears only that it went out of sight, not where.
+    call(&app, As::Seat(&tam), "POST", &mark, Some(drag(455))).await;
+    let far = seen_by_wren(events.recv().await.unwrap());
+    assert_eq!(far["out"], true);
+    assert_eq!(far["points"], json!([]));
+    assert!(far.get("look").is_none());
+    assert_eq!(far["token"], tam_token.as_str());
 }

@@ -97,6 +97,82 @@ const STEPS: &[&str] = &[
     );
     CREATE INDEX explored_by_table ON explored(table_id);
 "#,
+    r#"
+    ALTER TABLE scenes ADD COLUMN folder TEXT;
+"#,
+    r#"
+    ALTER TABLE tables ADD COLUMN prefabs TEXT;
+"#,
+    r#"
+    ALTER TABLE seats ADD COLUMN kind TEXT NOT NULL DEFAULT 'character';
+"#,
+    r#"
+    ALTER TABLE tables ADD COLUMN timer TEXT;
+"#,
+    r#"
+    ALTER TABLE tables ADD COLUMN loot TEXT;
+    ALTER TABLE tables ADD COLUMN journal TEXT;
+"#,
+    r#"
+    ALTER TABLE tables ADD COLUMN music TEXT;
+"#,
+    r#"
+    ALTER TABLE tables ADD COLUMN background TEXT;
+"#,
+    // One library for every table on this host: a picture outlives the table it was uploaded
+    // at, which `table_id` still names.
+    r#"
+    CREATE TABLE library (
+        id TEXT PRIMARY KEY,
+        table_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        width INTEGER NOT NULL,
+        height INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    INSERT INTO library SELECT id, table_id, kind, name, mime, width, height, created_at FROM assets;
+    DROP TABLE assets;
+    ALTER TABLE library RENAME TO assets;
+    CREATE INDEX assets_by_table ON assets(table_id, created_at);
+    CREATE INDEX assets_by_age ON assets(created_at);
+"#,
+    r#"
+    ALTER TABLE assets ADD COLUMN folder TEXT;
+    ALTER TABLE assets ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE assets ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+"#,
+    // The bytes each picture takes; the host fills in older ones from their files at start.
+    r#"
+    ALTER TABLE assets ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
+"#,
+    // Where each picture lives in the readable library folder (`Tokens/Goblin/goblin.png`).
+    r#"
+    ALTER TABLE assets ADD COLUMN file TEXT;
+    ALTER TABLE scenes ADD COLUMN file TEXT;
+"#,
+    // Whether players without an account may join; as before, they may.
+    r#"
+    ALTER TABLE tables ADD COLUMN guests INTEGER NOT NULL DEFAULT 1;
+"#,
+    // When the X-card went up; null while the game goes on.
+    r#"
+    ALTER TABLE tables ADD COLUMN xcard_at INTEGER;
+"#,
+    // What players see while dragging their token, with fog (the website's DragSight); null
+    // is the default.
+    r#"
+    ALTER TABLE tables ADD COLUMN drag_sight TEXT;
+"#,
+    // The map a seat's character went to through a passage; null follows the shown map.
+    r#"
+    ALTER TABLE seats ADD COLUMN scene_id TEXT;
+"#,
+    // A map picture's own grid as lined up (JSON: cell, offsetX, offsetY).
+    r#"
+    ALTER TABLE assets ADD COLUMN grid TEXT;
+"#,
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

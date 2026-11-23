@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MapGrid {
     /// How wide one cell is, in the picture's pixels.
@@ -17,6 +17,23 @@ pub struct MapGrid {
     /// as on a city's streets).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagonals: Option<Diagonals>,
+    /// How the grid lines look; unset keeps the plain light line over a dark one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<GridStyle>,
+}
+
+/// The grid line's look, as the DM sets it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GridStyle {
+    /// The line's colour, `#rrggbb`.
+    pub color: String,
+    /// Line width in screen pixels.
+    pub width: f64,
+    pub opacity: f64,
+    /// Dotted instead of solid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dash: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +116,7 @@ mod tests {
         feet_per_cell: 5,
         show: true,
         diagonals: None,
+        style: None,
     };
 
     #[test]

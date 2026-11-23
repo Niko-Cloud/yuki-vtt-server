@@ -10,7 +10,55 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use sha2::Sha256;
 
-pub const PERMISSIONS: [&str; 5] = ["move-own", "move-any", "tokens", "draw", "templates"];
+/// What the DM lets a player do on the map (the website's SEAT_PERMISSIONS, in its order). A
+/// token's edit, resize, arrange and remove go for the player's own tokens unless "token-any".
+pub const PERMISSIONS: [&str; 16] = [
+    "move-own",
+    "move-any",
+    "token-add",
+    "token-edit",
+    "token-resize",
+    "token-arrange",
+    "token-remove",
+    "token-any",
+    "prop-add",
+    "prop-edit",
+    "prop-remove",
+    "upload",
+    "drawings",
+    "ping",
+    "templates",
+    "notes",
+];
+
+/// A seat's permissions as stored, older broader ones read as what they became ("tokens",
+/// "draw"), each once, in the usual order.
+pub fn upgraded(stored: &[String]) -> Vec<String> {
+    fn wider(p: &str) -> Vec<&str> {
+        match p {
+            "tokens" => vec![
+                "token-add",
+                "token-edit",
+                "token-resize",
+                "token-arrange",
+                "token-remove",
+                "token-any",
+                "prop-add",
+                "prop-edit",
+                "prop-remove",
+                "upload",
+            ],
+            "draw" => vec!["drawings", "ping"],
+            other => vec![other],
+        }
+    }
+    let all: Vec<&str> = stored.iter().flat_map(|p| wider(p)).collect();
+    PERMISSIONS
+        .iter()
+        .filter(|p| all.contains(p))
+        .map(|p| p.to_string())
+        .collect()
+}
 
 /// How long a media pass lets a page load pictures and the live channel.
 pub const MEDIA_PASS_SECONDS: i64 = 60 * 60;
@@ -31,6 +79,8 @@ pub struct Access {
     pub seat_ids: Vec<String>,
     /// What this viewer may do on the map; whoever runs the table may do it all.
     pub permissions: Vec<String>,
+    /// A screen the table watches: a tool-less map that follows the DM, with no character.
+    pub screen: bool,
 }
 
 impl Access {
@@ -149,6 +199,7 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
             name: dm_name,
             seat_ids: vec![],
             permissions: all(),
+            screen: false,
         });
     }
     // A seat by its token, or by its pass; a seat the DM removed takes its passes with it.
@@ -157,14 +208,15 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
         (None, Some(seat_id)) => ("id", seat_id),
         (None, None) => return Err(missing()),
     };
-    let seat: Option<(String, String, String, String)> = db
+    let seat: Option<(String, String, String, String, String)> = db
         .query_row(
-            &format!("SELECT id, role, permissions, snapshot FROM seats WHERE table_id = ?1 AND {column} = ?2"),
+            &format!("SELECT id, role, permissions, snapshot, kind FROM seats WHERE table_id = ?1 AND {column} = ?2"),
             [table_id, &value],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()?;
-    let (seat_id, role, permissions, snapshot) = seat.ok_or_else(missing)?;
+    let (seat_id, role, permissions, snapshot, kind) = seat.ok_or_else(missing)?;
+    let screen = kind == "screen";
     let name = serde_json::from_str::<serde_json::Value>(&snapshot)?["summary"]["name"]
         .as_str()
         .unwrap_or("Guest")
@@ -175,13 +227,20 @@ pub fn at_table(state: &AppState, table_id: &str, credentials: &Credentials) -> 
             name,
             seat_ids: vec![],
             permissions: all(),
+            screen: false,
         });
     }
     Ok(Access {
         role: Role::Player,
         name,
         seat_ids: vec![seat_id],
-        permissions: serde_json::from_str(&permissions)?,
+        // A screen has no rights on the map: it only watches.
+        permissions: if screen {
+            vec![]
+        } else {
+            upgraded(&serde_json::from_str::<Vec<String>>(&permissions)?)
+        },
+        screen,
     })
 }
 

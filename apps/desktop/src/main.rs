@@ -38,6 +38,8 @@ struct Notes {
     /// The website asked, by a link, to pair this computer: its address and the link's token,
     /// until the DM says yes or no in the window.
     link_offer: Option<(String, String)>,
+    /// How the connection looked once hosting started: tunnel, website, upload.
+    connection: Option<yuki_vtt_server::connection::Connection>,
 }
 
 struct TrayLines {
@@ -61,10 +63,13 @@ struct Status {
     link_offer: Option<String>,
     /// Screens with a table open right now.
     screens: usize,
+    connection: Option<yuki_vtt_server::connection::Connection>,
     /// Players waiting for the DM to let them in, at every table.
     requests: Vec<serde_json::Value>,
     tables: Vec<TableCard>,
     data_folder: String,
+    /// Files in the picture library folder the host couldn't take, with why.
+    library_skipped: Vec<String>,
     start_on_open: bool,
     has_tray: bool,
     version: &'static str,
@@ -107,6 +112,7 @@ async fn status(shared: State<'_, Shared>) -> Result<Status, String> {
         pairing_code: notes.pairing_code,
         problem: notes.problem,
         link_offer: notes.link_offer.map(|(site, _)| site),
+        connection: notes.connection,
         screens: running
             .as_ref()
             .map(|r| r.state.events.listeners())
@@ -114,6 +120,16 @@ async fn status(shared: State<'_, Shared>) -> Result<Status, String> {
         requests: running.as_ref().map(waiting).unwrap_or_default(),
         tables: host::tables(&shared.data).unwrap_or_default(),
         data_folder: shared.data.display().to_string(),
+        library_skipped: running
+            .as_ref()
+            .map(|r| {
+                r.state
+                    .skipped
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+            })
+            .unwrap_or_default(),
         start_on_open: start_on_open(&shared),
         has_tray: shared
             .tray
@@ -174,8 +190,10 @@ async fn start(app: &AppHandle) -> Result<(), String> {
     note(&shared, |n| n.starting = false);
     match started {
         Ok(host) => {
+            let address = host.address.clone();
             *running = Some(host);
             refresh_tray(app, true, None, 0);
+            check_connection(app.clone(), address);
             Ok(())
         }
         Err(problem) => {
@@ -184,6 +202,32 @@ async fn start(app: &AppHandle) -> Result<(), String> {
             Err(problem)
         }
     }
+}
+
+// Once the tunnel has its address, a look at the tunnel, the website and the upload, for the
+// window to show (and warn about a slow upload).
+fn check_connection(app: AppHandle, address: Option<tokio::sync::watch::Receiver<Option<String>>>) {
+    note(&app.state::<Shared>(), |n| n.connection = None);
+    tauri::async_runtime::spawn(async move {
+        let mut tunnel = None;
+        if let Some(mut address) = address {
+            let waited = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                loop {
+                    if let Some(url) = address.borrow_and_update().clone() {
+                        return Some(url);
+                    }
+                    if address.changed().await.is_err() {
+                        return None;
+                    }
+                }
+            });
+            tunnel = waited.await.ok().flatten();
+        }
+        let shared = app.state::<Shared>();
+        let website = paired_website(&shared);
+        let found = yuki_vtt_server::connection::check(tunnel.as_deref(), website.as_deref()).await;
+        note(&shared, |n| n.connection = Some(found.clone()));
+    });
 }
 
 async fn stop(app: &AppHandle) {
@@ -453,6 +497,28 @@ fn set_start_on_open(shared: State<'_, Shared>, on: bool) -> Result<(), String> 
     .map_err(|error| format!("Couldn't keep that choice: {error}"))
 }
 
+/// The copies the host keeps of each table, every twenty minutes while it changes.
+#[tauri::command]
+fn open_backups_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
+    let copies = yuki_vtt_server::backup::copies_folder(&shared.data);
+    std::fs::create_dir_all(&copies)
+        .map_err(|error| format!("Couldn't make the backups folder: {error}"))?;
+    app.opener()
+        .open_path(copies.display().to_string(), None::<&str>)
+        .map_err(|error| format!("Couldn't open the folder: {error}"))
+}
+
+/// The picture library, as folders: Tokens, Props, Handouts, Music and Maps.
+#[tauri::command]
+fn open_library_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
+    let library = yuki_vtt_server::library::root(&shared.data);
+    std::fs::create_dir_all(&library)
+        .map_err(|error| format!("Couldn't make the picture library folder: {error}"))?;
+    app.opener()
+        .open_path(library.display().to_string(), None::<&str>)
+        .map_err(|error| format!("Couldn't open the folder: {error}"))
+}
+
 #[tauri::command]
 fn open_data_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
     app.opener()
@@ -644,6 +710,8 @@ fn main() {
             unpair,
             set_start_on_open,
             open_data_folder,
+            open_library_folder,
+            open_backups_folder,
             answer_link,
             answer_request,
             backup_table,

@@ -17,6 +17,11 @@ pub const SECRET: &[u8] = b"shared-with-the-website";
 pub const SITE: &str = "https://yuki.test";
 
 pub fn host() -> Router {
+    host_and_state().0
+}
+
+/// A host, with its state to listen on its live channel.
+pub fn host_and_state() -> (Router, AppState) {
     let config = Config {
         owner_key_hash: ids::hash(KEY),
         website_secret: Some(SECRET.to_vec()),
@@ -24,7 +29,8 @@ pub fn host() -> Router {
         // Its own folder, kept until the test run ends.
         data_dir: tempfile::tempdir().unwrap().keep(),
     };
-    app(AppState::new(db::in_memory().unwrap(), config))
+    let state = AppState::new(db::in_memory().unwrap(), config);
+    (app(state.clone()), state)
 }
 
 /// Who is calling: the DM, a seat, or nobody.
@@ -223,4 +229,26 @@ pub async fn fetch(app: &Router, path: &str) -> (StatusCode, String, usize) {
         .unwrap_or_default();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, kind, bytes.len())
+}
+
+/// A map picture uploaded to the library and laid on a board at its corner: the picture's id.
+pub async fn laid_picture(
+    app: &Router,
+    t: &Table,
+    scene: &str,
+    data: &[u8],
+    (width, height): (u32, u32),
+) -> String {
+    let path = format!(
+        "/tables/{}/assets?kind=map&name=Cave&width={width}&height={height}",
+        t.id
+    );
+    let (status, made) = upload(app, As::Dm, "POST", &path, data).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    let asset = made["id"].as_str().unwrap().to_string();
+    let maps = format!("/tables/{}/scenes/{scene}/maps", t.id);
+    let item = serde_json::json!({ "asset": asset, "x": 0, "y": 0 });
+    let (status, body) = call(app, As::Dm, "POST", &maps, Some(item)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    asset
 }

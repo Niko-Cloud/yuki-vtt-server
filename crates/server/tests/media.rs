@@ -6,6 +6,59 @@ use axum::http::StatusCode;
 use common::*;
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n-not-really-but-the-header-is-right";
+const GIF: &[u8] = b"GIF89a-not-really-but-the-header-is-right";
+const WEBM: &[u8] = b"\x1a\x45\xdf\xa3-not-really-but-the-header-is-right";
+
+#[tokio::test]
+async fn keeps_animated_pictures_and_video() {
+    let app = host();
+    let t = table(&app).await;
+    let add = |kind: &str, name: &str| {
+        format!(
+            "/tables/{}/assets?kind={kind}&name={name}&width=64&height=64",
+            t.id
+        )
+    };
+    let (status, clip) = upload(&app, As::Dm, "POST", &add("token", "Clip"), WEBM).await;
+    assert_eq!(status, StatusCode::OK);
+    let clip = clip["id"].as_str().unwrap().to_string();
+    let (status, anim) = upload(&app, As::Dm, "POST", &add("prop", "Blink"), GIF).await;
+    assert_eq!(status, StatusCode::OK);
+    let anim = anim["id"].as_str().unwrap().to_string();
+    // The library list says which are animated, so the screen can play them.
+    let list = view(&app, As::Dm, &t).await["assets"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mime = |id: &str| {
+        list.iter().find(|a| a["id"] == id).unwrap()["mime"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(mime(&clip), "video/webm");
+    assert_eq!(mime(&anim), "image/gif");
+    // Each is served with its own type.
+    let pass = pass_for(&app, &t.id).await;
+    assert_eq!(
+        fetch(&app, &format!("/tables/{}/assets/{clip}?pass={pass}", t.id))
+            .await
+            .1,
+        "video/webm"
+    );
+    assert_eq!(
+        fetch(&app, &format!("/tables/{}/assets/{anim}?pass={pass}", t.id))
+            .await
+            .1,
+        "image/gif"
+    );
+}
+
+async fn view(app: &axum::Router, who: As<'_>, t: &Table) -> serde_json::Value {
+    call(app, who, "GET", &format!("/tables/{}", t.id), None)
+        .await
+        .1
+}
 
 async fn pass_for(app: &axum::Router, table: &str) -> String {
     let (status, given) = call(

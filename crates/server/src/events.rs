@@ -51,11 +51,52 @@ impl Events {
             .send(json!({ "type": "ping", "ping": ping }).to_string());
     }
 
+    /// A map's picture for screens to fetch now, so it is there the moment the DM shows it.
+    pub fn preload(&self, table_id: &str, preload: Value) {
+        let _ = self
+            .channel(table_id)
+            .send(json!({ "type": "preload", "preload": preload }).to_string());
+    }
+
     /// A ruler or pointer trail on the map, as it goes, not kept.
     pub fn mark(&self, table_id: &str, mark: Value) {
         let _ = self
             .channel(table_id)
             .send(json!({ "type": "mark", "mark": mark }).to_string());
+    }
+
+    /// A token being dragged, as it goes: for those who run the table, and the players of the
+    /// seats given (those who would see it there).
+    pub fn mark_for(&self, table_id: &str, mark: Value, seats: &[String], lost: &[String]) {
+        let seats = seats.join(",");
+        let mut sent = format!("{FOR_SOME}{seats}{FOR_SOME}");
+        // Those who lose sight of it hear only that it went out of their sight.
+        if !lost.is_empty() {
+            let mut out = mark.clone();
+            out["points"] = json!([]);
+            out["out"] = json!(true);
+            if let Some(out) = out.as_object_mut() {
+                out.remove("look");
+            }
+            let out = json!({ "type": "mark", "mark": out });
+            sent.push_str(&format!("{}{FOR_SOME}{out}{FOR_SOME}", lost.join(",")));
+        }
+        sent.push_str(&json!({ "type": "mark", "mark": mark }).to_string());
+        let _ = self.channel(table_id).send(sent);
+    }
+
+    /// The DM's view while "Follow me" is on, for players' maps to follow, not kept.
+    pub fn view(&self, table_id: &str, view: Value) {
+        let _ = self
+            .channel(table_id)
+            .send(json!({ "type": "view", "view": view }).to_string());
+    }
+
+    /// Someone pressed the X-card: every screen shows it at once, with no name.
+    pub fn xcard(&self, table_id: &str) {
+        let _ = self
+            .channel(table_id)
+            .send(json!({ "type": "xcard" }).to_string());
     }
 
     /// How many screens have a table open right now, over all tables.
@@ -98,12 +139,43 @@ pub async fn open(
         return Err(AppError::forbidden("This website may not use this host"));
     }
     let credentials = Credentials::from(&headers, query.pass);
-    access::at_table(&state, &table_id, &credentials)?;
+    let access = access::at_table(&state, &table_id, &credentials)?;
+    let (runs, seats) = (access.runs(), access.seat_ids);
     let events = state.events.listen(&table_id);
-    Ok(upgrade.on_upgrade(move |socket| stream(socket, events)))
+    Ok(upgrade.on_upgrade(move |socket| stream(socket, events, runs, seats)))
 }
 
-async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>) {
+// Around the seats an event is for (whoever runs the table gets it too), before the event;
+// never sent on as it is.
+const FOR_SOME: char = '\u{1}';
+
+// The event as this person gets it, or none when it isn't for them. A drag goes to whoever
+// runs the table and the seats that see it; seats that lost it get its "out of sight" form.
+pub fn for_me(text: String, runs: bool, mine: &[String]) -> Option<String> {
+    let Some(rest) = text.strip_prefix(FOR_SOME) else {
+        return Some(text);
+    };
+    let has = |seats: &str| seats.split(',').any(|s| mine.iter().any(|m| m == s));
+    let parts: Vec<&str> = rest.splitn(4, FOR_SOME).collect();
+    match parts[..] {
+        [seats, event] => (runs || has(seats)).then(|| event.to_string()),
+        [seats, lost, out, event] => {
+            if runs || has(seats) {
+                Some(event.to_string())
+            } else {
+                has(lost).then(|| out.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+async fn stream(
+    socket: WebSocket,
+    mut events: broadcast::Receiver<String>,
+    runs: bool,
+    seats: Vec<String>,
+) {
     let (mut out, mut incoming) = socket.split();
     let mut alive = tokio::time::interval(KEEP_ALIVE);
     alive.tick().await;
@@ -111,6 +183,7 @@ async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>) {
         tokio::select! {
             event = events.recv() => match event {
                 Ok(text) => {
+                    let Some(text) = for_me(text, runs, &seats) else { continue };
                     if out.send(Message::Text(text.into())).await.is_err() { break; }
                 }
                 // Too far behind to tell what was missed: one "change" covers it all.
@@ -129,5 +202,38 @@ async fn stream(socket: WebSocket, mut events: broadcast::Receiver<String>) {
                 Some(Ok(_)) => {}
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod for_some_tests {
+    use super::*;
+
+    #[test]
+    fn sends_an_event_for_some_seats_to_them_and_whoever_runs_the_table_only() {
+        let event = format!("{FOR_SOME}s1,s2{FOR_SOME}{{\"type\":\"mark\"}}");
+        let mine = |seats: &[&str]| seats.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let plain = Some("{\"type\":\"mark\"}".to_string());
+        assert_eq!(for_me(event.clone(), true, &[]), plain);
+        assert_eq!(for_me(event.clone(), false, &mine(&["s2"])), plain);
+        assert_eq!(for_me(event.clone(), false, &mine(&["s3"])), None);
+        // For no seats: whoever runs the table only.
+        let none = format!("{FOR_SOME}{FOR_SOME}{{}}");
+        assert_eq!(for_me(none.clone(), false, &mine(&["s1"])), None);
+        assert_eq!(for_me(none, true, &[]), Some("{}".to_string()));
+        // Seats that lost sight of it get the other form.
+        let lost = format!("{FOR_SOME}s1{FOR_SOME}s3{FOR_SOME}{{\"out\":true}}{FOR_SOME}{{}}");
+        assert_eq!(
+            for_me(lost.clone(), false, &mine(&["s1"])),
+            Some("{}".to_string())
+        );
+        assert_eq!(for_me(lost.clone(), true, &[]), Some("{}".to_string()));
+        assert_eq!(
+            for_me(lost.clone(), false, &mine(&["s3"])),
+            Some("{\"out\":true}".to_string())
+        );
+        assert_eq!(for_me(lost, false, &mine(&["s4"])), None);
+        // Any other event goes to everyone as it is.
+        assert_eq!(for_me("{}".into(), false, &[]), Some("{}".to_string()));
     }
 }

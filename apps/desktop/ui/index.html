@@ -25,6 +25,8 @@
           </div>
         </div>
         <button id="toggle" type="button" class="button button--main" disabled>Start hosting</button>
+        <p id="connection" class="muted" hidden></p>
+        <p id="slow" class="notice" role="status" hidden></p>
         <p id="problem" class="problem" hidden></p>
       </section>
 
@@ -88,6 +90,11 @@
         </p>
         <p id="notice" class="notice" role="status" hidden></p>
         <button id="restore" type="button" class="link">Restore a table from a backup</button>
+        <button id="backups" type="button" class="link">Open the table copies</button>
+        <p class="muted">
+          While hosting, the app keeps a copy of each table every twenty minutes it changes, the
+          last ten of each. Restore one above if a night goes wrong.
+        </p>
       </section>
 
       <footer class="foot">
@@ -95,6 +102,13 @@
           <input id="start-on-open" type="checkbox" />
           <span>Start hosting when this app opens</span>
         </label>
+        <button id="library" type="button" class="link">Open the picture library</button>
+        <p class="muted">
+          Tokens, props, handouts, music and maps, one folder each. Copy pictures into a folder
+          (one folder per token is tidiest) and they join the library; rename or delete them
+          there and the tables follow.
+        </p>
+        <p id="library-skipped" class="notice" role="status" hidden></p>
         <button id="folder" type="button" class="link">Open the data folder</button>
         <p class="muted">
           Players reach this computer through a Cloudflare tunnel. The connection is encrypted,

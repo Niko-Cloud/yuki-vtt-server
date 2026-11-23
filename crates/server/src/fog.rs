@@ -5,9 +5,7 @@
 use crate::access::{self, Access};
 use crate::error::{AppError, Result};
 use crate::ids;
-use crate::maps::{
-    self, Fog, Light, Note, TableMap, Wall, active_scene, credentials, edit, not_allowed,
-};
+use crate::maps::{self, Fog, Light, Note, TableMap, Wall, allow, credentials, edit, not_allowed};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -43,15 +41,32 @@ fn short_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 40
 }
 
+/// A fog colour is `#rrggbb`, like the website's; none means the default dark.
+fn fog_color_ok(color: &Option<String>) -> bool {
+    color.as_ref().is_none_or(|c| {
+        c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+    })
+}
+
 impl Lighting {
     fn check(&self) -> Result<()> {
         let fog = ["off", "dynamic"].contains(&self.fog.mode.as_str())
-            && ["bright", "dark"].contains(&self.fog.light.as_str());
-        let walls = self.walls.len() <= MOST_WALLS
+            && ["bright", "dark"].contains(&self.fog.light.as_str())
+            && fog_color_ok(&self.fog.color)
             && self
-                .walls
-                .iter()
-                .all(|w| short_id(&w.id) && on_map(w.a[0], w.a[1]) && on_map(w.b[0], w.b[1]));
+                .fog
+                .layer
+                .as_deref()
+                .is_none_or(|l| l == "single" || l == "stacked");
+        let walls = self.walls.len() <= MOST_WALLS
+            && self.walls.iter().all(|w| {
+                short_id(&w.id)
+                    && on_map(w.a[0], w.a[1])
+                    && on_map(w.b[0], w.b[1])
+                    && w.kind
+                        .as_deref()
+                        .is_none_or(|k| k == "curtain" || k == "one-way")
+            });
         let lights = self.lights.len() <= MOST_LIGHTS
             && self.lights.iter().all(|l| {
                 short_id(&l.id)
@@ -169,6 +184,9 @@ pub struct NewNote {
     text: String,
     #[serde(default)]
     shared: bool,
+    /// Moved notes are pinned again: they stay on the map picture they were attached to.
+    #[serde(default, rename = "attachedTo")]
+    attached_to: Option<String>,
 }
 
 pub async fn add_note(
@@ -177,7 +195,20 @@ pub async fn add_note(
     Path((id, scene)): Path<(String, String)>,
     Json(body): Json<NewNote>,
 ) -> Result<StatusCode> {
-    let access = access::runner(&state, &id, &credentials(&headers))?;
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
+    allow(access.may("notes"), "pin notes")?;
+    // A player's note is for everyone, and says whose it is.
+    let by = if access.runs() {
+        None
+    } else {
+        Some(
+            access
+                .seat_ids
+                .first()
+                .cloned()
+                .ok_or_else(|| AppError::forbidden("Only a seat pins notes"))?,
+        )
+    };
     let text = body.text.trim().to_string();
     if text.is_empty() || text.chars().count() > 500 || !on_map(body.x, body.y) {
         return Err(AppError::bad("A note is 1 to 500 letters, on the map"));
@@ -187,7 +218,9 @@ pub async fn add_note(
         x: body.x,
         y: body.y,
         text,
-        shared: body.shared,
+        shared: body.shared || by.is_some(),
+        by,
+        attached_to: body.attached_to.filter(|a| !a.is_empty() && a.len() <= 40),
     };
     edit(&state, &access, &id, &scene, |mut map| {
         map.notes.push(note);
@@ -202,19 +235,50 @@ pub async fn remove_note(
     headers: HeaderMap,
     Path((id, scene, note)): Path<(String, String, String)>,
 ) -> Result<StatusCode> {
-    let access = access::runner(&state, &id, &credentials(&headers))?;
+    let access = access::at_table(&state, &id, &credentials(&headers))?;
     edit(&state, &access, &id, &scene, |mut map| {
+        // Whoever runs the table takes any off; a player only one they pinned.
+        if !access.runs() {
+            let theirs = map.notes.iter().any(|n| {
+                n.id == note && n.by.as_ref().is_some_and(|by| access.seat_ids.contains(by))
+            });
+            allow(theirs, "take that note off")?;
+        }
         map.notes.retain(|n| n.id != note);
         Ok(map)
     })
 }
 
+/// The table's sight rules; only what is sent changes.
 #[derive(Deserialize)]
 pub struct Sight {
-    shared: bool,
+    shared: Option<bool>,
+    drag: Option<DragSight>,
 }
 
-/// With fog, whether each player sees through every party token or only their own.
+/// What players see while dragging their token (the website's DragSight): only once it is
+/// dropped ("drop"), allies coming into view ("allies"), or all its sight as it goes ("live");
+/// live only outside a fight if `outside_fights`, and what is glimpsed explored if `remember`.
+#[derive(Deserialize, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DragSight {
+    pub mode: String,
+    pub outside_fights: bool,
+    pub remember: bool,
+}
+
+impl Default for DragSight {
+    fn default() -> Self {
+        Self {
+            mode: "drop".into(),
+            outside_fights: true,
+            remember: false,
+        }
+    }
+}
+
+/// With fog, whether each player sees through every party token or only their own, and what
+/// they see while dragging their token.
 pub async fn set_sight(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -222,12 +286,39 @@ pub async fn set_sight(
     Json(body): Json<Sight>,
 ) -> Result<StatusCode> {
     access::runner(&state, &id, &credentials(&headers))?;
-    state.db().execute(
-        "UPDATE tables SET shared_sight = ?2 WHERE id = ?1",
-        params![id, body.shared],
-    )?;
+    let db = state.db();
+    if let Some(shared) = body.shared {
+        db.execute(
+            "UPDATE tables SET shared_sight = ?2 WHERE id = ?1",
+            params![id, shared],
+        )?;
+    }
+    if let Some(drag) = body.drag {
+        if !["drop", "allies", "live"].contains(&drag.mode.as_str()) {
+            return Err(AppError::bad(
+                "Sight while dragging is drop, allies or live",
+            ));
+        }
+        db.execute(
+            "UPDATE tables SET drag_sight = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(&drag)?],
+        )?;
+    }
+    drop(db);
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The table's rule for sight while dragging (the default when none is set, or it can't be read).
+pub fn drag_sight(db: &Connection, table_id: &str) -> Result<DragSight> {
+    let stored: Option<String> = db.query_row(
+        "SELECT drag_sight FROM tables WHERE id = ?1",
+        [table_id],
+        |row| row.get(0),
+    )?;
+    Ok(stored
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default())
 }
 
 /// Whether the table shares the party's sight.
@@ -240,7 +331,7 @@ pub fn shared_sight(db: &Connection, table_id: &str) -> Result<bool> {
 }
 
 /// A map as players get it: without the DM's layer (hidden tokens and drawings, notes).
-pub fn for_players(scene: &mut Value) {
+pub fn for_players(scene: &mut Value, looking: &crate::sight::Looking) {
     if let Some(tokens) = scene["tokens"].as_array_mut() {
         tokens.retain(|t| t["hidden"] != json!(true));
     }
@@ -250,11 +341,14 @@ pub fn for_players(scene: &mut Value) {
     if let Some(templates) = scene["templates"].as_array_mut() {
         templates.retain(|t| t["hidden"] != json!(true));
     }
-    // A name the DM keeps off the map isn't sent either.
+    // A name the DM keeps off the map isn't sent either, nor a screen-reader description.
     if let Some(tokens) = scene["tokens"].as_array_mut() {
         for t in tokens {
             if t["nameHidden"] == json!(true) {
                 t["name"] = json!("Unknown");
+            }
+            if let Some(object) = t.as_object_mut() {
+                object.remove("description");
             }
         }
     }
@@ -272,9 +366,27 @@ pub fn for_players(scene: &mut Value) {
             !map.hand_fogged(middle_of(&map, &token))
         });
     }
+    // With dynamic fog, a token this player can't see right now isn't sent at all: hiding it on
+    // screen alone would still let anyone reading the page find it.
+    if let Ok(map) = serde_json::from_value::<TableMap>(scene.clone())
+        && map.fog.mode == "dynamic"
+    {
+        let shown = crate::sight::shown_ids(&map, looking);
+        if let Some(tokens) = scene["tokens"].as_array_mut() {
+            tokens.retain(|t| {
+                t["id"]
+                    .as_str()
+                    .is_some_and(|id| shown.iter().any(|s| s == id))
+            });
+        }
+    }
     // Only notes the DM lets players read.
     if let Some(notes) = scene["notes"].as_array_mut() {
         notes.retain(|n| n["shared"] == json!(true));
+    }
+    // Hidden passages are the DM's to know of.
+    if let Some(passages) = scene["passages"].as_array_mut() {
+        passages.retain(|p| p["hidden"] != json!(true));
     }
     // A closed secret door is a wall to players; an open one an open door, its secret kept.
     if let Some(walls) = scene["walls"].as_array_mut() {
@@ -292,7 +404,7 @@ pub fn for_players(scene: &mut Value) {
 }
 
 // Explored cells as text: each row's runs, like "3:0-5,8-9;4:1-2", as the website packs them.
-fn unpack(text: &str) -> BTreeSet<(u32, u32)> {
+pub(crate) fn unpack(text: &str) -> BTreeSet<(u32, u32)> {
     let mut cells = BTreeSet::new();
     for row in text.split(';') {
         let Some((y, runs)) = row.split_once(':') else {
@@ -313,7 +425,7 @@ fn unpack(text: &str) -> BTreeSet<(u32, u32)> {
     cells
 }
 
-fn pack(cells: &BTreeSet<(u32, u32)>) -> String {
+pub(crate) fn pack(cells: &BTreeSet<(u32, u32)>) -> String {
     let mut rows: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for &(x, y) in cells {
         rows.entry(y).or_default().push(x);
@@ -343,7 +455,9 @@ fn pack(cells: &BTreeSet<(u32, u32)>) -> String {
 
 // Players reach only the map everyone sees, never the DM's others.
 fn reach(db: &Connection, access: &Access, table_id: &str, scene_id: &str) -> Result<TableMap> {
-    if !access.runs() && active_scene(db, table_id)?.as_deref() != Some(scene_id) {
+    if !access.runs()
+        && crate::passages::scene_for(db, access, table_id)?.as_deref() != Some(scene_id)
+    {
         return Err(AppError::not_found("That map is gone"));
     }
     maps::load(db, table_id, scene_id)

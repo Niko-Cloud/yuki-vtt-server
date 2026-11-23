@@ -156,12 +156,22 @@ pub async fn delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
     access::owner(&state, &credentials(&headers))?;
-    found(
-        state
-            .db()
-            .execute("DELETE FROM tables WHERE id = ?1", [&id])?,
-    )?;
-    crate::pictures::forget_table(&state, &id);
+    let maps = {
+        let db = state.db();
+        let mut rows = db.prepare("SELECT id, file FROM scenes WHERE table_id = ?1")?;
+        let maps = rows
+            .query_map([&id], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, Option<String>)>>>()?;
+        found(db.execute("DELETE FROM tables WHERE id = ?1", [&id])?)?;
+        maps
+    };
+    for (scene, _) in &maps {
+        crate::served::forget(&state.config.data_dir, scene);
+    }
+    crate::pictures::forget_table(
+        &state,
+        maps.into_iter().filter_map(|(_, file)| file).collect(),
+    );
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -249,6 +259,27 @@ pub async fn lock(
     found(state.db().execute(
         "UPDATE tables SET locked = ?2 WHERE id = ?1",
         params![id, body.locked],
+    )?)?;
+    state.events.changed(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct Guests {
+    guests: bool,
+}
+
+/// `PATCH /api/tables/{id}/guests`: whether players without an account may join.
+pub async fn set_guests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Guests>,
+) -> Result<StatusCode> {
+    access::owner(&state, &credentials(&headers))?;
+    found(state.db().execute(
+        "UPDATE tables SET guests = ?2 WHERE id = ?1",
+        params![id, body.guests],
     )?)?;
     state.events.changed(&id);
     Ok(StatusCode::NO_CONTENT)
@@ -479,10 +510,10 @@ pub async fn party(
 ) -> Result<Json<Value>> {
     let access = access::runner(&state, &id, &credentials(&headers))?;
     let db = state.db();
-    let (locked, banned, ask_to_join): (bool, String, bool) = db.query_row(
-        "SELECT locked, banned, ask_to_join FROM tables WHERE id = ?1",
+    let (locked, banned, ask_to_join, guests): (bool, String, bool, bool) = db.query_row(
+        "SELECT locked, banned, ask_to_join, guests FROM tables WHERE id = ?1",
         [&id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     let mut rows =
         db.prepare("SELECT id, role, snapshot FROM seats WHERE table_id = ?1 ORDER BY created_at")?;
@@ -511,6 +542,8 @@ pub async fn party(
     Ok(Json(json!({
         "you": access.role,
         "locked": locked,
+        // Whether players without an account may join.
+        "guests": guests,
         // Newcomers wait for the DM to let them in, and these are waiting.
         "askToJoin": ask_to_join,
         "requests": crate::requests::waiting(&db, &id)?,
