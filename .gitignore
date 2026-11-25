@@ -1,5 +1,6 @@
 /target
 /data
+/dev-data
 node_modules
 *.db
 *.db-*
